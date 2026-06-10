@@ -6,10 +6,12 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
 import dev.hyphen.android.discovery.DiscoveryEvent
 import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
+import dev.hyphen.android.discovery.ScopedMulticastLock
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
 // real UI task (plan §7.2). One tap runs one discovery window (HYP-M1-004).
@@ -45,6 +47,9 @@ class MainActivity : Activity() {
         val m = DiscoveryManager(
             backend = AndroidNsdBackend(applicationContext),
             scheduler = HandlerScheduler(),
+            lock = ScopedMulticastLock(AndroidMulticastLockHandle(applicationContext)) {
+                append("multicast lock: $it")
+            },
             onEvent = ::render,
         )
         manager = m
