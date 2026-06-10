@@ -125,7 +125,7 @@ gantt
 |---|---|---|---|---|---|---|---|
 | HYP-M1-001 | `[x]` | P0 | Android LAN | Create Android sample app skeleton | HYP-M0-002 | Builds on local machine/CI where Android available | `./gradlew assembleDebug` |
 | HYP-M1-002 | `[x]` | P0 | Android LAN | Implement `LocalNetworkAccessController` abstraction | HYP-M1-001 | API exposes granted/denied/unknown and rationale state | Unit tests |
-| HYP-M1-003 | `[ ]` | P0 | Android LAN | Add Android 16 restricted LAN test plan | HYP-M1-002 | Steps documented with expected results | Manual test log |
+| HYP-M1-003 | `[x]` | P0 | Android LAN | Add Android 16 restricted LAN test plan | HYP-M1-002 | Steps documented with expected results | Manual test log |
 | HYP-M1-004 | `[ ]` | P0 | Android LAN | Implement NSD/mDNS discovery PoC | HYP-M1-001 | Can discover Mac test service on same LAN | Manual test |
 | HYP-M1-005 | `[ ]` | P0 | Android LAN | Implement scoped MulticastLock manager | HYP-M1-004 | Lock acquired only during discovery window and always released | Unit/log test |
 | HYP-M1-006 | `[ ]` | P0 | Android LAN | Implement QR/manual endpoint fallback PoC | HYP-M1-002 | Connects when mDNS disabled | Manual test |
@@ -352,7 +352,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
 | M0 Scope/Ops | 10 | 0 | 0 | 5 |
-| M1 Platform PoCs | 2 | 0 | 0 | 13 |
+| M1 Platform PoCs | 3 | 0 | 0 | 12 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
 | M4 Beta Hardening | 0 | 0 | 0 | 12 |
@@ -375,3 +375,4 @@ Update this summary after each milestone review.
 - 2026-06-10 — HYP-M0-010 `[x]` — Drafted `docs/adr/0004-distribution-tracks.md`: four tracks (GitHub / F-Droid / Play / macOS-notarized) with goals and first-release targets; five track invariants (protocol compat, ADR-0003 permission ceiling, no dark divergence, one version, no telemetry anywhere); GitHub-first sequencing with Gate E cut rule; signing/integrity plan; external account gates (Apple Developer, Play account, F-Droid queue) explicitly separated from local prep so they block only `[?]`-marked release tasks. **All 10 M0 P0 tasks now done — next loop iterations enter M1 platform-risk PoCs.** `./scripts/check.sh` green.
 - 2026-06-10 — HYP-M1-001 `[x]` — Android app skeleton at `apps/android`: Gradle 8.14.3 (wrapper bootstrapped from locally cached dist), AGP 8.13.0, Kotlin 2.3.21, single `:app` module, minSdk 26 / compileSdk+targetSdk 36 (ADR-0003), `allowBackup=false` (trust-store material never enters backups), plain-Activity zero-androidx skeleton — Compose deliberately deferred to the first UI-bearing PoC task. `local.properties` gitignored. Verified: `./gradlew assembleDebug test` BUILD SUCCESSFUL (APK 872KB, smoke unit test green); `./scripts/check.sh` Android hook now runs Gradle tests and passes.
 - 2026-06-10 — HYP-M1-002 `[x]` — `dev.hyphen.android.lan.LocalNetworkAccessController` in `:app`: pure-Kotlin logic behind `LanPermissionProbe`/`PermissionRequestTracker` interfaces (JVM-testable, no Robolectric). Exposes `LanAccessStatus(state ∈ GRANTED/DENIED/UNKNOWN, shouldShowRationale, platformGated)`; models the Android subtlety that granted=false+rationale=false means UNKNOWN before first request but permanent DENIED after (persisted asked-bit). `availableCapabilities()` enforces the ADR-0003 deny-tolerant invariant: QR_MANUAL_PAIRING in every state; MDNS_DISCOVERY/LAN_CONNECT only when GRANTED. SDK 37 (`ACCESS_LOCAL_NETWORK`) threshold as named constant; pre-37 reports GRANTED+platformGated=false. Verified: 8 unit tests, 0 failures (test-results XML checked). Real Context-backed probe lands with the discovery PoC (HYP-M1-004).
+- 2026-06-10 — HYP-M1-003 `[x]` — `docs/test-plans/android-16-restricted-lan.md`: 8 test cases with steps + expected results, each tagged with the task that activates it (TC-1..6 pend M1-004/005/006 features; TC-7 runnable now; TC-8 blocked on Android 17 preview image). Encodes the key distinction: A16 restricted mode is behavioral blocking invisible to the permission API (controller correctly says GRANTED/platformGated=false) vs SDK 37 real permission — both degradation paths must pass. Compat-flag adb commands included with verify-on-device caveat. Gate A pass criteria + execution log template. Plan-only by design: execution needs a physical/emulated A16 device and pending PoCs — documented, not a task blocker.
