@@ -3,6 +3,7 @@ package dev.hyphen.android
 import android.app.Activity
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -12,6 +13,9 @@ import dev.hyphen.android.discovery.DiscoveryEvent
 import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
+import dev.hyphen.android.pairing.EndpointConnectProbe
+import dev.hyphen.android.pairing.EndpointParser
+import dev.hyphen.android.pairing.ParseResult
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
 // real UI task (plan §7.2). One tap runs one discovery window (HYP-M1-004).
@@ -33,14 +37,46 @@ class MainActivity : Activity() {
             setOnClickListener { startWindow() }
         }
 
+        // Manual-endpoint fallback path (HYP-M1-006): works with mDNS
+        // disabled or the LAN permission denied.
+        val endpointInput = EditText(this).apply {
+            hint = "Manual endpoint host:port"
+        }
+        val connectButton = Button(this).apply {
+            text = "Test manual endpoint"
+            setOnClickListener { probeManualEndpoint(endpointInput.text.toString()) }
+        }
+
         setContentView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(48, 96, 48, 48)
                 addView(button)
+                addView(endpointInput)
+                addView(connectButton)
                 addView(ScrollView(this@MainActivity).apply { addView(log) })
             }
         )
+    }
+
+    private fun probeManualEndpoint(raw: String) {
+        when (val parsed = EndpointParser.parseManual(raw)) {
+            is ParseResult.Rejected -> append("endpoint rejected: ${parsed.reason}")
+            is ParseResult.Ok -> {
+                append("probing ${parsed.endpoint.host}:${parsed.endpoint.port} …")
+                Thread {
+                    val result = EndpointConnectProbe().probe(parsed.endpoint)
+                    runOnUiThread {
+                        when (result) {
+                            is EndpointConnectProbe.Result.Connected ->
+                                append("connected: ${result.host}:${result.port}")
+                            is EndpointConnectProbe.Result.Failed ->
+                                append("connect failed: ${result.reason}")
+                        }
+                    }
+                }.start()
+            }
+        }
     }
 
     private fun startWindow() {
