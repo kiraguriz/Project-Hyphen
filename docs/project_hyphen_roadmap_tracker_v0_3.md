@@ -88,9 +88,9 @@ gantt
 
 | Gate | Target | Status | Pass criteria | If failed |
 |---|---:|---|---|---|
-| G-A LAN/discovery survivability | 2026-07-20 | `[ ]` | mDNS works when available; QR/manual succeeds when mDNS fails; Android restricted LAN behavior understood | Make QR/manual the primary pairing UX |
-| G-B Companion API viability | 2026-07-20 | `[ ]` | API 26–35 and API 36+ adapters compile and have PoC behavior | Use conservative background model and reduce always-connected promise |
-| G-C macOS wake recovery | 2026-07-27 | `[ ]` | Wake triggers reconnect state machine; failure surfaced within 30s | Delay Beta; focus on reliability before features |
+| G-A LAN/discovery survivability | 2026-07-20 | `[~]` | mDNS works when available; QR/manual succeeds when mDNS fails; Android restricted LAN behavior understood | Make QR/manual the primary pairing UX |
+| G-B Companion API viability | 2026-07-20 | `[x]` | API 26–35 and API 36+ adapters compile and have PoC behavior | Use conservative background model and reduce always-connected promise |
+| G-C macOS wake recovery | 2026-07-27 | `[~]` | Wake triggers reconnect state machine; failure surfaced within 30s | Delay Beta; focus on reliability before features |
 | G-D Notification thesis | 2026-09-15 | `[ ]` | 10-app matrix passes mirror/update/remove; duplicate rate acceptable | Remove Quick Reply from v1; keep mirror/dismiss |
 | G-E Distribution feasibility | 2026-11-24 | `[ ]` | notarization dry run, Play/F-Droid package plan, privacy docs | Ship GitHub first; defer Play |
 | G-F v1 Reliability | 2027-03-01 | `[ ]` | crash-free beta sessions ≥99%; 1GB resume works; wake reconnect works | Cut P1/P2 breadth |
@@ -137,7 +137,7 @@ gantt
 | HYP-M1-012 | `[x]` | P0 | macOS LNP | Add Local Network Privacy onboarding copy | HYP-M1-011 | Prompt is triggered only after user action | Manual test |
 | HYP-M1-013 | `[x]` | P0 | macOS Wake | Implement wake/sleep observer PoC | HYP-M1-010 | Logs sleep/wake and starts reconnect attempt | Manual test |
 | HYP-M1-014 | `[x]` | P0 | macOS Wake | Implement reconnect state machine prototype | HYP-M1-013 | 1s/5s/15s/30s retry schedule exists | Unit tests |
-| HYP-M1-015 | `[ ]` | P0 | Gate | Write M1 findings report | HYP-M1-001..014 | Go/cut decisions documented | Gate review |
+| HYP-M1-015 | `[x]` | P0 | Gate | Write M1 findings report | HYP-M1-001..014 | Go/cut decisions documented | Gate review |
 
 ---
 
@@ -352,7 +352,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
 | M0 Scope/Ops | 10 | 0 | 0 | 5 |
-| M1 Platform PoCs | 11 | 0 | 3 | 1 |
+| M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
 | M4 Beta Hardening | 0 | 0 | 0 | 12 |
@@ -387,3 +387,4 @@ Update this summary after each milestone review.
 - 2026-06-10 — HYP-M1-012 `[x]` — Explain-first LNP onboarding: `LocalNetworkOnboardingGate` (AppKit-free, in HyphenDiscovery) wraps every local-network-touching action — already-explained runs straight through; otherwise the explanation presents and only "Continue" persists the flag and runs the action; declining persists nothing so the explanation returns next attempt. `LocalNetworkCopy` carries the dialog text (paired-devices-only, direct connections, no internet scanning, QR/manual fallback, System Settings recovery path); canonical copy + denial/repair state table + 5-step on-device verification script in `docs/copy/macos-local-network-onboarding.md`. Advertising toggle in the app now routes through the gate via NSAlert. Verified: 4 gate unit tests (immediate-when-explained, accept-persists, decline-persists-nothing, copy-promise regression guard); 8 macOS tests green; `check.sh` green. OS-prompt timing observation steps documented for the manual session.
 - 2026-06-10 — HYP-M1-013 `[x]` — `HyphenPower` target: `SleepWakeObserver` over an injected `NotificationCenter` (production: `NSWorkspace.shared.notificationCenter`; tests post the real `NSWorkspace.willSleep/didWake` names) with ordered local event log, idempotent start/stop, and a `ReconnectTrigger` seam fired exactly once per wake — HYP-M1-014's state machine plugs in there. App wires a `LoggingReconnectTrigger` (NSLog + menu state line "Woke — reconnect pending"). Verified: 5 unit tests; one test initially failed because an unretained observer was deallocated under its weak handlers — fixed with `withExtendedLifetime`, a real API hazard now documented in the test. 13 macOS tests green; `check.sh` green. Hardware sleep cycles deliberately not run autonomously (would sleep the user's machine); they're M4-007's dedicated 20-cycle test.
 - 2026-06-10 — HYP-M1-014 `[x]` — `ReconnectStateMachine` in HyphenPower (conforms to `ReconnectTrigger`, replacing the M1-013 placeholder in the app): states idle/connecting/connected/waitingRetry(attempt,delay)/sleeping/suspended; `backoffSchedule == [1,5,15,30]` as a named constant (the row's acceptance literal), capping repeated failures at 30s; success and wake both reset to a fresh schedule (wake's first recovery attempt at 1s per plan §8.4); sleep cancels pending retries and late-fired cancelled timers are ignored; suspend blocks all events until resume; lost-while-waiting never stacks timers. `RetryScheduler` seam + `DispatchRetryScheduler` for production; `startConnect` callback is where M2 transport (HYP-M2-007) plugs in. Verified: 9 unit tests incl. exact delay-sequence walk [1,5,15,30,30,30]; 22 macOS tests green.
+- 2026-06-10 — HYP-M1-015 `[x]` — **M1 closed.** `docs/reports/m1-findings.md`: conditional GO to M2; gate table updated — G-B `[x]` PASS (written criteria met 40 days early), G-A/G-C `[~]` conditional pass with residuals named; 11 durable findings (UNKNOWN-vs-permanent-denial, A16 invisibility to permission API, NsdManager serialization, emulator-NAT hardware requirement, app-driven self-managed presence, SwiftPM-only viability, injected-center testability + ARC hazard, schedule semantics, cross-platform service-type pinning, withheld deps); 6 decisions queued for ADR-0002; consolidated ~2h single-sitting device checklist that flips M1-004/006/007 and runs all pending test plans. M1 final: 12 done, 3 device-blocked, 0 open.
