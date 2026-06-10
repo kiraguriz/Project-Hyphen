@@ -107,7 +107,7 @@ gantt
 | HYP-M0-004 | `[x]` | P0 | Agent | Add `CLAUDE.md` with repo rules, test commands, forbidden actions | HYP-M0-002 | Claude Code can orient from repo root | `claude -p "summarize repo rules"` |
 | HYP-M0-005 | `[x]` | P0 | CI | Create `scripts/check.sh` placeholder that runs available checks | HYP-M0-002 | Script exits 0 and explains missing platform checks | `./scripts/check.sh` |
 | HYP-M0-006 | `[x]` | P0 | CI | Add GitHub Actions skeleton for docs/protocol checks | HYP-M0-005 | CI runs markdown/schema checks | GitHub Actions local/dry run |
-| HYP-M0-007 | `[ ]` | P0 | Protocol | Create `docs/protocol/hyphen-protocol-v0.md` | HYP-M0-001 | Contains envelope, pairing, capability, errors | Manual review |
+| HYP-M0-007 | `[x]` | P0 | Protocol | Create `docs/protocol/hyphen-protocol-v0.md` | HYP-M0-001 | Contains envelope, pairing, capability, errors | Manual review |
 | HYP-M0-008 | `[ ]` | P0 | Security | Create `docs/protocol/threat-model.md` | HYP-M0-007 | Covers LAN spoofing, MITM, notification privacy, diagnostics | Manual review |
 | HYP-M0-009 | `[ ]` | P0 | Policy | Draft `docs/adr/0003-android-permission-model.md` | HYP-M0-001 | Covers Local Network, FGS, notification listener, no SMS v1 | Manual review |
 | HYP-M0-010 | `[ ]` | P0 | Distribution | Draft `docs/adr/0004-distribution-tracks.md` | HYP-M0-001 | GitHub/F-Droid/Play/macOS tracks separated | Manual review |
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 6 | 0 | 0 | 9 |
+| M0 Scope/Ops | 7 | 0 | 0 | 8 |
 | M1 Platform PoCs | 0 | 0 | 0 | 15 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
@@ -369,3 +369,4 @@ Update this summary after each milestone review.
 - 2026-06-10 — HYP-M0-004 `[x]` — Added root `CLAUDE.md`: source-of-truth order, agent task-selection rule, check/test command table (with honest "planned" status), forbidden actions (cloud relay, default telemetry, SMS/Call Log, Accessibility, GPL copying, secrets, destructive commands, unlicensed deps), and core conventions (sbn key identity, discovery≠trust). Verified by structural review; `claude -p` smoke test skipped inside the autonomous loop to avoid a nested interactive session — runnable manually anytime.
 - 2026-06-10 — HYP-M0-005 `[x]` — Added executable `scripts/check.sh`: real markdown relative-link check and secret-pattern scan run today; Android/macOS/protocol checks print `SKIP` with the exact pending task ID (HYP-M1-001/HYP-M1-010/HYP-M2-001) and auto-activate once those projects exist. Verified: `./scripts/check.sh` exits 0 with links OK, secrets OK, 3 explained SKIPs. CLAUDE.md command table updated to match.
 - 2026-06-10 — HYP-M0-006 `[x]` — Added `.github/workflows/checks.yml`: single least-privilege job (`permissions: contents: read`) running `./scripts/check.sh` on push/PR. Workflows must live in `.github/workflows/` (GitHub requirement); `ci/` stays reserved for helper configs. Verified locally: YAML parses (ruby), `bash -n` clean, job body runs green. Caveat: hosted run pends first push to GitHub — push is user-initiated by repo rule, not a task blocker.
+- 2026-06-10 — HYP-M0-007 `[x]` — Created `docs/protocol/hyphen-protocol-v0.md` covering all four required areas: envelope (field table + semantics), pairing (QR URI format, transcript, SAS = SHA-256 transcript hash mod 10^6, both-sides confirmation), capability negotiation (hello/intersection/forward-compat rules), error taxonomy (protocol/transport/trust/permission/plugin codes). v0 decisions made explicit: length-prefixed JSON framing with 4 MiB cap, SPKI pinning (not cert pinning), base64 chunks in-envelope, heartbeat 10s/2-miss degraded, resume tokens single-use/10min. Open questions listed for M2 ADRs. `./scripts/check.sh` green.
