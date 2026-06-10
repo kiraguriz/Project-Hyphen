@@ -109,7 +109,7 @@ gantt
 | HYP-M0-006 | `[x]` | P0 | CI | Add GitHub Actions skeleton for docs/protocol checks | HYP-M0-005 | CI runs markdown/schema checks | GitHub Actions local/dry run |
 | HYP-M0-007 | `[x]` | P0 | Protocol | Create `docs/protocol/hyphen-protocol-v0.md` | HYP-M0-001 | Contains envelope, pairing, capability, errors | Manual review |
 | HYP-M0-008 | `[x]` | P0 | Security | Create `docs/protocol/threat-model.md` | HYP-M0-007 | Covers LAN spoofing, MITM, notification privacy, diagnostics | Manual review |
-| HYP-M0-009 | `[ ]` | P0 | Policy | Draft `docs/adr/0003-android-permission-model.md` | HYP-M0-001 | Covers Local Network, FGS, notification listener, no SMS v1 | Manual review |
+| HYP-M0-009 | `[x]` | P0 | Policy | Draft `docs/adr/0003-android-permission-model.md` | HYP-M0-001 | Covers Local Network, FGS, notification listener, no SMS v1 | Manual review |
 | HYP-M0-010 | `[ ]` | P0 | Distribution | Draft `docs/adr/0004-distribution-tracks.md` | HYP-M0-001 | GitHub/F-Droid/Play/macOS tracks separated | Manual review |
 | HYP-M0-011 | `[ ]` | P1 | Distribution | Create `packaging/macos/notarization-notes.md` | HYP-M0-010 | Developer ID/notary requirements listed | Manual review |
 | HYP-M0-012 | `[ ]` | P1 | Distribution | Create `packaging/android-play/play-policy-notes.md` | HYP-M0-010 | FGS/Data safety/closed testing notes listed | Manual review |
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 8 | 0 | 0 | 7 |
+| M0 Scope/Ops | 9 | 0 | 0 | 6 |
 | M1 Platform PoCs | 0 | 0 | 0 | 15 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
@@ -371,3 +371,4 @@ Update this summary after each milestone review.
 - 2026-06-10 — HYP-M0-006 `[x]` — Added `.github/workflows/checks.yml`: single least-privilege job (`permissions: contents: read`) running `./scripts/check.sh` on push/PR. Workflows must live in `.github/workflows/` (GitHub requirement); `ci/` stays reserved for helper configs. Verified locally: YAML parses (ruby), `bash -n` clean, job body runs green. Caveat: hosted run pends first push to GitHub — push is user-initiated by repo rule, not a task blocker.
 - 2026-06-10 — HYP-M0-007 `[x]` — Created `docs/protocol/hyphen-protocol-v0.md` covering all four required areas: envelope (field table + semantics), pairing (QR URI format, transcript, SAS = SHA-256 transcript hash mod 10^6, both-sides confirmation), capability negotiation (hello/intersection/forward-compat rules), error taxonomy (protocol/transport/trust/permission/plugin codes). v0 decisions made explicit: length-prefixed JSON framing with 4 MiB cap, SPKI pinning (not cert pinning), base64 chunks in-envelope, heartbeat 10s/2-miss degraded, resume tokens single-use/10min. Open questions listed for M2 ADRs. `./scripts/check.sh` green.
 - 2026-06-10 — HYP-M0-008 `[x]` — Created `docs/protocol/threat-model.md`: assets, six-adversary model (A1 passive LAN…A6 diagnostics recipient), threat/mitigation tables for discovery+pairing (mDNS spoofing, QR/manual MITM, downgrade, replay), notification privacy (transit, shared Mac, no history DB, log redaction), trust lifecycle (lost-device revocation), diagnostics (default redaction, localOnly traces), availability (frame cap; hostile-LAN DoS accepted). Six derived test hooks mapped to roadmap IDs; residual risks listed explicitly. `./scripts/check.sh` green.
+- 2026-06-10 — HYP-M0-009 `[x]` — Drafted `docs/adr/0003-android-permission-model.md`: minSdk 26 / targetSdk 36 / SDK 37 prep; controller-mediated deny-tolerant local network (denied = supported QR/manual mode, never a crash); FGS table (connectedDevice resident + dataSync user-initiated only, remoteMessaging excluded); action-triggered notification-listener onboarding; frozen exclusions (SMS/Call Log, Accessibility, clipboard, location — location explicitly rejected even if it would help NSD); expected v1 manifest permission table. Uncertain platform claims marked ⚠ with the M1 PoC task that validates each. ADR-0002 number reserved for M2 transport/pairing decisions. `./scripts/check.sh` green.
