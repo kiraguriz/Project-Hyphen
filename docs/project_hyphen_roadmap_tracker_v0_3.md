@@ -105,7 +105,7 @@ gantt
 | HYP-M0-002 | `[x]` | P0 | Repo | Initialize monorepo layout | none | `apps/android`, `apps/macos`, `protocol`, `docs`, `scripts` exist | `tree -L 3` |
 | HYP-M0-003 | `[x]` | P0 | Repo | Add `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` | HYP-M0-002 | Basic open-source governance present | Manual review |
 | HYP-M0-004 | `[x]` | P0 | Agent | Add `CLAUDE.md` with repo rules, test commands, forbidden actions | HYP-M0-002 | Claude Code can orient from repo root | `claude -p "summarize repo rules"` |
-| HYP-M0-005 | `[ ]` | P0 | CI | Create `scripts/check.sh` placeholder that runs available checks | HYP-M0-002 | Script exits 0 and explains missing platform checks | `./scripts/check.sh` |
+| HYP-M0-005 | `[x]` | P0 | CI | Create `scripts/check.sh` placeholder that runs available checks | HYP-M0-002 | Script exits 0 and explains missing platform checks | `./scripts/check.sh` |
 | HYP-M0-006 | `[ ]` | P0 | CI | Add GitHub Actions skeleton for docs/protocol checks | HYP-M0-005 | CI runs markdown/schema checks | GitHub Actions local/dry run |
 | HYP-M0-007 | `[ ]` | P0 | Protocol | Create `docs/protocol/hyphen-protocol-v0.md` | HYP-M0-001 | Contains envelope, pairing, capability, errors | Manual review |
 | HYP-M0-008 | `[ ]` | P0 | Security | Create `docs/protocol/threat-model.md` | HYP-M0-007 | Covers LAN spoofing, MITM, notification privacy, diagnostics | Manual review |
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 4 | 0 | 0 | 11 |
+| M0 Scope/Ops | 5 | 0 | 0 | 10 |
 | M1 Platform PoCs | 0 | 0 | 0 | 15 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
@@ -367,3 +367,4 @@ Update this summary after each milestone review.
 - 2026-06-10 — HYP-M0-002 `[x]` — Initialized monorepo layout per plan §6.2: `apps/android`, `apps/macos`, `protocol/{schema,test-vectors,conformance}`, `scripts`, `ci`, `packaging/{macos,android-play,android-fdroid}`, `docs/protocol` with `.gitkeep` placeholders. Verified via `find` directory listing (`tree` not installed on this machine).
 - 2026-06-10 — HYP-M0-003 `[x]` — Added `README.md` (pre-alpha status, scope table from ADR-0001, layout, doc links), `CONTRIBUTING.md` (scope discipline, clean-room rule, no high-risk surface, commit style, pending license/DCO note), `SECURITY.md` (private disclosure route via GitHub private reporting, scope notes), `CODE_OF_CONDUCT.md` (adapted from Contributor Covenant 2.1 with attribution). LICENSE intentionally deferred to HYP-M0-015. Verified: all relative links resolve.
 - 2026-06-10 — HYP-M0-004 `[x]` — Added root `CLAUDE.md`: source-of-truth order, agent task-selection rule, check/test command table (with honest "planned" status), forbidden actions (cloud relay, default telemetry, SMS/Call Log, Accessibility, GPL copying, secrets, destructive commands, unlicensed deps), and core conventions (sbn key identity, discovery≠trust). Verified by structural review; `claude -p` smoke test skipped inside the autonomous loop to avoid a nested interactive session — runnable manually anytime.
+- 2026-06-10 — HYP-M0-005 `[x]` — Added executable `scripts/check.sh`: real markdown relative-link check and secret-pattern scan run today; Android/macOS/protocol checks print `SKIP` with the exact pending task ID (HYP-M1-001/HYP-M1-010/HYP-M2-001) and auto-activate once those projects exist. Verified: `./scripts/check.sh` exits 0 with links OK, secrets OK, 3 explained SKIPs. CLAUDE.md command table updated to match.

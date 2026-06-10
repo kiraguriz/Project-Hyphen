@@ -23,7 +23,7 @@ Code wins over docs when they disagree; flag the mismatch and fix the doc.
 
 | Scope | Command | Status |
 |---|---|---|
-| Whole repo | `./scripts/check.sh` | placeholder until HYP-M0-005 lands |
+| Whole repo | `./scripts/check.sh` | available: md link check + secret scan; platform checks SKIP until M1/M2 |
 | Protocol schemas/vectors | `./scripts/test-protocol.sh` | planned (M2) |
 | Android | `cd apps/android && ./gradlew test assembleDebug` | planned (M1) |
 | macOS | `cd apps/macos && xcodebuild build` (or `swift test` per package) | planned (M1) |
