@@ -1,0 +1,10 @@
+{
+  "protocol": "hyphen/0.3",
+  "messageId": "not-a-ulid",
+  "sessionId": "s_7f3a9b",
+  "type": "ack",
+  "seq": 2,
+  "sentAtUnixMs": 1781020800000,
+  "requiresAck": false,
+  "payload": {}
+}

@@ -68,21 +68,11 @@ else
 fi
 
 # --- [5/5] protocol schemas ---------------------------------------------------
-echo "[5/5] protocol schema validity"
-schema_files=$(find protocol/schema -name '*.json' 2>/dev/null || true)
-if [ -z "$schema_files" ]; then
-  echo "  SKIP: no schemas yet (pending HYP-M2-001)"
-elif ! command -v python3 >/dev/null 2>&1; then
-  echo "  SKIP: python3 not available to parse JSON"
+echo "[5/5] protocol schemas and test vectors"
+if [ -x scripts/test-protocol.sh ]; then
+  ./scripts/test-protocol.sh || fail=1
 else
-  while IFS= read -r s; do
-    if python3 -m json.tool "$s" >/dev/null; then
-      echo "  OK: $s"
-    else
-      echo "  INVALID JSON: $s"
-      fail=1
-    fi
-  done <<< "$schema_files"
+  echo "  SKIP: scripts/test-protocol.sh missing (pending HYP-M2-001)"
 fi
 
 # --- summary -----------------------------------------------------------------

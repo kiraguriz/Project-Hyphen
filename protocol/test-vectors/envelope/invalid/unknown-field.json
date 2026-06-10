@@ -1,0 +1,11 @@
+{
+  "protocol": "hyphen/0.3",
+  "messageId": "01JZX2J9Q4R8Z6K1T0B7E5M3NC",
+  "sessionId": "s_7f3a9b",
+  "type": "heartbeat",
+  "seq": 7,
+  "sentAtUnixMs": 1781020800000,
+  "requiresAck": false,
+  "payload": {},
+  "smuggled": true
+}

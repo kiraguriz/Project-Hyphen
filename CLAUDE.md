@@ -24,9 +24,9 @@ Code wins over docs when they disagree; flag the mismatch and fix the doc.
 | Scope | Command | Status |
 |---|---|---|
 | Whole repo | `./scripts/check.sh` | available: md link check + secret scan; platform checks SKIP until M1/M2 |
-| Protocol schemas/vectors | `./scripts/test-protocol.sh` | planned (M2) |
-| Android | `cd apps/android && ./gradlew test assembleDebug` | planned (M1) |
-| macOS | `cd apps/macos && xcodebuild build` (or `swift test` per package) | planned (M1) |
+| Protocol schemas/vectors | `./scripts/test-protocol.sh` | available: schema-subset validator over `protocol/test-vectors/` |
+| Android | `cd apps/android && ./gradlew test assembleDebug` | available |
+| macOS | `cd apps/macos && swift test` (xcodebuild scheme `Hyphen` also works) | available |
 
 Until those exist, verify docs changes by: relative links resolve, tables render, claims match implementation reality.
 

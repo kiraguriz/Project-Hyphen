@@ -1,0 +1,15 @@
+{
+  "protocol": "hyphen/0.3",
+  "messageId": "01JZX2J9Q4R8Z6K1T0B7E5M3NC",
+  "sessionId": null,
+  "type": "hello",
+  "seq": 1,
+  "ackOf": null,
+  "sentAtUnixMs": 1781020800000,
+  "requiresAck": true,
+  "payload": {
+    "device": { "kind": "android", "appVersion": "0.1.0" },
+    "resumeToken": null,
+    "capabilities": {}
+  }
+}

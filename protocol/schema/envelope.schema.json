@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/envelope.schema.json",
+  "title": "Hyphen protocol v0 envelope",
+  "description": "One frame carries one envelope (docs/protocol/hyphen-protocol-v0.md §3). v0 is strict: unknown envelope fields are rejected; loosening is a deliberate pre-v1 decision, not an accident.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "messageId",
+    "sessionId",
+    "type",
+    "seq",
+    "sentAtUnixMs",
+    "requiresAck",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "pattern": "^hyphen/0\\.[0-9]+$",
+      "description": "Protocol id + minor version; v0 receivers reject anything else with protocol/version-unsupported"
+    },
+    "messageId": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID (Crockford base32, 26 chars)"
+    },
+    "sessionId": {
+      "type": ["string", "null"],
+      "pattern": "^s_[A-Za-z0-9_-]{2,64}$",
+      "description": "null only in hello; assigned by the responder"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*)*$",
+      "description": "Message type, e.g. hello, ack, notification.dismiss.request"
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*\\.v[0-9]+$",
+      "description": "Governing capability for plugin messages; absent on core types"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-sender, per-session, monotonically increasing from 1"
+    },
+    "ackOf": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "messageId being acknowledged; only meaningful in ack"
+    },
+    "sentAtUnixMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sender wall clock; diagnostics only, never identity"
+    },
+    "requiresAck": {
+      "type": "boolean"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific body; per-type schemas are separate files"
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["localOnly"],
+      "properties": {
+        "localOnly": {
+          "type": "boolean",
+          "description": "Trace ids must not leave the device unless the user opted in (HYP-M2-014)"
+        },
+        "spanId": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "protocol": "hyphen/0.3",
+  "messageId": "01JZX2J9Q4R8Z6K1T0B7E5M3NE",
+  "sessionId": "s_7f3a9b",
+  "type": "ack",
+  "seq": 43,
+  "ackOf": "01JZX2J9Q4R8Z6K1T0B7E5M3ND",
+  "sentAtUnixMs": 1781020800456,
+  "requiresAck": false,
+  "payload": {}
+}

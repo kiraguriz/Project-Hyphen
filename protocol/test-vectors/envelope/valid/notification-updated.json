@@ -1,0 +1,12 @@
+{
+  "protocol": "hyphen/0.3",
+  "messageId": "01JZX2J9Q4R8Z6K1T0B7E5M3ND",
+  "sessionId": "s_7f3a9b",
+  "type": "notification.updated",
+  "capability": "notifications.v1",
+  "seq": 42,
+  "sentAtUnixMs": 1781020800123,
+  "requiresAck": true,
+  "payload": { "key": "0|com.example|1|tag|10101" },
+  "trace": { "localOnly": true, "spanId": "abc123" }
+}
