@@ -7,21 +7,11 @@ import HyphenPower
 // (HYP-M1-011) + sleep/wake observer (HYP-M1-013). Advertising starts only
 // on explicit user action per the LNP rule from plan §8.3 (HYP-M1-012).
 
-/// Placeholder until HYP-M1-014's reconnect state machine conforms.
-final class LoggingReconnectTrigger: ReconnectTrigger {
-    var onWake: (() -> Void)?
-
-    func wakeOccurred() {
-        NSLog("hyphen-power: wake -> reconnect attempt requested (state machine: HYP-M1-014)")
-        onWake?()
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var advertiser: BonjourAdvertiser?
     private var sleepWakeObserver: SleepWakeObserver?
-    private let reconnectTrigger = LoggingReconnectTrigger()
+    private var reconnectMachine: ReconnectStateMachine?
     private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
@@ -60,15 +50,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
         statusItem = item
 
-        // Sleep/wake logging + wake-triggered reconnect hook (HYP-M1-013).
-        reconnectTrigger.onWake = { [weak self] in
-            self?.stateItem.title = "Woke — reconnect pending (HYP-M1-014)"
-        }
-        let observer = SleepWakeObserver(reconnect: reconnectTrigger) { event in
+        // Wake drives the reconnect state machine (HYP-M1-013/014);
+        // the actual connect attempt arrives with the M2 transport.
+        let machine = ReconnectStateMachine(
+            scheduler: DispatchRetryScheduler(),
+            startConnect: {
+                NSLog("hyphen-power: connect attempt (transport lands in HYP-M2-007)")
+            },
+            onState: { [weak self] state in
+                DispatchQueue.main.async {
+                    self?.renderReconnect(state)
+                }
+            }
+        )
+        reconnectMachine = machine
+
+        let observer = SleepWakeObserver(reconnect: machine) { event in
             NSLog("hyphen-power: \(event)")
+            if event == .willSleep {
+                machine.sleepOccurred()
+            }
         }
         observer.start()
         sleepWakeObserver = observer
+    }
+
+    private func renderReconnect(_ state: ReconnectState) {
+        switch state {
+        case .waitingRetry(let attempt, let delay):
+            stateItem.title = "Reconnect in \(Int(delay))s (attempt \(attempt + 1))"
+        case .connecting:
+            stateItem.title = "Connecting… (no transport until M2)"
+        case .connected, .idle, .sleeping, .suspended:
+            break // advertising state owns the line otherwise
+        }
     }
 
     @objc private func toggleAdvertising(_ sender: NSMenuItem) {
