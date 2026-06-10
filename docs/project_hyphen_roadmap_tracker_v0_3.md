@@ -102,7 +102,7 @@ gantt
 | ID | Status | Priority | Area | Task | Dependencies | Acceptance criteria | Verification |
 |---|---|---|---|---|---|---|---|
 | HYP-M0-001 | `[x]` | P0 | Product | Freeze v1 scope and non-goals in `docs/adr/0001-product-scope.md` | none | ADR lists v1 must-have, non-goals, cut rules | Review ADR |
-| HYP-M0-002 | `[ ]` | P0 | Repo | Initialize monorepo layout | none | `apps/android`, `apps/macos`, `protocol`, `docs`, `scripts` exist | `tree -L 3` |
+| HYP-M0-002 | `[x]` | P0 | Repo | Initialize monorepo layout | none | `apps/android`, `apps/macos`, `protocol`, `docs`, `scripts` exist | `tree -L 3` |
 | HYP-M0-003 | `[ ]` | P0 | Repo | Add `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` | HYP-M0-002 | Basic open-source governance present | Manual review |
 | HYP-M0-004 | `[ ]` | P0 | Agent | Add `CLAUDE.md` with repo rules, test commands, forbidden actions | HYP-M0-002 | Claude Code can orient from repo root | `claude -p "summarize repo rules"` |
 | HYP-M0-005 | `[ ]` | P0 | CI | Create `scripts/check.sh` placeholder that runs available checks | HYP-M0-002 | Script exits 0 and explains missing platform checks | `./scripts/check.sh` |
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 1 | 0 | 0 | 14 |
+| M0 Scope/Ops | 2 | 0 | 0 | 13 |
 | M1 Platform PoCs | 0 | 0 | 0 | 15 |
 | M2 Core Transport | 0 | 0 | 0 | 15 |
 | M3 Feature MVP | 0 | 0 | 0 | 15 |
@@ -364,3 +364,4 @@ Update this summary after each milestone review.
 ### Progress log
 
 - 2026-06-10 — HYP-M0-001 `[x]` — Created `docs/adr/0001-product-scope.md` from plan v0.3 §1/§5/§15: v1 must-have list, explicit non-goals, gate cut rules, and a scope-change rule (new superseding ADR required). Verified by manual review; no automated checks exist yet (HYP-M0-005 pending).
+- 2026-06-10 — HYP-M0-002 `[x]` — Initialized monorepo layout per plan §6.2: `apps/android`, `apps/macos`, `protocol/{schema,test-vectors,conformance}`, `scripts`, `ci`, `packaging/{macos,android-play,android-fdroid}`, `docs/protocol` with `.gitkeep` placeholders. Verified via `find` directory listing (`tree` not installed on this machine).
