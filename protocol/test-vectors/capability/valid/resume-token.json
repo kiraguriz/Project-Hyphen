@@ -1,0 +1,11 @@
+{
+  "device": {
+    "kind": "macos",
+    "appVersion": "0.1.0",
+    "deviceName": "Mac Studio"
+  },
+  "resumeToken": "k4XfWq8zL2pR9tYv0bN3mC7dHs5gJaQe",
+  "capabilities": {
+    "text.v1": { "direction": "bidirectional" }
+  }
+}

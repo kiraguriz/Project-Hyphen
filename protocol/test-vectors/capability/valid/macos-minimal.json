@@ -1,0 +1,8 @@
+{
+  "device": {
+    "kind": "macos",
+    "appVersion": "0.0.1"
+  },
+  "resumeToken": null,
+  "capabilities": {}
+}

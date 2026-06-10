@@ -1,0 +1,8 @@
+{
+  "device": {
+    "kind": "ios",
+    "appVersion": "0.1.0"
+  },
+  "resumeToken": null,
+  "capabilities": {}
+}

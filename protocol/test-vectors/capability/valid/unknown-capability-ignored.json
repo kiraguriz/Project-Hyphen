@@ -1,0 +1,12 @@
+{
+  "device": {
+    "kind": "android",
+    "appVersion": "0.2.0"
+  },
+  "resumeToken": null,
+  "capabilities": {
+    "notifications.v1": { "dismiss": true },
+    "battery.v1": { "level": true },
+    "clipboard.v2": {}
+  }
+}

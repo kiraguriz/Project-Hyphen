@@ -1,0 +1,10 @@
+{
+  "device": {
+    "kind": "macos",
+    "appVersion": "0.1.0"
+  },
+  "resumeToken": null,
+  "capabilities": {
+    "transfer.v1": { "resume": true, "maxChunkBytes": 4194304 }
+  }
+}

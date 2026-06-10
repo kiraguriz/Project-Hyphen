@@ -1,0 +1,15 @@
+{
+  "device": {
+    "kind": "android",
+    "appVersion": "0.1.0",
+    "osVersion": "Android 16",
+    "deviceName": "Pixel"
+  },
+  "resumeToken": null,
+  "capabilities": {
+    "notifications.v1": { "reply": "beta", "dismiss": true },
+    "transfer.v1": { "resume": true, "maxChunkBytes": 1048576 },
+    "text.v1": { "direction": "bidirectional" },
+    "diagnostics.v1": { "redactedExport": true }
+  }
+}

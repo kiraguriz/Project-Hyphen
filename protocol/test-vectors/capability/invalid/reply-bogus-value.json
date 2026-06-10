@@ -1,0 +1,10 @@
+{
+  "device": {
+    "kind": "android",
+    "appVersion": "0.1.0"
+  },
+  "resumeToken": null,
+  "capabilities": {
+    "notifications.v1": { "reply": "always", "dismiss": true }
+  }
+}

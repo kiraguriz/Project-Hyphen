@@ -1,0 +1,8 @@
+{
+  "device": {
+    "kind": "android",
+    "appVersion": "0.1.0"
+  },
+  "resumeToken": 12345,
+  "capabilities": {}
+}

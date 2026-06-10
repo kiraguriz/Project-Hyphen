@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/capability.schema.json",
+  "title": "Hyphen protocol v0 hello payload (capability negotiation)",
+  "description": "Validates envelope.payload when type=hello (docs/protocol/hyphen-protocol-v0.md §6). Top level and device are strict; capability option objects are deliberately permissive because adding optional fields to a capability is non-breaking, and unknown capability KEYS must validate (receivers ignore them) while still matching the feature.vN naming rule.",
+  "type": "object",
+  "required": ["device", "resumeToken", "capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "device": {
+      "type": "object",
+      "required": ["kind", "appVersion"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["android", "macos"]
+        },
+        "appVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([\\-+][0-9A-Za-z.\\-]+)?$"
+        },
+        "osVersion": {
+          "type": "string"
+        },
+        "deviceName": {
+          "type": "string"
+        }
+      }
+    },
+    "resumeToken": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "description": "Single-use session-resume handle; null on first connect (protocol §4.6)"
+    },
+    "capabilities": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9]*\\.v[0-9]+$"
+      },
+      "properties": {
+        "notifications.v1": {
+          "type": "object",
+          "properties": {
+            "reply": {
+              "enum": ["off", "beta", "on"],
+              "description": "Quick Reply exposure; beta = only tested app families (ADR-0001)"
+            },
+            "dismiss": {
+              "type": "boolean"
+            }
+          }
+        },
+        "transfer.v1": {
+          "type": "object",
+          "properties": {
+            "resume": {
+              "type": "boolean"
+            },
+            "maxChunkBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 2097152,
+              "description": "Cap keeps base64-inflated chunks inside the 4 MiB frame limit (protocol §2.1)"
+            }
+          }
+        },
+        "text.v1": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "enum": ["bidirectional", "send-only", "receive-only"]
+            }
+          }
+        },
+        "diagnostics.v1": {
+          "type": "object",
+          "properties": {
+            "redactedExport": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  }
+}

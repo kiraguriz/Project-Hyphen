@@ -131,7 +131,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - Capability names are `feature.v<major>`. Adding optional fields is non-breaking; semantic changes bump the major.
 - The responder replies with the subset (possibly with reduced options) it accepts; that intersection is the session contract. Messages outside it → `plugin/unsupported-capability`.
 - Unknown capabilities MUST be ignored, not rejected (forward compatibility).
-- Effective transfer chunk size = min of both sides' `maxChunkBytes`.
+- Effective transfer chunk size = min of both sides' `maxChunkBytes`. The capability schema caps `maxChunkBytes` at 2 MiB (and floors it at 1 KiB) so a base64-inflated chunk plus envelope overhead always fits the 4 MiB frame limit (§2.1).
 
 ## 7. Message catalog (v0)
 
