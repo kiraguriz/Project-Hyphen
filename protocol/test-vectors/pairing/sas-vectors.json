@@ -1,0 +1,71 @@
+{
+  "description": "Deterministic pairing transcript + SAS vectors (HYP-M2-004, protocol v0 §5.3). Both platform implementations (Kotlin: M2-010/011, Swift: M2-009/011) MUST reproduce every case. Verified by scripts/verify_pairing_vectors.py.",
+  "algorithm": {
+    "transcript": "ASCII('hyphen-pair-v0') || nonce(16 raw bytes) || macSpkiFp(32 raw bytes) || androidSpkiFp(32 raw bytes) || UTF8(protocolVersion)",
+    "injectivity": "all fields are fixed-length except protocolVersion, which is last; no length prefixes needed",
+    "hash": "SHA-256(transcript)",
+    "sas": "decimal(uint64_be(hash[0..7]) mod 10^6), zero-padded to exactly 6 digits"
+  },
+  "cases": [
+    {
+      "name": "basic",
+      "nonceHex": "000102030405060708090a0b0c0d0e0f",
+      "macSpkiFpHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "androidSpkiFpHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "protocolVersion": "hyphen/0.3",
+      "expectedTranscriptHashHex": "7d8048ea10bd5126d1de61a89e58af1df2d3cd3ccfe8cec1c410266e33109064",
+      "expectedSas": "345638"
+    },
+    {
+      "name": "realistic-fps-leading-zero-sas",
+      "nonceHex": "4f3c2a1908b7d6e5c4a392817065f4e3",
+      "macSpkiFpHex": "00a03d77e9f1b7817e3611cdd7c7b82cde9a9c067f86970c26f8ac16683418d4",
+      "androidSpkiFpHex": "81f075bbaf1bdcddf8454a3ff1e6d6626da58d5a2ffa221071b8fa8a6a044eae",
+      "protocolVersion": "hyphen/0.3",
+      "expectedTranscriptHashHex": "239591ccd77e2ce24945558fd50be69005ff2b5dde34ccd68209e9e092fbc014",
+      "expectedSas": "091874",
+      "note": "SAS has a leading zero: implementations must zero-pad, not strip"
+    },
+    {
+      "name": "version-binding-downgrade-detection",
+      "nonceHex": "000102030405060708090a0b0c0d0e0f",
+      "macSpkiFpHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "androidSpkiFpHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "protocolVersion": "hyphen/0.4",
+      "expectedTranscriptHashHex": "ed0bf1439680f65680f595afbf485b270599075c534072a62de7dbac718b7a25",
+      "expectedSas": "874966",
+      "note": "same inputs as 'basic' except version: SAS must differ (binds version, defeats downgrade)"
+    },
+    {
+      "name": "role-swap-detection",
+      "nonceHex": "000102030405060708090a0b0c0d0e0f",
+      "macSpkiFpHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "androidSpkiFpHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "protocolVersion": "hyphen/0.3",
+      "expectedTranscriptHashHex": "eba34f14b39584d9a05fc437dbe1d281049106ff5e5555f75c64ef75fb305509",
+      "expectedSas": "762649",
+      "note": "fingerprints swapped vs 'basic': SAS must differ (field order binds roles)"
+    },
+    {
+      "name": "searched-leading-zero-sas",
+      "nonceHex": "4f3c2a1908b7d6e5c4a3928170650100",
+      "macSpkiFpHex": "00a03d77e9f1b7817e3611cdd7c7b82cde9a9c067f86970c26f8ac16683418d4",
+      "androidSpkiFpHex": "81f075bbaf1bdcddf8454a3ff1e6d6626da58d5a2ffa221071b8fa8a6a044eae",
+      "protocolVersion": "hyphen/0.3",
+      "expectedTranscriptHashHex": "412c6582f9e1ebbf04f72e2bfdce2e8333dde6d6d60c763dcb5d286d17143136",
+      "expectedSas": "071295"
+    }
+  ],
+  "tamperCases": [
+    {
+      "name": "wrong-expected-sas-must-be-detected",
+      "nonceHex": "000102030405060708090a0b0c0d0e0f",
+      "macSpkiFpHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "androidSpkiFpHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "protocolVersion": "hyphen/0.3",
+      "expectedTranscriptHashHex": "7d8048ea10bd5126d1de61a89e58af1df2d3cd3ccfe8cec1c410266e33109064",
+      "expectedSas": "999999",
+      "note": "verifier self-test: a wrong expectation must be reported as a mismatch"
+    }
+  ]
+}

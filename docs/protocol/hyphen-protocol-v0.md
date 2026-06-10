@@ -109,7 +109,9 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - Both devices MUST compute the SAS independently and display it; trust is stored only after the user confirms on **both** sides (HYP-M2-011).
 - With QR, the fingerprint is pre-shared and SAS is defense-in-depth; with manual IP, SAS is the primary MITM defense and MUST NOT be skippable.
 - Mismatched `transcriptHash` values or a rejected SAS MUST abort pairing with `trust/sas-rejected` and persist nothing.
-- Deterministic test vectors for transcript and SAS live in `protocol/test-vectors/` (HYP-M2-004).
+- Encodings are exact: the label is ASCII, `nonce` is 16 raw bytes, each SPKI fingerprint is 32 raw bytes, and `protocolVersion` is the UTF-8 protocol identifier string (e.g. `hyphen/0.3`). All fields are fixed-length except the version, which is last — the concatenation is injective without length prefixes.
+- SAS rendering MUST zero-pad to exactly 6 digits (leading-zero cases are pinned by vectors).
+- Normative deterministic vectors: `protocol/test-vectors/pairing/sas-vectors.json` (HYP-M2-004), verified by `scripts/verify_pairing_vectors.py`; both platform implementations MUST reproduce every case.
 
 ## 6. Capability negotiation
 
