@@ -1,0 +1,6 @@
+{
+  "code": "trust/fingerprint-mismatch",
+  "message": "Peer key changed; connection refused. Re-verify the device before pairing again.",
+  "regarding": null,
+  "retryable": false
+}

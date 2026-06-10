@@ -1,0 +1,7 @@
+{
+  "code": "plugin/transfer-cancelled",
+  "message": "user cancelled",
+  "regarding": null,
+  "retryable": false,
+  "stackTrace": "leaky details"
+}

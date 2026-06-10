@@ -1,0 +1,5 @@
+{
+  "code": "transport/connection-lost",
+  "message": "dropped",
+  "regarding": null
+}

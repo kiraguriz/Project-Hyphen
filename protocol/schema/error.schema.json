@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/error.schema.json",
+  "title": "Hyphen protocol v0 error payload",
+  "description": "Validates envelope.payload when type=error (docs/protocol/hyphen-protocol-v0.md §8). The code enum IS the normative v0 error registry — adding a code is a reviewed schema change, linted by scripts/lint_error_registry.py. The message MUST NOT contain notification bodies, file contents, full paths, or addresses beyond what the user already sees; that rule is enforced by redaction tests (HYP-M4-001..003), not this schema.",
+  "type": "object",
+  "required": ["code", "message", "regarding", "retryable"],
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "enum": [
+        "protocol/version-unsupported",
+        "protocol/invalid-envelope",
+        "protocol/unknown-type",
+        "protocol/ack-timeout",
+        "transport/tls-failure",
+        "transport/heartbeat-timeout",
+        "transport/frame-too-large",
+        "transport/malformed-frame",
+        "transport/connection-lost",
+        "trust/unknown-peer",
+        "trust/fingerprint-mismatch",
+        "trust/sas-rejected",
+        "trust/peer-revoked",
+        "trust/resume-token-invalid",
+        "permission/local-network-denied",
+        "permission/notifications-denied",
+        "permission/storage-denied",
+        "permission/background-restricted",
+        "plugin/unsupported-capability",
+        "plugin/notification-key-not-found",
+        "plugin/reply-unavailable",
+        "plugin/checksum-mismatch",
+        "plugin/transfer-cancelled",
+        "plugin/disk-full"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "regarding": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "messageId that provoked this error, when attributable"
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "true = same operation may be retried; trust/fingerprint-mismatch is never retryable"
+    }
+  }
+}

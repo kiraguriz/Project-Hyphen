@@ -1,0 +1,6 @@
+{
+  "code": "protocol/ack-timeout",
+  "message": "bad reference",
+  "regarding": "not-a-ulid",
+  "retryable": true
+}

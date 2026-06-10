@@ -169,6 +169,8 @@ Error payload: `{ "code": "category/short-code", "message": "human readable, no 
 
 Rules: error `message` strings MUST NOT contain notification bodies, file contents, full paths, or addresses beyond what the user already sees. `fingerprint-mismatch` MUST tear down the connection and surface a prominent re-verify prompt — it is the MITM signal.
 
+The normative registry is the `code` enum in `protocol/schema/error.schema.json` (linted by `scripts/lint_error_registry.py`); this table is the human-readable index. Messages are capped at 256 characters by schema.
+
 ## 9. Open questions (to resolve in M2 with ADRs)
 
 1. Exact `resumeToken` construction (random handle vs. authenticated structure) — leaning random 32-byte handle stored server-side.

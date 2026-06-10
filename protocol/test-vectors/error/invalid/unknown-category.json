@@ -1,0 +1,6 @@
+{
+  "code": "network/timeout",
+  "message": "category outside the taxonomy",
+  "regarding": null,
+  "retryable": true
+}

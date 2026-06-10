@@ -1,0 +1,6 @@
+{
+  "code": "plugin/disk-full",
+  "message": "Not enough space to receive the file.",
+  "regarding": "01JZX2J9Q4R8Z6K1T0B7E5M3NE",
+  "retryable": false
+}

@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ANNOTATIONS = {"$schema", "$id", "title", "description", "examples", "default"}
 SUPPORTED = {"type", "required", "properties", "additionalProperties", "pattern",
-             "minimum", "maximum", "const", "enum", "propertyNames"}
+             "minimum", "maximum", "maxLength", "const", "enum", "propertyNames"}
 
 TYPE_CHECKS = {
     "object": lambda v: isinstance(v, dict),
@@ -56,6 +56,10 @@ def validate(instance, schema, path="$"):
     if "pattern" in schema and isinstance(instance, str):
         if re.fullmatch(schema["pattern"], instance) is None:
             raise Invalid(f"{path}: {instance!r} does not match {schema['pattern']!r}")
+
+    if "maxLength" in schema and isinstance(instance, str):
+        if len(instance) > schema["maxLength"]:
+            raise Invalid(f"{path}: string length {len(instance)} > maxLength {schema['maxLength']}")
 
     if "minimum" in schema and isinstance(instance, (int, float)) and not isinstance(instance, bool):
         if instance < schema["minimum"]:

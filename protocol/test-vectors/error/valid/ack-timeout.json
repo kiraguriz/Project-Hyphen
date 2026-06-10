@@ -1,0 +1,6 @@
+{
+  "code": "protocol/ack-timeout",
+  "message": "No ack within 10s.",
+  "regarding": "01JZX2J9Q4R8Z6K1T0B7E5M3ND",
+  "retryable": true
+}
