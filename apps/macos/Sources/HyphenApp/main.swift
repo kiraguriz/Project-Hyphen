@@ -9,6 +9,7 @@ import HyphenDiscovery
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var advertiser: BonjourAdvertiser?
+    private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
         action: #selector(toggleAdvertising(_:)),
@@ -49,18 +50,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAdvertising(_ sender: NSMenuItem) {
         if advertiser == nil {
-            let deviceName = Host.current().localizedName ?? "Mac"
-            let a = BonjourAdvertiser { [weak self] state in
-                DispatchQueue.main.async { self?.render(state) }
+            // Explain-first gate (HYP-M1-012): the network action — and
+            // therefore the macOS Local Network prompt — runs only after
+            // the user reads the explanation and continues.
+            lnpGate.run(action: { [weak self] in self?.startAdvertising() }) { complete in
+                complete(Self.presentLocalNetworkExplanation())
             }
-            advertiser = a
-            a.start(deviceName: deviceName)
-            advertiseItem.title = "Stop advertising"
         } else {
             advertiser?.stop()
             advertiser = nil
             advertiseItem.title = "Start advertising"
         }
+    }
+
+    private func startAdvertising() {
+        let deviceName = Host.current().localizedName ?? "Mac"
+        let a = BonjourAdvertiser { [weak self] state in
+            DispatchQueue.main.async { self?.render(state) }
+        }
+        advertiser = a
+        a.start(deviceName: deviceName)
+        advertiseItem.title = "Stop advertising"
+    }
+
+    private static func presentLocalNetworkExplanation() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = LocalNetworkCopy.title
+        alert.informativeText = LocalNetworkCopy.body
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: LocalNetworkCopy.continueTitle)
+        alert.addButton(withTitle: LocalNetworkCopy.notNowTitle)
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func render(_ state: BonjourAdvertiser.State) {
