@@ -9,6 +9,12 @@
          HYP-M1-005). -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Self-managed CDM association, API 33+ (ADR-0003 §6, HYP-M1-007). -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_SELF_MANAGED" />
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="false" />
+
     <!-- allowBackup=false: trust-store material must never enter device
          backups (threat model §3.3); keys are non-portable by design. -->
     <application

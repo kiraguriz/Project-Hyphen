@@ -62,7 +62,7 @@ Android permissions are Hyphen's largest platform risk, and they are moving:
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_DATA_SYNC` | §3 | Install-time + Play declaration |
 | `CAMERA` | QR scan during pairing only | Runtime, requested at scan time; denial falls back to manual entry |
 | Notification access (special) | Mirroring | Special access screen, §4 |
-| CDM association (`REQUEST_COMPANION_*` as applicable) | Presence/background resilience | ⚠ exact set fixed by HYP-M1-007/008/009 PoCs |
+| `REQUEST_COMPANION_SELF_MANAGED` | Self-managed CDM association on API 33+ (Hyphen manages the LAN-TLS link itself; CDM records the relationship). API 26–32: no CDM association — QR-only pairing with conservative background behavior; a BT-filter legacy association remains an open device-spike question. Decided by HYP-M1-007 | ⚠ API 36+ presence-observation specifics still pend HYP-M1-009 |
 
 Both distribution tracks share this ceiling; the Play build may *reduce* (never extend) it if review demands (ADR-0004).
 

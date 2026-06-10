@@ -7,6 +7,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import dev.hyphen.android.companion.AssociationController
+import dev.hyphen.android.companion.AssociationEvent
+import dev.hyphen.android.companion.CdmAssociationBackend
 import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
 import dev.hyphen.android.discovery.DiscoveryEvent
@@ -47,6 +50,21 @@ class MainActivity : Activity() {
             setOnClickListener { probeManualEndpoint(endpointInput.text.toString()) }
         }
 
+        // CDM self-managed association PoC (HYP-M1-007).
+        val cdm = AssociationController(CdmAssociationBackend(this), ::renderCdm)
+        val associateButton = Button(this).apply {
+            text = "CDM associate (self-managed)"
+            setOnClickListener { cdm.associate("Hyphen Mac") }
+        }
+        val listButton = Button(this).apply {
+            text = "CDM list + disassociate all"
+            setOnClickListener {
+                val ids = cdm.associations()
+                append("associations: $ids")
+                ids.forEach(cdm::disassociate)
+            }
+        }
+
         setContentView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -54,9 +72,26 @@ class MainActivity : Activity() {
                 addView(button)
                 addView(endpointInput)
                 addView(connectButton)
+                addView(associateButton)
+                addView(listButton)
                 addView(ScrollView(this@MainActivity).apply { addView(log) })
             }
         )
+    }
+
+    private fun renderCdm(event: AssociationEvent) {
+        when (event) {
+            is AssociationEvent.PendingUserApproval -> {
+                append("cdm: launching system approval dialog")
+                event.launch()
+            }
+            is AssociationEvent.Associated ->
+                append("cdm associated: id=${event.associationId} name=${event.displayName}")
+            is AssociationEvent.Removed -> append("cdm removed: id=${event.associationId}")
+            is AssociationEvent.Failed -> append("cdm failed: ${event.message}")
+            AssociationEvent.UnsupportedOnThisSdk ->
+                append("cdm: self-managed association needs API 33+ (QR-only on this device)")
+        }
     }
 
     private fun probeManualEndpoint(raw: String) {
