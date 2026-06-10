@@ -1,14 +1,27 @@
 import AppKit
 import HyphenCore
 import HyphenDiscovery
+import HyphenPower
 
 // Menu-bar-only skeleton (HYP-M1-010) + Bonjour advertise PoC toggle
-// (HYP-M1-011). Advertising starts only on explicit user action, which is
-// the Local Network Privacy rule from plan §8.3 (formalized in M1-012).
+// (HYP-M1-011) + sleep/wake observer (HYP-M1-013). Advertising starts only
+// on explicit user action per the LNP rule from plan §8.3 (HYP-M1-012).
+
+/// Placeholder until HYP-M1-014's reconnect state machine conforms.
+final class LoggingReconnectTrigger: ReconnectTrigger {
+    var onWake: (() -> Void)?
+
+    func wakeOccurred() {
+        NSLog("hyphen-power: wake -> reconnect attempt requested (state machine: HYP-M1-014)")
+        onWake?()
+    }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var advertiser: BonjourAdvertiser?
+    private var sleepWakeObserver: SleepWakeObserver?
+    private let reconnectTrigger = LoggingReconnectTrigger()
     private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
@@ -46,6 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         item.menu = menu
         statusItem = item
+
+        // Sleep/wake logging + wake-triggered reconnect hook (HYP-M1-013).
+        reconnectTrigger.onWake = { [weak self] in
+            self?.stateItem.title = "Woke — reconnect pending (HYP-M1-014)"
+        }
+        let observer = SleepWakeObserver(reconnect: reconnectTrigger) { event in
+            NSLog("hyphen-power: \(event)")
+        }
+        observer.start()
+        sleepWakeObserver = observer
     }
 
     @objc private func toggleAdvertising(_ sender: NSMenuItem) {
