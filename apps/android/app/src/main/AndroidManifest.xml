@@ -30,6 +30,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- System-bound while an observed companion is present
+             (HYP-M1-009; docs/spikes/api36-device-presence.md). -->
+        <service
+            android:name=".companion.HyphenCompanionDeviceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>
