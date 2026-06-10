@@ -1,0 +1,18 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repo-checks:
+    name: docs and protocol checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run repo checks (md links, secret scan, schemas when present)
+        run: ./scripts/check.sh
