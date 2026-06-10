@@ -14,12 +14,20 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "HyphenApp",
-            dependencies: ["HyphenCore"]
+            dependencies: ["HyphenCore", "HyphenDiscovery"]
         ),
         .target(name: "HyphenCore"),
+        .target(
+            name: "HyphenDiscovery",
+            dependencies: ["HyphenCore"]
+        ),
         .testTarget(
             name: "HyphenCoreTests",
             dependencies: ["HyphenCore"]
+        ),
+        .testTarget(
+            name: "HyphenDiscoveryTests",
+            dependencies: ["HyphenDiscovery"]
         ),
     ]
 )
