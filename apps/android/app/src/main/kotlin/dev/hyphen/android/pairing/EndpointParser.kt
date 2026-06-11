@@ -22,7 +22,13 @@ sealed class ParsedEndpoint {
         /** base64url, decodes to 16 bytes. */
         val nonceB64: String,
         val deviceName: String?,
-    ) : ParsedEndpoint()
+    ) : ParsedEndpoint() {
+        /** The Mac's pre-shared pin; length was validated at parse time. */
+        fun decodedFingerprint(): ByteArray = Base64.getUrlDecoder().decode(spkiFingerprintB64)
+
+        /** The pairing-session nonce bound into the SAS transcript. */
+        fun decodedNonce(): ByteArray = Base64.getUrlDecoder().decode(nonceB64)
+    }
 }
 
 enum class RejectReason {

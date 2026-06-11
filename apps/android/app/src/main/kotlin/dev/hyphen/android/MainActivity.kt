@@ -41,12 +41,14 @@ class MainActivity : Activity() {
         }
 
         // Manual-endpoint fallback path (HYP-M1-006): works with mDNS
-        // disabled or the LAN permission denied.
+        // disabled or the LAN permission denied. A pasted hyphen://pair
+        // payload takes the QR parse path (HYP-M2-010) — same code a
+        // camera scan will feed once the scanner-library decision lands.
         val endpointInput = EditText(this).apply {
-            hint = "Manual endpoint host:port"
+            hint = "host:port or hyphen://pair payload"
         }
         val connectButton = Button(this).apply {
-            text = "Test manual endpoint"
+            text = "Test manual endpoint / QR payload"
             setOnClickListener { probeManualEndpoint(endpointInput.text.toString()) }
         }
 
@@ -95,7 +97,14 @@ class MainActivity : Activity() {
     }
 
     private fun probeManualEndpoint(raw: String) {
-        when (val parsed = EndpointParser.parseManual(raw)) {
+        val isQr = raw.trim().startsWith("hyphen://")
+        val result = if (isQr) EndpointParser.parseQr(raw) else EndpointParser.parseManual(raw)
+        if (isQr && result is ParseResult.Ok) {
+            val qr = result.endpoint as dev.hyphen.android.pairing.ParsedEndpoint.QrPayload
+            val fpHead = qr.decodedFingerprint().take(4).joinToString("") { "%02x".format(it) }
+            append("qr parsed: v=${qr.version} dn=${qr.deviceName ?: "—"} fp=$fpHead… nonce ok")
+        }
+        when (val parsed = result) {
             is ParseResult.Rejected -> append("endpoint rejected: ${parsed.reason}")
             is ParseResult.Ok -> {
                 append("probing ${parsed.endpoint.host}:${parsed.endpoint.port} …")
