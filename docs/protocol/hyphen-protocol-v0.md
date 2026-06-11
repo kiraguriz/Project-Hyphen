@@ -179,3 +179,4 @@ The normative registry is the `code` enum in `protocol/schema/error.schema.json`
 2. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
 3. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force ≥15 s).
 4. Max in-flight unacked messages (flow control) — v0 implementations SHOULD cap at 64.
+5. TLS 1.3 floor vs. Android API 26–28, which lack platform TLS 1.3 (it arrived in API 29). Current implementations (HYP-M2-008) fail loudly on those devices rather than downgrade; options for ADR-0002 are raising minSdk to 29 or permitting TLS 1.2 + pinning on legacy API levels. Bundling a TLS library is dispreferred (dependency policy).
