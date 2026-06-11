@@ -22,7 +22,10 @@ let package = Package(
             dependencies: ["HyphenCore"]
         ),
         .target(name: "HyphenPower"),
-        .target(name: "HyphenTransport"),
+        .target(
+            name: "HyphenTransport",
+            dependencies: ["HyphenCore"]
+        ),
         .testTarget(
             name: "HyphenCoreTests",
             dependencies: ["HyphenCore"]

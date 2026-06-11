@@ -29,7 +29,7 @@ class PairingTranscript private constructor(
         const val FINGERPRINT_LENGTH = 32
 
         /** Protocol identifier bound into the transcript; must match macOS. */
-        const val PROTOCOL_VERSION = "hyphen/0.3"
+        const val PROTOCOL_VERSION = dev.hyphen.android.transport.Envelope.PROTOCOL_ID
 
         fun create(
             nonce: ByteArray,
