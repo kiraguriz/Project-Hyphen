@@ -28,6 +28,9 @@ class PairingTranscript private constructor(
         const val NONCE_LENGTH = 16
         const val FINGERPRINT_LENGTH = 32
 
+        /** Protocol identifier bound into the transcript; must match macOS. */
+        const val PROTOCOL_VERSION = "hyphen/0.3"
+
         fun create(
             nonce: ByteArray,
             macSpkiFingerprint: ByteArray,

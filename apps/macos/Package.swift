@@ -14,7 +14,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "HyphenApp",
-            dependencies: ["HyphenCore", "HyphenDiscovery", "HyphenPower"]
+            dependencies: ["HyphenCore", "HyphenDiscovery", "HyphenPower", "HyphenTransport"]
         ),
         .target(name: "HyphenCore"),
         .target(

@@ -12,7 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var advertiser: BonjourAdvertiser?
     private var sleepWakeObserver: SleepWakeObserver?
     private var reconnectMachine: ReconnectStateMachine?
+    private var pairingController: PairingController?
     private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
+    private let pairItem = NSMenuItem(
+        title: "Pair New Device…",
+        action: #selector(beginPairing(_:)),
+        keyEquivalent: "p"
+    )
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
         action: #selector(toggleAdvertising(_:)),
@@ -35,10 +41,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stateItem.isEnabled = false
         advertiseItem.target = self
 
+        pairItem.target = self
+
         menu.addItem(header)
         menu.addItem(.separator())
         menu.addItem(stateItem)
         menu.addItem(advertiseItem)
+        menu.addItem(pairItem)
         menu.addItem(.separator())
         menu.addItem(
             NSMenuItem(
@@ -83,6 +92,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stateItem.title = "Connecting… (no transport until M2)"
         case .connected, .idle, .sleeping, .suspended:
             break // advertising state owns the line otherwise
+        }
+    }
+
+    @objc private func beginPairing(_ sender: NSMenuItem) {
+        // Same explain-first gate as advertising: the pairing listener is
+        // a network-touching action (HYP-M1-012 rule).
+        lnpGate.run(action: { [weak self] in
+            guard let self else { return }
+            if self.pairingController == nil {
+                self.pairingController = PairingController { [weak self] status in
+                    self?.stateItem.title = status
+                }
+            }
+            self.pairingController?.beginPairing()
+        }) { complete in
+            complete(Self.presentLocalNetworkExplanation())
         }
     }
 

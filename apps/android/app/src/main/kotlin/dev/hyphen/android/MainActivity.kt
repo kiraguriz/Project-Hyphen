@@ -16,9 +16,17 @@ import dev.hyphen.android.discovery.DiscoveryEvent
 import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
+import android.app.AlertDialog
 import dev.hyphen.android.pairing.EndpointConnectProbe
 import dev.hyphen.android.pairing.EndpointParser
+import dev.hyphen.android.pairing.PairingTranscript
 import dev.hyphen.android.pairing.ParseResult
+import dev.hyphen.android.pairing.ParsedEndpoint
+import dev.hyphen.android.pairing.SasConfirmationGate
+import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
+import dev.hyphen.android.transport.TlsClient
+import dev.hyphen.android.trust.AndroidTrustStores
+import javax.net.ssl.SSLSocket
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
 // real UI task (plan §7.2). One tap runs one discovery window (HYP-M1-004).
@@ -100,9 +108,11 @@ class MainActivity : Activity() {
         val isQr = raw.trim().startsWith("hyphen://")
         val result = if (isQr) EndpointParser.parseQr(raw) else EndpointParser.parseManual(raw)
         if (isQr && result is ParseResult.Ok) {
-            val qr = result.endpoint as dev.hyphen.android.pairing.ParsedEndpoint.QrPayload
+            val qr = result.endpoint as ParsedEndpoint.QrPayload
             val fpHead = qr.decodedFingerprint().take(4).joinToString("") { "%02x".format(it) }
             append("qr parsed: v=${qr.version} dn=${qr.deviceName ?: "—"} fp=$fpHead… nonce ok")
+            startPairing(qr)
+            return
         }
         when (val parsed = result) {
             is ParseResult.Rejected -> append("endpoint rejected: ${parsed.reason}")
@@ -121,6 +131,63 @@ class MainActivity : Activity() {
                 }.start()
             }
         }
+    }
+
+    /**
+     * Android side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
+     * provisional TLS connect pinning the QR's fingerprint, compute the
+     * SAS, and write trust only through the gate when the user confirms.
+     * The provisional socket closes after the decision — steady-state
+     * sessions arrive with M2-012/013.
+     */
+    private fun startPairing(qr: ParsedEndpoint.QrPayload) {
+        append("pairing: provisional TLS to ${qr.host}:${qr.port} …")
+        Thread {
+            try {
+                val identity = AndroidKeystoreTlsIdentity.getOrCreate()
+                val macFp = qr.decodedFingerprint()
+                val socket = TlsClient.connect(
+                    host = qr.host,
+                    port = qr.port,
+                    identity = identity,
+                    isTrusted = { it.contentEquals(macFp) },
+                )
+                val transcript = PairingTranscript.create(
+                    nonce = qr.decodedNonce(),
+                    macSpkiFingerprint = macFp,
+                    androidSpkiFingerprint = identity.spkiFingerprint,
+                    protocolVersion = PairingTranscript.PROTOCOL_VERSION,
+                )!!
+                val gate = SasConfirmationGate(
+                    transcript = transcript,
+                    peerFingerprint = macFp,
+                    peerDisplayName = qr.deviceName ?: "Mac",
+                    trustStore = AndroidTrustStores.openDefault(applicationContext),
+                )
+                runOnUiThread { presentSasDialog(gate, socket) }
+            } catch (e: Exception) {
+                runOnUiThread { append("pairing failed: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private fun presentSasDialog(gate: SasConfirmationGate, socket: SSLSocket) {
+        fun closeSocket() = Thread { runCatching { socket.close() } }.start()
+        AlertDialog.Builder(this)
+            .setTitle("Confirm pairing code")
+            .setMessage("Code: ${gate.sas}\n\nTrust this Mac only if it shows the same code.")
+            .setPositiveButton("Codes match — trust") { _, _ ->
+                gate.confirm()
+                append("paired — fingerprint pinned (${gate.sas})")
+                closeSocket()
+            }
+            .setNegativeButton("Reject") { _, _ ->
+                gate.reject()
+                append("pairing rejected — nothing stored")
+                closeSocket()
+            }
+            .setCancelable(false)
+            .show()
     }
 
     private fun startWindow() {

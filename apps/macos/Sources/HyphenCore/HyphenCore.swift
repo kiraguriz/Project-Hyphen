@@ -6,4 +6,8 @@ public enum HyphenCore {
     /// Bonjour service type advertised/browsed on the LAN. Must match the
     /// Android side (`DiscoveryManager.SERVICE_TYPE`) and protocol v0.
     public static let bonjourServiceType = "_hyphen._tcp"
+
+    /// Protocol identifier carried in envelopes and bound into the SAS
+    /// transcript (protocol v0). Must match the Android side.
+    public static let protocolVersion = "hyphen/0.3"
 }
