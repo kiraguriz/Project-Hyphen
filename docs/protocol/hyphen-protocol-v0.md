@@ -175,7 +175,7 @@ The normative registry is the `code` enum in `protocol/schema/error.schema.json`
 
 ## 9. Open questions (to resolve in M2 with ADRs)
 
-1. Exact `resumeToken` construction (random handle vs. authenticated structure) — leaning random 32-byte handle stored server-side.
+1. ~~Exact `resumeToken` construction~~ — **Resolved (HYP-M2-013)**: a random 32-byte handle (base64url, unpadded), stored responder-side in memory only, bound to one session and one peer SPKI fingerprint, single-use (consumed even on a failed redeem), 10-minute expiry, invalidated on trust revocation. Tokens do not survive an app restart; the worst case is a fresh session.
 2. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
 3. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force ≥15 s).
 4. Max in-flight unacked messages (flow control) — v0 implementations SHOULD cap at 64.

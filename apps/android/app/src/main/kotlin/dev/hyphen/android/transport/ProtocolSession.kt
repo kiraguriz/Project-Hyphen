@@ -29,6 +29,8 @@ class ProtocolSession(
         val ackTimeoutMs: Long = 10_000,
         /** Test hook only: false simulates a protocol-violating silent peer. */
         val autoAck: Boolean = true,
+        /** Seq already consumed on this connection (1 after a hello). */
+        val startingSeq: Long = 0,
     )
 
     interface Listener {
@@ -40,7 +42,7 @@ class ProtocolSession(
         fun onClosed() {}
     }
 
-    private val seq = AtomicLong(0)
+    private val seq = AtomicLong(config.startingSeq)
     private val closed = AtomicBoolean(false)
     private val writeLock = Any()
     private lateinit var scheduler: ScheduledExecutorService
@@ -54,6 +56,16 @@ class ProtocolSession(
     private val ackTracker = AckTracker(config.ackTimeoutMs, listener::onAckTimeout)
 
     fun start() {
+        // Read deadline at 2x the degraded threshold: with live heartbeats
+        // it never trips; on a truly dead link the reader wakes itself up.
+        // It also bounds a JSSE hazard — SSLSocket.close() from another
+        // thread can block until a concurrent blocking read times out, so
+        // an unbounded read would make stop() hang and the peer never see
+        // the FIN (found via the M2-013 reconnect integration test).
+        runCatching {
+            socket.soTimeout = (config.heartbeatIntervalMs * (config.missThreshold + 2))
+                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
         scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "hyphen-session-timer").apply { isDaemon = true }
         }

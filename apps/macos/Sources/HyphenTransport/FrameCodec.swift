@@ -50,4 +50,12 @@ public final class FrameReader {
         }
         return frames
     }
+
+    /// Hands off any partially-buffered bytes and resets — used when one
+    /// layer (handshake) stops reading and another (session) takes over.
+    public func remainder() -> Data {
+        let leftover = buffer
+        buffer = Data()
+        return leftover
+    }
 }

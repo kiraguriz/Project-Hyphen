@@ -16,6 +16,8 @@ public final class ProtocolSession {
         public var ackTimeoutMs: Int64 = 10_000
         /// Test hook only: false simulates a protocol-violating silent peer.
         public var autoAck = true
+        /// Seq already consumed on this connection (1 after a hello).
+        public var startingSeq: Int64 = 0
         public init() {}
     }
 
@@ -56,10 +58,13 @@ public final class ProtocolSession {
         self.config = config
         self.callbacks = callbacks
         self.queue = DispatchQueue(label: "hyphen-session")
+        self.seq = config.startingSeq
         queue.setSpecific(key: queueKey, value: true)
     }
 
-    public func start() {
+    /// - Parameter leftover: bytes a prior layer (the hello handshake)
+    ///   read past its own frame; replayed before reading the connection.
+    public func start(replaying leftover: Data = Data()) {
         queue.async { [self] in
             monitor = HeartbeatMonitor(
                 intervalMs: config.heartbeatIntervalMs,
@@ -91,6 +96,15 @@ public final class ProtocolSession {
             tick.resume()
             tickTimer = tick
 
+            if !leftover.isEmpty {
+                do {
+                    for frame in try reader.feed(leftover) { handleFrame(frame) }
+                } catch {
+                    callbacks.onProtocolError("transport/frame-too-large", "\(error)")
+                    close()
+                    return
+                }
+            }
             receiveLoop()
         }
     }
