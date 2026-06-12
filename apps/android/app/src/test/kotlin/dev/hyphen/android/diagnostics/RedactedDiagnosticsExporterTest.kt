@@ -62,6 +62,35 @@ class RedactedDiagnosticsExporterTest {
         assertEquals(0L, bundle.long("eventCount"))
         assertTrue((bundle["events"] as Json.Arr).items.isEmpty())
     }
+
+    @Test
+    fun `trace ids stay out of diagnostics unless explicitly included`() {
+        val logs = LocalStructuredLogStore(clock = { 100L })
+        logs.recordFailure(
+            code = "protocol/ack-timeout",
+            component = "protocol-session",
+            operation = "ack-timeout",
+            traceId = "01JZ0000000000000000000000",
+        )
+
+        val defaultPreview = RedactedDiagnosticsExporter(
+            logs = logs,
+            appVersion = "0.0.1",
+            sdkInt = 36,
+            clock = { 200L },
+        ).previewJson()
+        assertFalse(defaultPreview.contains("01JZ0000000000000000000000"))
+
+        val optInPreview = RedactedDiagnosticsExporter(
+            logs = logs,
+            appVersion = "0.0.1",
+            sdkInt = 36,
+            includeTraceIds = true,
+            clock = { 200L },
+        ).previewJson()
+        val event = ((Json.parse(optInPreview) as Json.Obj)["events"] as Json.Arr).items.single() as Json.Obj
+        assertEquals("01JZ0000000000000000000000", event.string("traceId"))
+    }
 }
 
 private fun Json.Obj.string(key: String): String =

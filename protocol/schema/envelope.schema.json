@@ -69,11 +69,12 @@
       "required": ["localOnly"],
       "properties": {
         "localOnly": {
-          "type": "boolean",
+          "const": true,
           "description": "Trace ids must not leave the device unless the user opted in (HYP-M2-014)"
         },
         "spanId": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
         }
       }
     }

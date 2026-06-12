@@ -62,7 +62,7 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 | `sentAtUnixMs` | integer | yes | Sender wall clock; diagnostics only, never identity (see notification key rule). |
 | `requiresAck` | boolean | yes | If true, receiver MUST send `ack` within 10 s or sender treats it as `protocol/ack-timeout`. |
 | `payload` | object | yes | Type-specific body (may be `{}`). |
-| `trace` | object | no | `localOnly: true` by default. Trace/span ids MUST NOT leave the device unless the user opted into diagnostics sharing (HYP-M2-014). |
+| `trace` | object | no | Local trace context. If present, `localOnly` MUST be `true` and `spanId`, when present, MUST be a ULID. Trace/span ids MUST NOT appear in redacted diagnostics exports unless the user explicitly opts in (HYP-M2-014). |
 
 ## 4. Session lifecycle
 

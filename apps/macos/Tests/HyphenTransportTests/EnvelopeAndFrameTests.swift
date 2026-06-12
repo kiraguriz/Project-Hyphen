@@ -27,6 +27,7 @@ final class EnvelopeAndFrameTests: XCTestCase {
     }
 
     func testRoundtripPreservesEveryField() throws {
+        let trace = try ProtocolTrace.local(spanId: "01JZ0000000000000000000000")
         let original = Envelope(
             messageId: Ulid.generate(),
             sessionId: "s_abc-123",
@@ -37,7 +38,7 @@ final class EnvelopeAndFrameTests: XCTestCase {
             sentAtUnixMs: 1_781_107_200_000,
             requiresAck: true,
             payload: ["key": "0|com.app|7|tag|10101", "n": 7],
-            trace: ["localOnly": true]
+            trace: trace.wireObject
         )
         let decoded = try Envelope.decode(original.encode())
         XCTAssertEqual(decoded.protocolId, original.protocolId)
@@ -81,6 +82,20 @@ final class EnvelopeAndFrameTests: XCTestCase {
         let json = String(data: try envelope().encode(), encoding: .utf8)!
             .replacingOccurrences(of: "\"payload\":{}", with: "\"payload\":{},\"trace\":{\"localOnly\":true,\"extra\":1}")
         XCTAssertThrowsError(try Envelope.decode(Data(json.utf8)))
+
+        let localOnlyFalse = String(data: try envelope().encode(), encoding: .utf8)!
+            .replacingOccurrences(
+                of: "\"payload\":{}",
+                with: "\"payload\":{},\"trace\":{\"localOnly\":false,\"spanId\":\"01JZ0000000000000000000000\"}"
+            )
+        XCTAssertThrowsError(try Envelope.decode(Data(localOnlyFalse.utf8)))
+
+        let badSpan = String(data: try envelope().encode(), encoding: .utf8)!
+            .replacingOccurrences(
+                of: "\"payload\":{}",
+                with: "\"payload\":{},\"trace\":{\"localOnly\":true,\"spanId\":\"not-a-ulid\"}"
+            )
+        XCTAssertThrowsError(try Envelope.decode(Data(badSpan.utf8)))
     }
 
     func testFramesRoundtripThroughDribbledFeeds() throws {

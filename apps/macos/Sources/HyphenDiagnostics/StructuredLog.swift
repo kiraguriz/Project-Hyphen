@@ -13,6 +13,7 @@ public struct StructuredLogEvent: Equatable {
     public let category: String
     public let code: String
     public let attributes: [String: String]
+    public let traceId: String?
 }
 
 public enum DiagnosticLogError: Error, Equatable {
@@ -40,9 +41,13 @@ public final class LocalStructuredLogStore {
     public func recordFailure(
         code: String,
         component: String,
-        operation: String
+        operation: String,
+        traceId: String? = nil
     ) throws -> StructuredLogEvent {
         let safeCode = try validateCode(code)
+        if let traceId, !ProtocolTrace.isValidSpanId(traceId) {
+            throw DiagnosticLogError.unsafeMetadata
+        }
         let event = StructuredLogEvent(
             timestampUnixMs: clock(),
             level: .error,
@@ -51,7 +56,8 @@ public final class LocalStructuredLogStore {
             attributes: [
                 "component": try validateToken(component),
                 "operation": try validateToken(operation),
-            ]
+            ],
+            traceId: traceId
         )
         append(event)
         return event
@@ -137,6 +143,7 @@ public final class RedactedDiagnosticsExporter {
     private let osMajor: Int
     private let osMinor: Int
     private let osPatch: Int
+    private let includeTraceIds: Bool
     private let clock: () -> Int64
 
     public init(
@@ -145,6 +152,7 @@ public final class RedactedDiagnosticsExporter {
         osMajor: Int,
         osMinor: Int,
         osPatch: Int,
+        includeTraceIds: Bool = false,
         clock: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
     ) {
         self.logs = logs
@@ -152,6 +160,7 @@ public final class RedactedDiagnosticsExporter {
         self.osMajor = osMajor
         self.osMinor = osMinor
         self.osPatch = osPatch
+        self.includeTraceIds = includeTraceIds
         self.clock = clock
     }
 
@@ -190,12 +199,16 @@ public final class RedactedDiagnosticsExporter {
     }
 
     private func eventDictionary(_ event: StructuredLogEvent) -> [String: Any] {
-        [
+        var dict: [String: Any] = [
             "timestampUnixMs": event.timestampUnixMs,
             "level": event.level.rawValue,
             "category": event.category,
             "code": event.code,
             "attributes": event.attributes,
         ]
+        if includeTraceIds, let traceId = event.traceId {
+            dict["traceId"] = traceId
+        }
+        return dict
     }
 }

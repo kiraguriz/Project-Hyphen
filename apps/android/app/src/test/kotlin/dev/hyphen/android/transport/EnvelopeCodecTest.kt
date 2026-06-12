@@ -35,6 +35,7 @@ class EnvelopeCodecTest {
 
     @Test
     fun `roundtrip preserves every field`() {
+        val trace = ProtocolTrace.local("01JZ0000000000000000000000")
         val original = Envelope(
             messageId = Ulid.generate(),
             sessionId = "s_abc-123",
@@ -45,7 +46,7 @@ class EnvelopeCodecTest {
             sentAtUnixMs = 1_781_107_200_000,
             requiresAck = true,
             payload = Json.obj("key" to Json.Str("0|com.app|7|tag|10101")),
-            trace = Json.obj("localOnly" to Json.Bool(true)),
+            trace = trace.toJson(),
         )
         assertEquals(original, Envelope.decode(original.encode()))
     }
@@ -95,6 +96,20 @@ class EnvelopeCodecTest {
         ).replaceFirst("\"payload\"", """"trace":{"localOnly":true,"extra":1},"payload"""")
         assertThrows(EnvelopeException::class.java) {
             Envelope.decode(withBadTrace.toByteArray())
+        }
+
+        val localOnlyFalse = String(
+            envelope().encode(), Charsets.UTF_8
+        ).replaceFirst("\"payload\"", """"trace":{"localOnly":false,"spanId":"01JZ0000000000000000000000"},"payload"""")
+        assertThrows(EnvelopeException::class.java) {
+            Envelope.decode(localOnlyFalse.toByteArray())
+        }
+
+        val badSpan = String(
+            envelope().encode(), Charsets.UTF_8
+        ).replaceFirst("\"payload\"", """"trace":{"localOnly":true,"spanId":"not-a-ulid"},"payload"""")
+        assertThrows(EnvelopeException::class.java) {
+            Envelope.decode(badSpan.toByteArray())
         }
     }
 }

@@ -8,5 +8,5 @@
   "sentAtUnixMs": 1781020800123,
   "requiresAck": true,
   "payload": { "key": "0|com.example|1|tag|10101" },
-  "trace": { "localOnly": true, "spanId": "abc123" }
+  "trace": { "localOnly": true, "spanId": "01JZ0000000000000000000000" }
 }

@@ -6,6 +6,7 @@ class RedactedDiagnosticsExporter(
     private val logs: LocalStructuredLogStore,
     private val appVersion: String,
     private val sdkInt: Int,
+    private val includeTraceIds: Boolean = false,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     fun previewJson(): String = buildBundle().encode()
@@ -29,12 +30,17 @@ class RedactedDiagnosticsExporter(
         )
     }
 
-    private fun eventToJson(event: StructuredLogEvent): Json.Obj =
-        Json.obj(
+    private fun eventToJson(event: StructuredLogEvent): Json.Obj {
+        val entries = linkedMapOf(
             "timestampUnixMs" to Json.Num(event.timestampUnixMs.toString()),
             "level" to Json.Str(event.level.name.lowercase()),
             "category" to Json.Str(event.category),
             "code" to Json.Str(event.code),
             "attributes" to Json.Obj(event.attributes.toSortedMap().mapValues { Json.Str(it.value) }),
         )
+        if (includeTraceIds && event.traceId != null) {
+            entries["traceId"] = Json.Str(event.traceId)
+        }
+        return Json.Obj(entries)
+    }
 }

@@ -61,6 +61,20 @@ final class StructuredLogTests: XCTestCase {
         )
     }
 
+    func testStoreCanKeepAValidatedLocalTraceId() throws {
+        let store = LocalStructuredLogStore(clock: { 1 })
+        let trace = try ProtocolTrace.local(spanId: "01JZ0000000000000000000000")
+
+        let event = try store.recordFailure(
+            code: "protocol/ack-timeout",
+            component: "protocol-session",
+            operation: "ack-timeout",
+            traceId: trace.spanId
+        )
+
+        XCTAssertEqual(event.traceId, "01JZ0000000000000000000000")
+    }
+
     func testUnsafeCodesAndMetadataAreRejected() {
         let store = LocalStructuredLogStore(clock: { 1 })
 
@@ -75,6 +89,14 @@ final class StructuredLogTests: XCTestCase {
                 code: "transport/frame-too-large",
                 component: "protocol-session",
                 operation: "/Users/alice/private.txt"
+            )
+        )
+        XCTAssertThrowsError(
+            try store.recordFailure(
+                code: "protocol/ack-timeout",
+                component: "protocol-session",
+                operation: "ack-timeout",
+                traceId: "not-a-ulid"
             )
         )
     }
@@ -130,6 +152,39 @@ final class StructuredLogTests: XCTestCase {
         let bundle = try XCTUnwrap(parseObject(try exporter.previewJSON()))
         XCTAssertEqual(bundle["eventCount"] as? Int, 0)
         XCTAssertEqual((bundle["events"] as? [[String: Any]])?.count, 0)
+    }
+
+    func testTraceIdsStayOutOfDiagnosticsUnlessExplicitlyIncluded() throws {
+        let store = LocalStructuredLogStore(clock: { 100 })
+        try store.recordFailure(
+            code: "protocol/ack-timeout",
+            component: "protocol-session",
+            operation: "ack-timeout",
+            traceId: "01JZ0000000000000000000000"
+        )
+
+        let defaultJSON = try RedactedDiagnosticsExporter(
+            logs: store,
+            appVersion: "0.0.1",
+            osMajor: 15,
+            osMinor: 5,
+            osPatch: 0,
+            clock: { 200 }
+        ).previewJSON()
+        XCTAssertFalse(defaultJSON.contains("01JZ0000000000000000000000"))
+
+        let optInJSON = try RedactedDiagnosticsExporter(
+            logs: store,
+            appVersion: "0.0.1",
+            osMajor: 15,
+            osMinor: 5,
+            osPatch: 0,
+            includeTraceIds: true,
+            clock: { 200 }
+        ).previewJSON()
+        let bundle = try XCTUnwrap(parseObject(optInJSON))
+        let events = try XCTUnwrap(bundle["events"] as? [[String: Any]])
+        XCTAssertEqual(events[0]["traceId"] as? String, "01JZ0000000000000000000000")
     }
 
     private func parseObject(_ json: String) throws -> [String: Any]? {

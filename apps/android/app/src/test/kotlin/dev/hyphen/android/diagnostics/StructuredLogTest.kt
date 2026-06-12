@@ -1,6 +1,7 @@
 package dev.hyphen.android.diagnostics
 
 import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.ProtocolTrace
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -77,6 +78,21 @@ class StructuredLogTest {
     }
 
     @Test
+    fun `store can keep a validated local trace id`() {
+        val logs = LocalStructuredLogStore(clock = { 1L })
+        val trace = ProtocolTrace.local("01JZ0000000000000000000000")
+
+        val event = logs.recordFailure(
+            code = "protocol/ack-timeout",
+            component = "protocol-session",
+            operation = "ack-timeout",
+            traceId = trace.spanId,
+        )
+
+        assertEquals("01JZ0000000000000000000000", event.traceId)
+    }
+
+    @Test
     fun `unsafe codes and metadata are rejected`() {
         val logs = LocalStructuredLogStore(clock = { 1L })
 
@@ -88,6 +104,9 @@ class StructuredLogTest {
         }
         assertThrows(IllegalArgumentException::class.java) {
             logs.recordFailure("transport/frame-too-large", "protocol-session", "/Users/alice/private.txt")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            logs.recordFailure("protocol/ack-timeout", "protocol-session", "ack-timeout", "not-a-ulid")
         }
     }
 }

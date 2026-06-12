@@ -8,6 +8,30 @@ public struct EnvelopeError: Error, CustomStringConvertible {
     init(_ detail: String) { self.detail = detail }
 }
 
+public struct ProtocolTrace: Equatable {
+    public let spanId: String
+
+    private init(spanId: String) {
+        self.spanId = spanId
+    }
+
+    public static func local(spanId: String = Ulid.generate()) throws -> ProtocolTrace {
+        guard isValidSpanId(spanId) else { throw EnvelopeError("trace.spanId must be a ULID") }
+        return ProtocolTrace(spanId: spanId)
+    }
+
+    public static func isValidSpanId(_ spanId: String) -> Bool {
+        Ulid.isValid(spanId)
+    }
+
+    public var wireObject: [String: Any] {
+        [
+            "localOnly": true,
+            "spanId": spanId,
+        ]
+    }
+}
+
 /// Protocol v0 envelope (HYP-M2-012, protocol doc §3) — model + strict
 /// codec matching `protocol/schema/envelope.schema.json` exactly: unknown
 /// fields rejected, patterns enforced, `sessionId` nullable. JSON via
@@ -144,11 +168,13 @@ public struct Envelope {
             }
             let extras = Set(traceObj.keys).subtracting(["localOnly", "spanId"])
             guard extras.isEmpty else { throw EnvelopeError("unknown trace fields: \(extras.sorted())") }
-            guard let rawLocalOnly = traceObj["localOnly"], isBoolean(rawLocalOnly) else {
+            guard let rawLocalOnly = traceObj["localOnly"], isBoolean(rawLocalOnly), let localOnly = rawLocalOnly as? Bool else {
                 throw EnvelopeError("trace.localOnly missing or not boolean")
             }
-            if let spanId = traceObj["spanId"], !(spanId is String) {
-                throw EnvelopeError("trace.spanId must be a string")
+            guard localOnly else { throw EnvelopeError("trace.localOnly must be true") }
+            if let spanId = traceObj["spanId"] {
+                guard let spanId = spanId as? String else { throw EnvelopeError("trace.spanId must be a string") }
+                guard Ulid.isValid(spanId) else { throw EnvelopeError("trace.spanId must be a ULID") }
             }
             trace = traceObj
         }

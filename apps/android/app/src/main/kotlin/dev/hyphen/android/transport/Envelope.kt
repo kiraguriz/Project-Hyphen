@@ -119,9 +119,17 @@ data class Envelope(
         private fun validateTrace(trace: Json.Obj): Json.Obj {
             val unknown = trace.entries.keys - setOf("localOnly", "spanId")
             if (unknown.isNotEmpty()) throw EnvelopeException("unknown trace fields: $unknown")
-            if (trace["localOnly"] !is Json.Bool) throw EnvelopeException("trace.localOnly missing or not boolean")
-            if (trace.entries.containsKey("spanId") && trace["spanId"] !is Json.Str) {
-                throw EnvelopeException("trace.spanId must be a string")
+            val localOnly = trace["localOnly"] as? Json.Bool
+                ?: throw EnvelopeException("trace.localOnly missing or not boolean")
+            if (!localOnly.value) throw EnvelopeException("trace.localOnly must be true")
+            when (val spanId = trace["spanId"]) {
+                null -> Unit
+                is Json.Str -> {
+                    if (!ProtocolTrace.isValidSpanId(spanId.value)) {
+                        throw EnvelopeException("trace.spanId must be a ULID")
+                    }
+                }
+                else -> throw EnvelopeException("trace.spanId must be a string")
             }
             return trace
         }
@@ -139,6 +147,23 @@ data class Envelope(
         private fun long(obj: Json.Obj, field: String): Long =
             (obj[field] as? Json.Num ?: throw EnvelopeException("$field missing or not a number"))
                 .asLong() ?: throw EnvelopeException("$field is not an integer")
+    }
+}
+
+class ProtocolTrace private constructor(val spanId: String) {
+    fun toJson(): Json.Obj =
+        Json.obj(
+            "localOnly" to Json.Bool(true),
+            "spanId" to Json.Str(spanId),
+        )
+
+    companion object {
+        fun local(spanId: String = Ulid.generate()): ProtocolTrace {
+            require(isValidSpanId(spanId)) { "spanId must be a ULID" }
+            return ProtocolTrace(spanId)
+        }
+
+        fun isValidSpanId(spanId: String): Boolean = Ulid.isValid(spanId)
     }
 }
 

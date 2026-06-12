@@ -3,6 +3,7 @@ package dev.hyphen.android.diagnostics
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.HeartbeatMonitor
 import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.ProtocolTrace
 import java.util.ArrayDeque
 
 enum class DiagnosticLogLevel {
@@ -17,6 +18,7 @@ data class StructuredLogEvent(
     val category: String,
     val code: String,
     val attributes: Map<String, String> = emptyMap(),
+    val traceId: String? = null,
 )
 
 class LocalStructuredLogStore(
@@ -34,8 +36,12 @@ class LocalStructuredLogStore(
         code: String,
         component: String,
         operation: String,
+        traceId: String? = null,
     ): StructuredLogEvent {
         val safeCode = validateCode(code)
+        val safeTraceId = traceId?.also {
+            require(ProtocolTrace.isValidSpanId(it)) { "traceId must be a ULID" }
+        }
         val event = StructuredLogEvent(
             timestampUnixMs = clock(),
             level = DiagnosticLogLevel.ERROR,
@@ -45,6 +51,7 @@ class LocalStructuredLogStore(
                 "component" to validateToken("component", component),
                 "operation" to validateToken("operation", operation),
             ),
+            traceId = safeTraceId,
         )
         append(event)
         return event
