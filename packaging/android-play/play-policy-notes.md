@@ -39,10 +39,13 @@ Local/on-device data:
 - In-memory notification mirror state while mirroring is active.
 - User-selected text/link/file payloads transmitted only to the paired local peer over pinned TLS.
 
-Potential opt-in beta diagnostics, if later enabled:
+Opt-in beta diagnostics:
 
-- Device class, OS/app version, failure codes, reconnect counts, and latency distributions.
+- Current implementation: default-off local toggle that includes trace IDs in preview/export only when enabled.
+- Planned/release-candidate scope may later add device class, OS/app version, failure codes, reconnect counts, and latency distributions. Re-review Data safety before adding those fields.
 - User preview/export controls and deletion controls are required before collection or sharing.
+
+Release-specific wording is drafted in [`data-safety-draft.md`](data-safety-draft.md).
 
 ## Closed Testing Notes
 
@@ -54,5 +57,5 @@ Potential opt-in beta diagnostics, if later enabled:
 
 - Notification Listener permission needs clear core-feature rationale.
 - Foreground-service declarations must match actual runtime usage and visible notification copy.
-- Data safety must not overclaim "not collected" for user-triggered diagnostics exports if those are shared with maintainers.
+- Data safety must not overclaim "not collected" for user-triggered diagnostics exports if those are shared with maintainers; use [`data-safety-draft.md`](data-safety-draft.md) as the current source.
 - Play builds must not include features excluded by ADR-0003.

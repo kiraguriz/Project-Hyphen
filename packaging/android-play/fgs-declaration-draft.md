@@ -52,7 +52,7 @@ Before a Play Console declaration is submitted, collect:
 | Foreground notification screenshots for connected link and active transfer | Physical Android device |
 | 1 GiB transfer resume log | `docs/test-plans/hyp-m3-015-1gb-transfer-test.md` |
 | Device/OEM matrix rows for FGS visibility and transfer resume | `docs/compatibility-matrix.md` |
-| Data safety statement aligned with diagnostics/export behavior | HYP-M5-005 |
+| Data safety statement aligned with diagnostics/export behavior | `data-safety-draft.md` |
 
 ## Explicit Non-Uses
 
@@ -72,4 +72,4 @@ Hyphen v1 does not use these FGS categories or permission surfaces:
 - `POST_NOTIFICATIONS` runtime handling for FGS visibility is not implemented yet.
 - HYP-M4-005 Android device matrix is blocked by lack of devices.
 - HYP-M3-015 1 GiB transfer execution is blocked by lack of a paired Android/macOS session.
-- HYP-M5-005 Data safety statement is still pending HYP-M4-004.
+- Play privacy policy URL and final Data safety form submission are still pending.

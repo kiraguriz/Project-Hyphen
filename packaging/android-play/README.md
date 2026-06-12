@@ -34,3 +34,4 @@ If any signing variable is set, all four must be set; the Gradle build fails clo
 ## Play Policy Drafts
 
 - [Foreground service declaration draft](fgs-declaration-draft.md)
+- [Data safety statement draft](data-safety-draft.md)
