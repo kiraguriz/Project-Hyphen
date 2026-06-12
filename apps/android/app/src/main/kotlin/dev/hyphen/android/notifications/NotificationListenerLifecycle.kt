@@ -1,5 +1,7 @@
 package dev.hyphen.android.notifications
 
+import android.service.notification.StatusBarNotification
+
 enum class NotificationListenerConnectionState {
     DISCONNECTED,
     CONNECTED,
@@ -38,6 +40,7 @@ class NotificationListenerLifecycle {
 
 object HyphenNotificationListenerRuntime {
     private val lifecycle = NotificationListenerLifecycle()
+    private var eventSender: NotificationMirrorEventSender? = null
 
     fun state(): NotificationListenerConnectionState = synchronized(lifecycle) {
         lifecycle.state
@@ -57,5 +60,24 @@ object HyphenNotificationListenerRuntime {
 
     fun onDestroyed() = synchronized(lifecycle) {
         lifecycle.onDestroyed()
+    }
+
+    fun bindNotificationOutbox(outbox: NotificationOutbox) = synchronized(lifecycle) {
+        eventSender = NotificationMirrorEventSender(outbox)
+    }
+
+    fun clearNotificationOutbox() = synchronized(lifecycle) {
+        eventSender = null
+    }
+
+    fun onNotificationPosted(sbn: StatusBarNotification): String? {
+        val sender = synchronized(lifecycle) { eventSender } ?: return null
+        val payload = NormalizedNotificationPayload.fromStatusBarNotification(sbn)
+        return runCatching { sender.sendPostedOrUpdated(payload) }.getOrNull()
+    }
+
+    fun onNotificationRemoved(sbn: StatusBarNotification): String? {
+        val sender = synchronized(lifecycle) { eventSender } ?: return null
+        return runCatching { sender.sendRemoved(sbn.key) }.getOrNull()
     }
 }

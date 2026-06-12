@@ -169,7 +169,7 @@ gantt
 |---|---|---|---|---|---|---|---|
 | HYP-M3-001 | `[?]` | P0 | Notifications | Implement Android NotificationListenerService scaffold | HYP-M2-013 | Permission onboarding and service lifecycle work | Manual test |
 | HYP-M3-002 | `[x]` | P0 | Notifications | Normalize notification payload using `sbn.getKey()` | HYP-M3-001 | `postTime` not used in primary key | Unit test |
-| HYP-M3-003 | `[ ]` | P0 | Notifications | Implement posted/updated/removed events | HYP-M3-002 | Same key updates existing record | Integration test |
+| HYP-M3-003 | `[x]` | P0 | Notifications | Implement posted/updated/removed events | HYP-M3-002 | Same key updates existing record | Integration test |
 | HYP-M3-004 | `[ ]` | P0 | macOS Notifications | Show/update/remove macOS notifications | HYP-M3-003 | One Android key maps to one macOS ID | Manual test |
 | HYP-M3-005 | `[ ]` | P0 | Notifications | Implement privacy filters | HYP-M3-004 | Hidden-body mode leaks no body text | Unit/manual test |
 | HYP-M3-006 | `[ ]` | P0 | Notifications | Implement Mac-side dismiss request | HYP-M3-004 | Android cancels notification or returns explicit error | Manual test |
@@ -354,7 +354,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M0 Scope/Ops | 15 | 0 | 0 | 0 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 15 | 0 | 0 | 0 |
-| M3 Feature MVP | 5 | 0 | 3 | 7 |
+| M3 Feature MVP | 6 | 0 | 3 | 6 |
 | M4 Beta Hardening | 2 | 0 | 2 | 8 |
 | M5 Distribution | 1 | 0 | 2 | 7 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
@@ -423,3 +423,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M2-014 `[x]` — Added protocol-level local trace helpers on Android and macOS. Envelope trace validation now requires `localOnly: true` and ULID-shaped `spanId` values, with schema fixtures pinning rejection of non-local trace metadata. Structured diagnostic events can keep a validated local trace id, but Android and macOS redacted diagnostics exporters omit it by default and include it only when constructed with explicit trace inclusion. Protocol docs now state the local-only trace rules. Verified: `./gradlew test assembleDebug` green; `swift test` green; `./scripts/check.sh` green.
 - 2026-06-12 — HYP-M2-015 `[x]` — Updated `docs/protocol/hyphen-protocol-v0.md` with the M2 implementation decisions: strict envelope/hello validation, trace `localOnly`/ULID rules, core-vs-plugin type handling, heartbeat/ack timeout behavior, in-memory single-use resume-token semantics, TLS 1.3 Android API 26-28 behavior, and default-redacted trace export rules. Deferred post-M2 protocol questions are now separated from resolved implementation behavior. Verified: `./scripts/check.sh` green.
 - 2026-06-12 — HYP-M3-002 `[x]` — Added Android notification payload normalization for `notifications.v1`: `NormalizedNotificationPayload.fromStatusBarNotification(...)` extracts the stable `sbnKey` from `StatusBarNotification.getKey()` (Kotlin `sbn.key`), package/display fields, category, clearable, and ongoing state, while keeping `postTime` out of identity and JSON payloads. Protocol docs now define the notification payload fields and repeat the no-`postTime` identity rule. Verified: baseline `./gradlew test assembleDebug` green; post-change `./gradlew test assembleDebug` green; `./scripts/check.sh` green.
+- 2026-06-12 — HYP-M3-003 `[x]` — Android notification listener callbacks now route posted/removed `StatusBarNotification` events into a session-bound `NotificationMirrorEventSender`. The sender emits acked `notification.posted`, `notification.updated`, and `notification.removed` envelopes under `notifications.v1`; the first seen `sbnKey` posts, repeated keys update the same record, and removals carry only `sbnKey` so stale macOS records can close even after service restarts. MainActivity binds the notification outbox only while a paired `ProtocolSession` is active. Verified: `./gradlew test assembleDebug` green; `./scripts/check.sh` green.

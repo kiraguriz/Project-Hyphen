@@ -29,6 +29,7 @@ import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationAccessController
+import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.EndpointConnectProbe
 import dev.hyphen.android.pairing.EndpointParser
 import dev.hyphen.android.pairing.PairingTranscript
@@ -291,7 +292,10 @@ class MainActivity : Activity() {
                     }
 
                     override fun onClosed() {
-                        if (activeSession === session) activeSession = null
+                        if (activeSession === session) {
+                            activeSession = null
+                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
+                        }
                         runOnUiThread { append("Mac session closed") }
                     }
                 }
@@ -303,6 +307,9 @@ class MainActivity : Activity() {
                 )
                 activeSession?.stop()
                 activeSession = session
+                HyphenNotificationListenerRuntime.bindNotificationOutbox(
+                    ProtocolSessionNotificationOutbox(session),
+                )
                 session.start()
                 runOnUiThread {
                     append("session connected to ${handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"}")
@@ -495,6 +502,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        HyphenNotificationListenerRuntime.clearNotificationOutbox()
         activeSession?.stop()
         activeSession = null
         manager?.stop()
