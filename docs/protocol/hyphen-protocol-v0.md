@@ -157,6 +157,24 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 
 Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M2-001/002); this table is the index.
 
+### 7.1 `text.send` payload
+
+`text.send` is the v0 text/link plugin message (HYP-M3-008/009). It is always sent under capability `text.v1`, requires an ack, and the receiver MUST present the content for explicit user confirmation before copying or opening it.
+
+```json
+{
+  "kind": "text",
+  "value": "hello from Android"
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `kind` | string | yes | `text` or `url` |
+| `value` | string | yes | Non-empty after trimming; max 8192 Unicode scalar values |
+
+URL values are limited to `http` and `https` in v0. Other schemes are rejected rather than opened or copied implicitly.
+
 ## 8. Error taxonomy
 
 Error payload: `{ "code": "category/short-code", "message": "human readable, no sensitive content", "regarding": "<messageId|null>", "retryable": true|false }`
