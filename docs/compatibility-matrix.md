@@ -71,4 +71,5 @@ and log templates, not completed test results.
 | Date | Tester | Build / commit | Artifact | Scope | Notes |
 |---|---|---|---|---|---|
 | 2026-06-12 | Codex | 79c75a1 | `/Users/haitianzhu/Library/Android/sdk/platform-tools/adb devices -l` | HYP-M4-005 Android device matrix | blocked: no attached Android devices or emulators were listed, so the first five OS/OEM/network rows could not be observed. |
+| 2026-06-12 | Codex | 8a086cc | `sw_vers` | HYP-M4-006 macOS matrix | blocked: current host is macOS 26.5.1 build 25F80, but two additional macOS OS/device combinations and a paired Android session are unavailable. |
 | YYYY-MM-DD | TBD | TBD | TBD | TBD |  |
