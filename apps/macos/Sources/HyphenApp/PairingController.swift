@@ -1,5 +1,6 @@
 import AppKit
 import HyphenCore
+import HyphenText
 import HyphenTransport
 import Network
 
@@ -19,6 +20,9 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var codeLabel: NSTextField?
     private var pendingFingerprint: Data?
     private var provisionalConnection: NWConnection?
+    private var activeSession: ProtocolSession?
+    private let tokenStore = ResumeTokenStore()
+    private let textReceiver = TextLinkReceiver()
     private let onStatus: (String) -> Void
 
     init(onStatus: @escaping (String) -> Void) {
@@ -66,6 +70,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                         self.presentSasConfirmation(
                             identity: identity,
                             nonce: nonce,
+                            deviceName: deviceName,
                             peerFingerprint: peerFingerprint
                         )
                     }
@@ -79,6 +84,8 @@ final class PairingController: NSObject, NSWindowDelegate {
     func endPairing() {
         listener?.stop()
         listener = nil
+        activeSession?.stop()
+        activeSession = nil
         provisionalConnection?.cancel()
         provisionalConnection = nil
         pendingFingerprint = nil
@@ -143,7 +150,12 @@ final class PairingController: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func presentSasConfirmation(identity: DeviceIdentity, nonce: Data, peerFingerprint: Data) {
+    private func presentSasConfirmation(
+        identity: DeviceIdentity,
+        nonce: Data,
+        deviceName: String,
+        peerFingerprint: Data
+    ) {
         guard let transcript = PairingTranscript(
             nonce: nonce,
             macSpkiFingerprint: identity.spkiFingerprint,
@@ -174,6 +186,15 @@ final class PairingController: NSObject, NSWindowDelegate {
             do {
                 try gate.confirm()
                 onStatus("Paired — fingerprint pinned (\(gate.sas))")
+                closePairingUI()
+                startSteadySession(
+                    connection: provisionalConnection,
+                    deviceName: deviceName,
+                    peerFingerprint: peerFingerprint
+                )
+                provisionalConnection = nil
+                pendingFingerprint = nil
+                return
             } catch {
                 onStatus("Trust store write failed: \(error)")
             }
@@ -182,6 +203,116 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("Pairing rejected — nothing stored")
         }
         endPairing()
+    }
+
+    private func closePairingUI() {
+        listener?.stop()
+        listener = nil
+        if let window {
+            window.delegate = nil
+            window.orderOut(nil)
+        }
+        window = nil
+        codeLabel = nil
+    }
+
+    private func startSteadySession(connection: NWConnection?, deviceName: String, peerFingerprint: Data) {
+        guard let connection else {
+            onStatus("Pairing completed but no TLS connection remained")
+            return
+        }
+        let device = SessionHandshake.DeviceInfo(
+            kind: "macos",
+            appVersion: HyphenCore.version,
+            deviceName: deviceName
+        )
+        SessionHandshake.respond(
+            connection: connection,
+            device: device,
+            peerFingerprint: peerFingerprint,
+            tokenStore: tokenStore,
+            queue: queue
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                connection.cancel()
+                DispatchQueue.main.async {
+                    self.onStatus("Session handshake failed: \(error)")
+                }
+            case .success(let handshake):
+                var callbacks = ProtocolSession.Callbacks()
+                callbacks.onEnvelope = { [weak self] envelope in
+                    self?.handleSessionEnvelope(envelope)
+                }
+                callbacks.onClosed = { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.onStatus("Phone session closed")
+                    }
+                }
+                var config = ProtocolSession.Config()
+                config.startingSeq = 1
+                let session = ProtocolSession(
+                    connection: connection,
+                    sessionId: handshake.sessionId,
+                    config: config,
+                    callbacks: callbacks
+                )
+                self.activeSession = session
+                session.start(replaying: handshake.leftover)
+                DispatchQueue.main.async {
+                    let name = handshake.peerDeviceName ?? "Android device"
+                    self.onStatus("Connected to \(name)")
+                }
+            }
+        }
+    }
+
+    private func handleSessionEnvelope(_ envelope: Envelope) {
+        do {
+            guard let request = try textReceiver.handle(envelope) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.presentTextLinkConfirmation(request)
+            }
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.onStatus("Text/link rejected: \(error)")
+            }
+        }
+    }
+
+    private func presentTextLinkConfirmation(_ request: TextLinkConfirmationRequest) {
+        let alert = NSAlert()
+        switch request.message.kind {
+        case .text:
+            alert.messageText = "Copy text from Android?"
+            alert.addButton(withTitle: "Copy")
+        case .url:
+            alert.messageText = "Open link from Android?"
+            alert.addButton(withTitle: "Open")
+        }
+        alert.informativeText = request.message.value
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            onStatus("Text/link declined")
+            return
+        }
+        switch request.message.kind {
+        case .text:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(request.message.value, forType: .string)
+            onStatus("Text copied from Android")
+        case .url:
+            if let url = URL(string: request.message.value) {
+                NSWorkspace.shared.open(url)
+                onStatus("Link opened from Android")
+            } else {
+                onStatus("Link rejected: invalid URL")
+            }
+        }
     }
 
     func windowWillClose(_ notification: Notification) {

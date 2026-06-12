@@ -3,6 +3,7 @@ package dev.hyphen.android
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
+import android.os.Build
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
@@ -26,7 +27,13 @@ import dev.hyphen.android.pairing.PairingTranscript
 import dev.hyphen.android.pairing.ParseResult
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.pairing.SasConfirmationGate
+import dev.hyphen.android.text.ProtocolSessionTextLinkOutbox
+import dev.hyphen.android.text.TextLinkMessage
+import dev.hyphen.android.text.TextLinkSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
+import dev.hyphen.android.transport.HeartbeatMonitor
+import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
 import javax.net.ssl.SSLSocket
@@ -38,6 +45,9 @@ class MainActivity : Activity() {
     private var manager: DiscoveryManager? = null
     private lateinit var log: TextView
     private lateinit var button: Button
+    private var activeSession: ProtocolSession? = null
+    private var resumeToken: String? = null
+    private var lastSessionId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,6 +99,14 @@ class MainActivity : Activity() {
             setOnClickListener { showNotificationAccessOnboarding() }
         }
 
+        val textInput = EditText(this).apply {
+            hint = "Text or https:// link to send to Mac"
+        }
+        val sendTextButton = Button(this).apply {
+            text = "Send text/link to Mac"
+            setOnClickListener { sendTextLink(textInput.text.toString()) }
+        }
+
         setContentView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -100,6 +118,8 @@ class MainActivity : Activity() {
                 addView(listButton)
                 addView(notificationStatusButton)
                 addView(notificationSettingsButton)
+                addView(textInput)
+                addView(sendTextButton)
                 addView(ScrollView(this@MainActivity).apply { addView(log) })
             }
         )
@@ -158,8 +178,8 @@ class MainActivity : Activity() {
      * Android side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
      * provisional TLS connect pinning the QR's fingerprint, compute the
      * SAS, and write trust only through the gate when the user confirms.
-     * The provisional socket closes after the decision — steady-state
-     * sessions arrive with M2-012/013.
+     * Once trusted, the same socket becomes the first steady-state
+     * ProtocolSession so M3 debug features can send over it.
      */
     private fun startPairing(qr: ParsedEndpoint.QrPayload) {
         append("pairing: provisional TLS to ${qr.host}:${qr.port} …")
@@ -185,14 +205,14 @@ class MainActivity : Activity() {
                     peerDisplayName = qr.deviceName ?: "Mac",
                     trustStore = AndroidTrustStores.openDefault(applicationContext),
                 )
-                runOnUiThread { presentSasDialog(gate, socket) }
+                runOnUiThread { presentSasDialog(qr, gate, socket) }
             } catch (e: Exception) {
                 runOnUiThread { append("pairing failed: ${e.message}") }
             }
         }.start()
     }
 
-    private fun presentSasDialog(gate: SasConfirmationGate, socket: SSLSocket) {
+    private fun presentSasDialog(qr: ParsedEndpoint.QrPayload, gate: SasConfirmationGate, socket: SSLSocket) {
         fun closeSocket() = Thread { runCatching { socket.close() } }.start()
         AlertDialog.Builder(this)
             .setTitle("Confirm pairing code")
@@ -200,7 +220,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Codes match — trust") { _, _ ->
                 gate.confirm()
                 append("paired — fingerprint pinned (${gate.sas})")
-                closeSocket()
+                startSteadySession(qr, socket)
             }
             .setNegativeButton("Reject") { _, _ ->
                 gate.reject()
@@ -209,6 +229,82 @@ class MainActivity : Activity() {
             }
             .setCancelable(false)
             .show()
+    }
+
+    private fun startSteadySession(qr: ParsedEndpoint.QrPayload, socket: SSLSocket) {
+        Thread {
+            try {
+                val device = SessionHandshake.DeviceInfo(
+                    kind = "android",
+                    appVersion = "0.0.1",
+                    deviceName = Build.MODEL,
+                )
+                val handshake = SessionHandshake.initiate(
+                    socket = socket,
+                    device = device,
+                    resumeToken = resumeToken,
+                    previousSessionId = lastSessionId,
+                )
+                resumeToken = handshake.resumeToken
+                lastSessionId = handshake.sessionId
+                lateinit var session: ProtocolSession
+                session = ProtocolSession(
+                    socket = socket,
+                    sessionId = handshake.sessionId,
+                    config = ProtocolSession.Config(startingSeq = 1),
+                    listener = object : ProtocolSession.Listener {
+                        override fun onLiveness(state: HeartbeatMonitor.State) {
+                            runOnUiThread { append("session liveness: $state") }
+                        }
+
+                        override fun onProtocolError(code: String, detail: String) {
+                            runOnUiThread { append("session protocol error: $code $detail") }
+                        }
+
+                        override fun onClosed() {
+                            if (activeSession === session) activeSession = null
+                            runOnUiThread { append("Mac session closed") }
+                        }
+                    },
+                )
+                activeSession?.stop()
+                activeSession = session
+                session.start()
+                runOnUiThread {
+                    append("session connected to ${handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"}")
+                }
+            } catch (e: Exception) {
+                runCatching { socket.close() }
+                runOnUiThread { append("session failed: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private fun sendTextLink(raw: String) {
+        val session = activeSession
+        if (session == null) {
+            append("text/link: no active Mac session")
+            return
+        }
+        val trimmed = raw.trim()
+        val message = try {
+            if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+                TextLinkMessage.url(trimmed)
+            } else {
+                TextLinkMessage.text(trimmed)
+            }
+        } catch (e: IllegalArgumentException) {
+            append("text/link rejected: ${e.message}")
+            return
+        }
+        Thread {
+            try {
+                val id = TextLinkSender(ProtocolSessionTextLinkOutbox(session)).send(message)
+                runOnUiThread { append("text/link sent: $id") }
+            } catch (e: Exception) {
+                runOnUiThread { append("text/link send failed: ${e.message}") }
+            }
+        }.start()
     }
 
     private fun showNotificationAccessOnboarding() {
@@ -282,6 +378,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        activeSession?.stop()
+        activeSession = null
         manager?.stop()
     }
 }
