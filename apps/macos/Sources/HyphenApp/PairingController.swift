@@ -1,6 +1,7 @@
 import AppKit
 import HyphenCore
 import HyphenDiagnostics
+import HyphenNotifications
 import HyphenText
 import HyphenTransport
 import Network
@@ -25,6 +26,9 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
+    private let notificationReceiver = NotificationMirrorReceiver(
+        presenter: UserNotificationCenterPresenter()
+    )
     private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
 
@@ -315,6 +319,12 @@ final class PairingController: NSObject, NSWindowDelegate {
 
     private func handleSessionEnvelope(_ envelope: Envelope) {
         do {
+            if let action = try notificationReceiver.handle(envelope) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.renderNotificationAction(action)
+                }
+                return
+            }
             guard let request = try textReceiver.handle(envelope) else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.presentTextLinkConfirmation(request)
@@ -323,6 +333,15 @@ final class PairingController: NSObject, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.onStatus("Text/link rejected: \(error)")
             }
+        }
+    }
+
+    private func renderNotificationAction(_ action: NotificationMirrorAction) {
+        switch action {
+        case .shown:
+            onStatus("Android notification mirrored")
+        case .removed:
+            onStatus("Android notification removed")
         }
     }
 
