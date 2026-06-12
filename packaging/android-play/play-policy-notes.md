@@ -15,6 +15,8 @@ Expected v1 FGS declarations:
 - `connectedDevice`: persistent paired-device connection, visible while the phone is linked to the Mac.
 - `dataSync`: user-initiated large file transfer only; not a hidden background sync channel.
 
+Release-specific wording is drafted in [`fgs-declaration-draft.md`](fgs-declaration-draft.md).
+
 Out of scope:
 
 - `remoteMessaging`: Hyphen is not a messaging app.

@@ -213,7 +213,7 @@ gantt
 | HYP-M5-003 | `[ ]` | P1 | macOS Dist | Create DMG/ZIP packaging script | HYP-M5-002 | Install path tested | Manual test |
 | HYP-M5-004 | `[?]` | P0 | Android Dist | Implement reproducible-ish Android release build | HYP-M1-001 | APK/AAB signed with release key process documented | Build script |
 | HYP-M5-005 | `[ ]` | P0 | Android Play | Draft Play Data safety statement | HYP-M0-012,HYP-M4-004 | Matches actual data behavior | Manual review |
-| HYP-M5-006 | `[ ]` | P0 | Android Play | Draft FGS declaration | HYP-M0-012,HYP-M3-015 | connectedDevice/dataSync usage justified | Manual review |
+| HYP-M5-006 | `[x]` | P0 | Android Play | Draft FGS declaration | HYP-M0-012,HYP-M3-015 | connectedDevice/dataSync usage justified | Manual review |
 | HYP-M5-007 | `[ ]` | P1 | F-Droid | Draft F-Droid metadata | HYP-M0-013,HYP-M5-004 | Metadata validates locally where possible | Manual/tooling |
 | HYP-M5-008 | `[ ]` | P1 | Docs | Write bilingual installation docs | HYP-M5-003,HYP-M5-004 | macOS/Android install paths clear | Manual review |
 | HYP-M5-009 | `[ ]` | P1 | Docs | Write troubleshooting guide | HYP-M4-005..008 | Covers LAN permission, mDNS, wake, OEM background | Manual review |
@@ -356,7 +356,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M2 Core Transport | 15 | 0 | 0 | 0 |
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 4 | 5 |
-| M5 Distribution | 1 | 0 | 2 | 7 |
+| M5 Distribution | 2 | 0 | 2 | 6 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
 
 Update this summary after each milestone review.
@@ -433,3 +433,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M3-015 `[?]` — **Test scaffold complete, manual execution blocked.** Added `scripts/create_large_transfer_fixture.py`, a standard-library deterministic fixture generator that writes a 1 GiB transfer file and `.sha256` sidecar by default, plus `docs/test-plans/hyp-m3-015-1gb-transfer-test.md` with preconditions, interruption/resume procedure, pass criteria, and a run-record table. Verified: fixture generator smoke run with `--size-bytes 4096`; `./scripts/check.sh` green. **Blocker**: acceptance still requires a paired Android/macOS session with real active file transfer to interrupt, resume, hash-check, and log.
 - 2026-06-12 — HYP-M4-005 `[?]` — **Manual Android compatibility matrix blocked.** Checked attached Android targets with `/Users/haitianzhu/Library/Android/sdk/platform-tools/adb devices -l`; output listed no attached devices, so no Pixel/Samsung/Xiaomi/OnePlus/Oppo/OEM rows can be observed or recorded. Added an evidence-log entry in `docs/compatibility-matrix.md`. **Blocker**: at least five physical Android devices or authorized emulators covering the required OS/OEM/network cases are unavailable in this environment.
 - 2026-06-12 — HYP-M4-006 `[?]` — **Manual macOS compatibility matrix blocked.** Current host reports macOS 26.5.1 build 25F80 via `sw_vers`, but this environment does not provide the three distinct macOS OS/device combinations required by the row, and the matrix scenarios also need a paired Android session for notification/text/transfer checks. Added an evidence-log entry in `docs/compatibility-matrix.md`. **Blocker**: two additional Mac OS/device combinations plus a paired Android device/session are unavailable here.
+- 2026-06-12 — HYP-M5-006 `[x]` — Added `packaging/android-play/fgs-declaration-draft.md`, a Play Console foreground-service declaration draft for `connectedDevice` and `dataSync`. The draft ties each type to user-visible local companion behavior, explicit user triggers, stop conditions, notification copy, local-first data handling, non-use of `remoteMessaging`/SMS/Call Log/Accessibility/background clipboard/cloud sync, and release evidence still required before submission. `packaging/android-play/README.md` and `play-policy-notes.md` now link to it. Manual review complete; no runtime behavior changed.

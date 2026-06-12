@@ -30,3 +30,7 @@ HYPHEN_ANDROID_KEY_PASSWORD="..." \
 ```
 
 If any signing variable is set, all four must be set; the Gradle build fails closed on partial signing configuration.
+
+## Play Policy Drafts
+
+- [Foreground service declaration draft](fgs-declaration-draft.md)
