@@ -225,7 +225,7 @@ gantt
 
 | ID | Status | Priority | Area | Task | Dependencies | Acceptance criteria | Verification |
 |---|---|---|---|---|---|---|---|
-| HYP-M6-001 | `[ ]` | P0 | Reliability | Fix top 10 beta crash/failure categories | HYP-M4-012 | All top issues closed or documented | Issue review |
+| HYP-M6-001 | `[?]` | P0 | Reliability | Fix top 10 beta crash/failure categories | HYP-M4-012 | Blocked: no beta issue/failure corpus exists to rank or fix top categories | Issue review |
 | HYP-M6-002 | `[?]` | P0 | Reliability | Achieve ≥99% crash-free beta sessions where measurable | HYP-M4-004 | Opt-in diagnostics or manual logs support claim | Metrics review |
 | HYP-M6-003 | `[?]` | P0 | Reliability | Finalize wake/network reconnect behavior | HYP-M4-007 | Median <30s or explicit degraded state | Test log |
 | HYP-M6-004 | `[?]` | P0 | Transfer | Finalize 1GB resume behavior | HYP-M3-015 | Passes on at least 3 Android/macOS/network combos | Test log |
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 4 | 0 | 8 | 0 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
-| M6 Stabilization | 3 | 0 | 4 | 3 |
+| M6 Stabilization | 3 | 0 | 5 | 2 |
 
 Update this summary after each milestone review.
 
@@ -452,3 +452,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M4-009 `[?]` — **Copy pass complete, user-comprehension validation blocked.** Updated Android notification-listener onboarding copy to lead with the sensitive access ("titles, actions, and content"), paired-Mac/local-TLS destination, no cloud relay/history store, hidden-body fallback, SMS/Call Log exclusion, and Android Settings disable path. Added `docs/reports/hyp-m4-009-permission-onboarding-copy-review.md` inventorying the current permission/special-access surfaces and beta tester questions. **Blocker**: the row's acceptance requires review/beta feedback that users understand each permission; HYP-M4-005 has no attached Android device matrix and no beta feedback corpus exists yet.
 - 2026-06-12 — HYP-M4-011 `[x]` — Added `docs/release/private-beta-release-notes.md` for technical private beta testers. The draft lists what to test, privacy/safety defaults, known blocked matrix and reliability areas, unsupported v1 surfaces, required feedback fields, and stop conditions. Manual review complete; no runtime behavior changed. HYP-M4-012 remains the external recruiting/channel task.
 - 2026-06-12 — HYP-M4-012 `[?]` — Added `docs/release/private-beta-feedback.md` plus `.github/ISSUE_TEMPLATE/private_beta_bug.yml`. The local packet defines target cohorts, channel setup checklist, invitation copy, bug-report fields, safety checklist, and triage rules. **Blocker**: recruiting 20-50 technical beta users and configuring the actual private feedback channel require external maintainer action; no invited tester list, accepted cohort, or beta feedback corpus exists in this repo.
+- 2026-06-12 — HYP-M6-001 `[?]` — Added `docs/reports/hyp-m6-001-beta-failure-category-review.md` after searching for beta issue exports, crash ledgers, session logs, diagnostics corpora, and feedback reports. The repo has intake templates and known blocker buckets but no real beta failure corpus, so no top-10 categories can be ranked or fixed. Updated the HYP-M6-002 metrics note to reflect that HYP-M4-011/HYP-M4-012 local prep now exists while recruitment and feedback remain external blockers.

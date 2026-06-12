@@ -20,8 +20,9 @@ Draft definition for the eventual beta review:
 
 No crash-free beta-session claim is currently supportable:
 
-- HYP-M4-012, recruiting 20-50 technical beta users, is still unchecked.
-- No beta release notes or beta feedback channel are complete yet (HYP-M4-011 is unchecked).
+- HYP-M4-011 release notes are drafted, and HYP-M4-012 now has a recruiting
+  plan plus bug template, but no real recruited beta cohort or feedback channel
+  exists yet.
 - HYP-M4-004 implemented the default-off beta diagnostics toggle, but Android manual preview/export/disable acceptance is still blocked by lack of an attached device/emulator.
 - The Android app module currently has no crash-reporting SDK, analytics SDK, telemetry endpoint, account system, or cloud service.
 - Repository search found no existing beta session logs, crash ledger, issue export, or user-submitted diagnostics corpus.
