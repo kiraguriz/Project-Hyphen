@@ -1,0 +1,56 @@
+Categories:
+  - Connectivity
+License: MPL-2.0
+AuthorName: Project Hyphen contributors
+Name: Project Hyphen
+Summary: Local-first Android companion for macOS
+Description: |-
+  Project Hyphen is an open-source Android companion for the Hyphen macOS
+  menu-bar app.
+
+  It pairs devices over the local network, pins peer fingerprints, and uses
+  local TLS for notification continuity, text/link handoff, and file transfer.
+  It does not require an account or cloud relay.
+
+  Pre-alpha limitations: Android compatibility coverage, foreground service
+  release behavior, public signing policy, and final beta evidence are still in
+  progress. This metadata is disabled until the first public F-Droid-ready
+  release is tagged.
+  .
+WebSite: https://github.com/REPLACE-ME/project-hyphen
+SourceCode: https://github.com/REPLACE-ME/project-hyphen
+IssueTracker: https://github.com/REPLACE-ME/project-hyphen/issues
+Changelog: https://github.com/REPLACE-ME/project-hyphen/releases
+RepoType: git
+Repo: https://github.com/REPLACE-ME/project-hyphen.git
+Disabled: Draft metadata only; replace placeholder URLs, release tag, and signing/update policy before F-Droid submission.
+Builds:
+  - versionName: 0.0.1
+    versionCode: 1
+    commit: b9738beb66ac496bb5d0e90955bae1e52e5725dd
+    subdir: apps/android
+    gradle:
+      - yes
+    output: app/build/outputs/apk/release/app-release-unsigned.apk
+    disable: Pre-alpha dry run; public release tag, final signing policy, and fdroidserver lint are not ready.
+MaintainerNotes: |-
+  Current Android app id: dev.hyphen.android.
+
+  Runtime dependencies are Android platform APIs and Kotlin stdlib only; JUnit
+  is test-only. No analytics, ads, crash-reporting, cloud messaging, or account
+  SDK is present in the Android app module at this draft point.
+
+  Expected F-Droid build root is apps/android, where the Gradle wrapper,
+  settings.gradle.kts, and app module live.
+
+  HYP-M5-004 produced unsigned dry-run APK/AAB artifacts but release/upload
+  signing remains blocked by missing external keystore material. Decide whether
+  F-Droid will use F-Droid signing only or reproducible developer-signed
+  verification before enabling this metadata.
+
+  Formal root LICENSE files and SPDX sweeps remain release-readiness blockers
+  even though ADR-0005 selects MPL-2.0 for app source.
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 0.0.1
+CurrentVersionCode: 1

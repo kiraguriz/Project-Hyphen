@@ -1,9 +1,9 @@
 # F-Droid Metadata Notes
 
-Status: planning note for HYP-M0-013. This is not the final fdroiddata
-metadata file; HYP-M5-007 drafts and validates the release-specific metadata
-after the app ID, license decision, dependency audit, and signing strategy are
-settled.
+Status: planning note for HYP-M0-013. The current disabled metadata draft lives
+at [`metadata/dev.hyphen.android.yml`](metadata/dev.hyphen.android.yml). It is
+not submission-ready until the app ID, public repository URL, final release tag,
+license files, dependency audit, and signing/update strategy are settled.
 
 Official references to re-check during HYP-M5-007:
 
@@ -42,8 +42,9 @@ Official references to re-check during HYP-M5-007:
   category locally.
 - License: blocked on HYP-M0-015. Use the final SPDX identifier exactly; do not
   publish metadata with a provisional license.
-- SourceCode / IssueTracker / Changelog: use stable public project URLs once
-  releases and issue templates exist.
+- SourceCode / IssueTracker / Changelog: the draft uses `REPLACE-ME`
+  placeholders; replace them with stable public project URLs once releases and
+  issue templates exist.
 - RepoType: `git`.
 - Repo: public HTTPS git URL only; no authenticated source.
 - Builds subdir: likely `apps/android`, because that is the Gradle wrapper and
@@ -84,3 +85,5 @@ Official references to re-check during HYP-M5-007:
   for license and F-Droid acceptability before adoption.
 - The final metadata should be linted with `fdroid lint <appid>` and normalized
   with `fdroid rewritemeta <appid>` when fdroidserver is available.
+- Current local validation is limited to YAML parsing and repo checks because
+  `fdroid` is not installed in this environment; see [`README.md`](README.md).
