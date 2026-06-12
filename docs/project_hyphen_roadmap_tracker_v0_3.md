@@ -113,7 +113,7 @@ gantt
 | HYP-M0-010 | `[x]` | P0 | Distribution | Draft `docs/adr/0004-distribution-tracks.md` | HYP-M0-001 | GitHub/F-Droid/Play/macOS tracks separated | Manual review |
 | HYP-M0-011 | `[x]` | P1 | Distribution | Create `packaging/macos/notarization-notes.md` | HYP-M0-010 | Developer ID/notary requirements listed | Manual review |
 | HYP-M0-012 | `[x]` | P1 | Distribution | Create `packaging/android-play/play-policy-notes.md` | HYP-M0-010 | FGS/Data safety/closed testing notes listed | Manual review |
-| HYP-M0-013 | `[ ]` | P1 | Distribution | Create `packaging/android-fdroid/metadata-notes.md` | HYP-M0-010 | F-Droid metadata and reproducibility considerations listed | Manual review |
+| HYP-M0-013 | `[x]` | P1 | Distribution | Create `packaging/android-fdroid/metadata-notes.md` | HYP-M0-010 | F-Droid metadata and reproducibility considerations listed | Manual review |
 | HYP-M0-014 | `[ ]` | P1 | Devices | Create `docs/compatibility-matrix.md` | none | Blank matrix for Android/macOS/network cases | Manual review |
 | HYP-M0-015 | `[ ]` | P1 | License | Add license decision note | HYP-M0-003 | MPL/Apache clean-room rules stated | Manual review |
 
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 12 | 0 | 0 | 3 |
+| M0 Scope/Ops | 13 | 0 | 0 | 2 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 0 | 0 | 2 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
@@ -417,3 +417,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M5-004 `[?]` — **Build script implemented, Play-ready signing blocked by missing release/upload keystore.** Added `packaging/android-play/build-release.sh`, `packaging/android-play/README.md`, and env-driven Gradle release signing config. Gradle now fails closed if only some `HYPHEN_ANDROID_*` signing variables are present; when all are present, release APK signing uses the external keystore without storing secrets in the repo. The script builds `:app:assembleRelease` and `:app:bundleRelease`, copies artifacts to ignored `packaging/android-play/build/`, and writes SHA-256 sums. Verification produced `app-release-unsigned.apk`, `app-release.aab`, and `SHA256SUMS`; output also reported `build-release: BLOCKED: release signing key not configured; artifacts are not Play-ready`.
 - 2026-06-12 — HYP-M0-011 `[x]` — Added `packaging/macos/notarization-notes.md` listing the required Apple Developer Program membership, Developer ID Application certificate, notarytool credential options, distributable container expectation, local signing/notarization commands, secret boundaries, and expected blocker modes. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-012 `[x]` — Added `packaging/android-play/play-policy-notes.md` listing the Play track boundary, expected `connectedDevice` and user-initiated `dataSync` foreground-service areas, Data safety draft inputs, closed-testing setup notes, and review risks around Notification Listener, foreground-service declarations, diagnostics exports, and ADR-0003 excluded features. Manual review complete; no automated behavior changed.
+- 2026-06-12 — HYP-M0-013 `[x]` — Added `packaging/android-fdroid/metadata-notes.md` listing F-Droid track boundaries, candidate metadata fields, current app ID/version seeds, source/repo requirements, reproducibility considerations for pinned toolchains and signing-key strategy, and inclusion-review risks around licensing, dependencies, Notification Listener, foreground service, and future scanner/diagnostics dependencies. Manual review complete; no automated behavior changed.
