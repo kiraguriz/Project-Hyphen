@@ -20,6 +20,7 @@ import dev.hyphen.android.companion.AssociationEvent
 import dev.hyphen.android.companion.CdmAssociationBackend
 import dev.hyphen.android.diagnostics.DiagnosticProtocolSessionListener
 import dev.hyphen.android.diagnostics.LocalStructuredLogStore
+import dev.hyphen.android.diagnostics.RedactedDiagnosticsExporter
 import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
 import dev.hyphen.android.discovery.DiscoveryEvent
@@ -119,6 +120,18 @@ class MainActivity : Activity() {
             text = "Send text/link to Mac"
             setOnClickListener { sendTextLink(textInput.text.toString()) }
         }
+        val previewDiagnosticsButton = Button(this).apply {
+            text = "Preview diagnostics"
+            setOnClickListener { previewDiagnostics() }
+        }
+        val exportDiagnosticsButton = Button(this).apply {
+            text = "Export diagnostics"
+            setOnClickListener { exportDiagnostics() }
+        }
+        val deleteDiagnosticsButton = Button(this).apply {
+            text = "Delete diagnostics"
+            setOnClickListener { deleteDiagnostics() }
+        }
 
         setContentView(
             LinearLayout(this).apply {
@@ -133,6 +146,9 @@ class MainActivity : Activity() {
                 addView(notificationSettingsButton)
                 addView(textInput)
                 addView(sendTextButton)
+                addView(previewDiagnosticsButton)
+                addView(exportDiagnosticsButton)
+                addView(deleteDiagnosticsButton)
                 addView(ScrollView(this@MainActivity).apply { addView(log) })
             }
         )
@@ -402,6 +418,47 @@ class MainActivity : Activity() {
             "listener=${HyphenNotificationListenerRuntime.state()}; " +
             "component=${status.componentName}"
     }
+
+    private fun previewDiagnostics() {
+        val json = diagnosticsExporter().previewJson()
+        AlertDialog.Builder(this)
+            .setTitle("Diagnostics preview")
+            .setMessage(json)
+            .setPositiveButton("OK", null)
+            .show()
+        append("diagnostics preview: ${diagnosticLogs.snapshot().size} event(s)")
+    }
+
+    private fun exportDiagnostics() {
+        val json = diagnosticsExporter().exportText()
+        val intent = Intent(Intent.ACTION_SEND)
+            .setType("application/json")
+            .putExtra(Intent.EXTRA_SUBJECT, "Hyphen diagnostics")
+            .putExtra(Intent.EXTRA_TEXT, json)
+        try {
+            startActivity(Intent.createChooser(intent, "Export Hyphen diagnostics"))
+            append("diagnostics export: chooser opened")
+        } catch (e: ActivityNotFoundException) {
+            append("diagnostics export failed: ${e.message}")
+        }
+    }
+
+    private fun deleteDiagnostics() {
+        val count = diagnosticLogs.snapshot().size
+        diagnosticsExporter().deleteLocalDiagnostics()
+        append("diagnostics deleted: $count event(s)")
+    }
+
+    private fun diagnosticsExporter(): RedactedDiagnosticsExporter =
+        RedactedDiagnosticsExporter(
+            logs = diagnosticLogs,
+            appVersion = appVersionName(),
+            sdkInt = Build.VERSION.SDK_INT,
+        )
+
+    @Suppress("DEPRECATION")
+    private fun appVersionName(): String =
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
 
     private fun startWindow() {
         val m = DiscoveryManager(
