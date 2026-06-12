@@ -1,5 +1,9 @@
 # Android F-Droid Packaging
 
+Current Android install paths are documented separately:
+[English](../../docs/install/installation_en.md) ·
+[中文](../../docs/install/installation_zh.md).
+
 ## Metadata Draft
 
 `metadata/dev.hyphen.android.yml` is a disabled F-Droid metadata draft for HYP-M5-007. It is intentionally not submission-ready until the public repository URL, issue tracker, release tag, final app name, formal root license files, dependency audit, and signing/update strategy are complete.

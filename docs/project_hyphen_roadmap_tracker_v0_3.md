@@ -215,7 +215,7 @@ gantt
 | HYP-M5-005 | `[x]` | P0 | Android Play | Draft Play Data safety statement | HYP-M0-012,HYP-M4-004 | Matches actual data behavior | Manual review |
 | HYP-M5-006 | `[x]` | P0 | Android Play | Draft FGS declaration | HYP-M0-012,HYP-M3-015 | connectedDevice/dataSync usage justified | Manual review |
 | HYP-M5-007 | `[x]` | P1 | F-Droid | Draft F-Droid metadata | HYP-M0-013,HYP-M5-004 | Metadata validates locally where possible | Manual/tooling |
-| HYP-M5-008 | `[ ]` | P1 | Docs | Write bilingual installation docs | HYP-M5-003,HYP-M5-004 | macOS/Android install paths clear | Manual review |
+| HYP-M5-008 | `[x]` | P1 | Docs | Write bilingual installation docs | HYP-M5-003,HYP-M5-004 | macOS/Android install paths clear | Manual review |
 | HYP-M5-009 | `[ ]` | P1 | Docs | Write troubleshooting guide | HYP-M4-005..008 | Covers LAN permission, mDNS, wake, OEM background | Manual review |
 | HYP-M5-010 | `[ ]` | P1 | Public Beta | Publish public beta checklist | HYP-M5-001..009 | Release can be reproduced by maintainer | Dry run |
 
@@ -356,7 +356,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M2 Core Transport | 15 | 0 | 0 | 0 |
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 6 | 3 |
-| M5 Distribution | 5 | 0 | 2 | 3 |
+| M5 Distribution | 6 | 0 | 2 | 2 |
 | M6 Stabilization | 1 | 0 | 3 | 6 |
 
 Update this summary after each milestone review.
@@ -418,6 +418,7 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M0-011 `[x]` — Added `packaging/macos/notarization-notes.md` listing the required Apple Developer Program membership, Developer ID Application certificate, notarytool credential options, distributable container expectation, local signing/notarization commands, secret boundaries, and expected blocker modes. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-012 `[x]` — Added `packaging/android-play/play-policy-notes.md` listing the Play track boundary, expected `connectedDevice` and user-initiated `dataSync` foreground-service areas, Data safety draft inputs, closed-testing setup notes, and review risks around Notification Listener, foreground-service declarations, diagnostics exports, and ADR-0003 excluded features. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-013 `[x]` — Added `packaging/android-fdroid/metadata-notes.md` listing F-Droid track boundaries, candidate metadata fields, current app ID/version seeds, source/repo requirements, reproducibility considerations for pinned toolchains and signing-key strategy, and inclusion-review risks around licensing, dependencies, Notification Listener, foreground service, and future scanner/diagnostics dependencies. Manual review complete; no automated behavior changed.
+- 2026-06-12 — HYP-M5-008 `[x]` — Added bilingual install docs at `docs/install/installation_en.md` and `docs/install/installation_zh.md`, covering the current macOS ZIP/DMG dry-run path, Android debug install path, Android release dry-run/signing boundary, disabled F-Droid status, first-run permission notes, and pre-alpha blockers. Root and packaging READMEs now link to the install docs. Manual review plus markdown link check via `./scripts/check.sh`.
 - 2026-06-12 — HYP-M0-014 `[x]` — Added `docs/compatibility-matrix.md` as a blank execution matrix with recording rules, Android/OEM coverage targets, macOS coverage targets, network cases, scenario rows, and a redacted evidence-log template. Rows are explicitly initialized as `not-run` or blocked where human sleep/wake scheduling is required, so future M4 compatibility work records observed evidence instead of inferred support. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-015 `[x]` — Added `docs/adr/0005-license-and-clean-room-policy.md`: app source code uses MPL-2.0, protocol specs/schemas/test vectors use Apache-2.0, documentation uses CC-BY-4.0, third-party files keep upstream notices, and clean-room rules forbid GPL/AGPL/proprietary code copying or close paraphrase. README and CONTRIBUTING now point to the ADR while noting that formal root license files, SPDX sweeps, and DCO/CLA terms remain release-readiness follow-ups. Manual review complete; no automated behavior changed. **All M0 tasks are now complete.**
 - 2026-06-12 — HYP-M2-014 `[x]` — Added protocol-level local trace helpers on Android and macOS. Envelope trace validation now requires `localOnly: true` and ULID-shaped `spanId` values, with schema fixtures pinning rejection of non-local trace metadata. Structured diagnostic events can keep a validated local trace id, but Android and macOS redacted diagnostics exporters omit it by default and include it only when constructed with explicit trace inclusion. Protocol docs now state the local-only trace rules. Verified: `./gradlew test assembleDebug` green; `swift test` green; `./scripts/check.sh` green.

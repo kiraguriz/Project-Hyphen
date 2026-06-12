@@ -1,5 +1,9 @@
 # Android Play Packaging
 
+Tester-facing Android install steps live in the bilingual install docs:
+[English](../../docs/install/installation_en.md) ·
+[中文](../../docs/install/installation_zh.md).
+
 ## Release Build Dry Run
 
 `build-release.sh` builds release APK/AAB artifacts and writes SHA-256 checksums under `packaging/android-play/build/`.

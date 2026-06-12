@@ -1,5 +1,9 @@
 # macOS Packaging
 
+Tester-facing install steps live in the bilingual install docs:
+[English](../../docs/install/installation_en.md) ·
+[中文](../../docs/install/installation_zh.md).
+
 ## Local Signing Dry Run
 
 `sign-local.sh` builds the SwiftPM `HyphenApp` product in release mode, signs the resulting executable, and verifies it with `codesign --verify --strict`.

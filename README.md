@@ -2,7 +2,7 @@
 
 **Paired Android continuity for macOS.** An open-source, local-first, auditable Android companion layer that keeps a trusted Mac and Android phone continuously connected for notifications, actions, text, links, files, state, and recovery.
 
-> **Status: pre-alpha (M0).** This repository currently contains planning documents, ADRs, and the project skeleton. There is no runnable code yet. Do not expect anything to install or work.
+> **Status: pre-alpha.** This repository now contains runnable Android/macOS skeletons and local packaging dry runs, but there is no signed, notarized, or store-ready public release yet. Use the install docs only for local maintainer/tester builds.
 
 ## What Hyphen is
 
@@ -25,13 +25,13 @@ The v1 scope is frozen in [ADR-0001](docs/adr/0001-product-scope.md). Highlights
 ## Repository layout
 
 ```text
-apps/android/    Android companion app (planned)
-apps/macos/      macOS menu-bar app (planned)
-protocol/        Protocol schemas, test vectors, conformance (planned)
+apps/android/    Android companion app (pre-alpha)
+apps/macos/      macOS menu-bar app (pre-alpha)
+protocol/        Protocol schemas, test vectors, conformance
 docs/            Plan, roadmap tracker, ADRs, protocol docs
-scripts/         Check/format/test scripts (planned)
-ci/              CI configuration (planned)
-packaging/       macOS / Play / F-Droid packaging notes (planned)
+scripts/         Check/format/test scripts
+ci/              CI configuration
+packaging/       macOS / Play / F-Droid packaging notes and dry runs
 ```
 
 ## Key documents
@@ -39,6 +39,7 @@ packaging/       macOS / Play / F-Droid packaging notes (planned)
 - [Plan v0.3 (EN)](docs/project_hyphen_plan_v0_3_en.md) · [计划 v0.3 (中文)](docs/project_hyphen_plan_v0_3_zh.md)
 - [Roadmap tracker](docs/project_hyphen_roadmap_tracker_v0_3.md) — source of truth for implementation status
 - [ADR-0001 — v1 product scope freeze](docs/adr/0001-product-scope.md)
+- Installation: [English](docs/install/installation_en.md) · [中文](docs/install/installation_zh.md)
 
 ## Contributing and security
 
