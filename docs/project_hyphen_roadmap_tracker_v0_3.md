@@ -159,7 +159,7 @@ gantt
 | HYP-M2-012 | `[x]` | P0 | Transport | Implement heartbeat and ack | HYP-M2-007,HYP-M2-008 | Missed heartbeat transitions to degraded | Unit/integration test |
 | HYP-M2-013 | `[x]` | P0 | Transport | Implement session reconnect and backoff | HYP-M2-012 | Reconnect after simulated drop | Integration test |
 | HYP-M2-014 | `[x]` | P1 | Diagnostics | Add protocol-level trace IDs local only | HYP-M2-001 | Trace IDs are not transmitted in diagnostics unless opted-in | Unit test |
-| HYP-M2-015 | `[ ]` | P1 | Docs | Update protocol docs with implementation decisions | HYP-M2-001..014 | Docs match code behavior | Manual review |
+| HYP-M2-015 | `[x]` | P1 | Docs | Update protocol docs with implementation decisions | HYP-M2-001..014 | Docs match code behavior | Manual review |
 
 ---
 
@@ -353,7 +353,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 |---|---:|---:|---:|---:|
 | M0 Scope/Ops | 15 | 0 | 0 | 0 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
-| M2 Core Transport | 14 | 0 | 0 | 1 |
+| M2 Core Transport | 15 | 0 | 0 | 0 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
 | M4 Beta Hardening | 2 | 0 | 2 | 8 |
 | M5 Distribution | 1 | 0 | 2 | 7 |
@@ -421,3 +421,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M0-014 `[x]` — Added `docs/compatibility-matrix.md` as a blank execution matrix with recording rules, Android/OEM coverage targets, macOS coverage targets, network cases, scenario rows, and a redacted evidence-log template. Rows are explicitly initialized as `not-run` or blocked where human sleep/wake scheduling is required, so future M4 compatibility work records observed evidence instead of inferred support. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-015 `[x]` — Added `docs/adr/0005-license-and-clean-room-policy.md`: app source code uses MPL-2.0, protocol specs/schemas/test vectors use Apache-2.0, documentation uses CC-BY-4.0, third-party files keep upstream notices, and clean-room rules forbid GPL/AGPL/proprietary code copying or close paraphrase. README and CONTRIBUTING now point to the ADR while noting that formal root license files, SPDX sweeps, and DCO/CLA terms remain release-readiness follow-ups. Manual review complete; no automated behavior changed. **All M0 tasks are now complete.**
 - 2026-06-12 — HYP-M2-014 `[x]` — Added protocol-level local trace helpers on Android and macOS. Envelope trace validation now requires `localOnly: true` and ULID-shaped `spanId` values, with schema fixtures pinning rejection of non-local trace metadata. Structured diagnostic events can keep a validated local trace id, but Android and macOS redacted diagnostics exporters omit it by default and include it only when constructed with explicit trace inclusion. Protocol docs now state the local-only trace rules. Verified: `./gradlew test assembleDebug` green; `swift test` green; `./scripts/check.sh` green.
+- 2026-06-12 — HYP-M2-015 `[x]` — Updated `docs/protocol/hyphen-protocol-v0.md` with the M2 implementation decisions: strict envelope/hello validation, trace `localOnly`/ULID rules, core-vs-plugin type handling, heartbeat/ack timeout behavior, in-memory single-use resume-token semantics, TLS 1.3 Android API 26-28 behavior, and default-redacted trace export rules. Deferred post-M2 protocol questions are now separated from resolved implementation behavior. Verified: `./scripts/check.sh` green.

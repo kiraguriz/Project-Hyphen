@@ -55,7 +55,7 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 | `protocol` | string | yes | Protocol id + version. Receivers MUST reply `protocol/version-unsupported` and close if they cannot speak it. |
 | `messageId` | string (ULID) | yes | Unique per message; used for dedupe and ack correlation. |
 | `sessionId` | string | yes after hello | Identifies the logical session (§4). `null` only in `hello`. |
-| `type` | string | yes | Message type, namespaced `feature.event` (§7). Unknown types → `protocol/unknown-type` error reply; connection stays open. |
+| `type` | string | yes | Message type, namespaced `feature.event` (§7). The session layer handles only core `ack`/`heartbeat`; other types are delivered to the negotiated feature/plugin layer, which is responsible for `protocol/unknown-type` or `plugin/unsupported-capability` errors. |
 | `capability` | string | for plugin msgs | Capability that governs this message, e.g. `notifications.v1`. Core types (`hello`, `ack`, `error`, `heartbeat`) omit it. |
 | `seq` | integer | yes | Per-sender, per-session, monotonically increasing from 1. Receivers MAY use gaps for loss diagnostics; ordering authority stays with TCP. |
 | `ackOf` | string\|null | no | `messageId` being acknowledged (only in `ack`). |
@@ -267,10 +267,40 @@ Rules: error `message` strings MUST NOT contain notification bodies, file conten
 
 The normative registry is the `code` enum in `protocol/schema/error.schema.json` (linted by `scripts/lint_error_registry.py`); this table is the human-readable index. Messages are capped at 256 characters by schema.
 
-## 9. Open questions (to resolve in M2 with ADRs)
+## 9. M2 implementation decisions
 
-1. ~~Exact `resumeToken` construction~~ — **Resolved (HYP-M2-013)**: a random 32-byte handle (base64url, unpadded), stored responder-side in memory only, bound to one session and one peer SPKI fingerprint, single-use (consumed even on a failed redeem), 10-minute expiry, invalidated on trust revocation. Tokens do not survive an app restart; the worst case is a fresh session.
-2. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
-3. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force ≥15 s).
-4. Max in-flight unacked messages (flow control) — v0 implementations SHOULD cap at 64.
-5. TLS 1.3 floor vs. Android API 26–28, which lack platform TLS 1.3 (it arrived in API 29). Current implementations (HYP-M2-008) fail loudly on those devices rather than downgrade; options for ADR-0002 are raising minSdk to 29 or permitting TLS 1.2 + pinning on legacy API levels. Bundling a TLS library is dispreferred (dependency policy).
+These decisions document the Android and macOS behavior implemented through HYP-M2-015.
+
+### 9.1 Strict envelope and hello validation
+
+- Envelope JSON is strict on both platforms: unknown envelope fields are rejected as `protocol/invalid-envelope`.
+- `trace` is strict: only `localOnly` and `spanId` are allowed; `localOnly` must be `true`; `spanId`, when present, must be a ULID.
+- `hello` payloads are strict: only `device`, `resumeToken`, and `capabilities` are accepted; `resumeToken` must be a string or `null`; `capabilities` must be an object.
+- Malformed envelopes are surfaced to diagnostics and skipped; the connection stays open unless the frame layer or transport fails.
+- The session layer treats `ack` and `heartbeat` as core. All other valid envelope types are delivered to the feature/plugin layer so the feature can apply capability-specific validation and return the right error.
+
+### 9.2 Session and resume behavior
+
+- Heartbeat interval defaults to 10 s; two missed intervals move the liveness monitor to degraded.
+- `requiresAck` envelopes use a 10 s ack timeout; each timeout fires once.
+- Session `seq` is per sender and starts after the hello frame; reconnecting starts a new connection and preserves the logical `sessionId` only when resume succeeds.
+- Resume tokens are responder-side random 32-byte handles, base64url encoded without padding, bound to one session and one peer SPKI fingerprint.
+- Resume tokens are single-use, consumed on failed redemption, expire after 10 minutes, are invalidated on peer trust revocation, and are in-memory only.
+
+### 9.3 TLS and platform floor
+
+- v0 transport uses mutual TLS 1.3 with SPKI pinning on both platforms.
+- Android API 26-28 lack platform TLS 1.3 support; the current implementation fails loudly rather than downgrading to TLS 1.2 or bundling a TLS provider.
+- Changing the TLS floor, raising `minSdk`, or adding a TLS dependency requires a new ADR because it changes the security/dependency tradeoff.
+
+### 9.4 Diagnostics and trace handling
+
+- Structured diagnostics log taxonomy codes, components, operations, and optional local trace ids only.
+- Redacted diagnostics exports omit trace ids by default on both platforms.
+- Trace ids are included in an export only when the exporter is constructed with explicit trace inclusion; no UI path enables that yet. The user-facing opt-in toggle is HYP-M4-004.
+
+## 10. Deferred protocol questions
+
+1. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
+2. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force ≥15 s).
+3. Max in-flight unacked messages and flow control. Current v0 code tracks pending ack ids but does not enforce a 64-message cap yet.
