@@ -42,6 +42,7 @@ object HyphenNotificationListenerRuntime {
     private val lifecycle = NotificationListenerLifecycle()
     private var eventSender: NotificationMirrorEventSender? = null
     private var privacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL
+    private var canceller: NotificationCanceller? = null
 
     fun state(): NotificationListenerConnectionState = synchronized(lifecycle) {
         lifecycle.state
@@ -78,6 +79,19 @@ object HyphenNotificationListenerRuntime {
     fun setNotificationPrivacyMode(mode: NotificationPrivacyMode) = synchronized(lifecycle) {
         privacyMode = mode
         eventSender?.setPrivacyMode(mode)
+    }
+
+    fun setCanceller(notificationCanceller: NotificationCanceller) = synchronized(lifecycle) {
+        canceller = notificationCanceller
+    }
+
+    fun clearCanceller() = synchronized(lifecycle) {
+        canceller = null
+    }
+
+    fun notificationCanceller(): NotificationCanceller = NotificationCanceller { sbnKey ->
+        val current = synchronized(lifecycle) { canceller } ?: return@NotificationCanceller false
+        current.cancel(sbnKey)
     }
 
     fun onNotificationPosted(sbn: StatusBarNotification): String? {

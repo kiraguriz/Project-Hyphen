@@ -15,6 +15,26 @@ private final class RecordingNotificationPresenter: NotificationPresenter {
     }
 }
 
+private final class RecordingDismissOutbox: NotificationDismissOutbox {
+    var type: String?
+    var capability: String?
+    var requiresAck: Bool?
+    var payload: [String: Any]?
+
+    func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String? {
+        self.type = type
+        self.capability = capability
+        self.requiresAck = requiresAck
+        self.payload = payload
+        return "01JZ0000000000000000000001"
+    }
+}
+
 final class NotificationMirrorReceiverTests: XCTestCase {
     private func envelope(
         type: String = NotificationMirrorProtocol.typePosted,
@@ -82,6 +102,40 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertTrue(presenter.removed.isEmpty)
     }
 
+    func testDismissResultIsParsedForStatusReporting() throws {
+        let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
+
+        let success = try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typeDismissResult,
+                payload: ["sbnKey": "0|com.chat|7|thread-123|10101", "success": true]
+            )
+        )
+        let failure = try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typeDismissResult,
+                payload: [
+                    "sbnKey": "0|com.chat|7|thread-123|10101",
+                    "success": false,
+                    "errorCode": "permission/notifications-denied",
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            success,
+            .dismissResult(sbnKey: "0|com.chat|7|thread-123|10101", success: true, errorCode: nil)
+        )
+        XCTAssertEqual(
+            failure,
+            .dismissResult(
+                sbnKey: "0|com.chat|7|thread-123|10101",
+                success: false,
+                errorCode: "permission/notifications-denied"
+            )
+        )
+    }
+
     func testWrongCapabilityIsRejected() {
         let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
 
@@ -102,6 +156,26 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertThrowsError(
             try receiver.handle(envelope(type: NotificationMirrorProtocol.typeRemoved, payload: ["sbnKey": ""]))
         )
+    }
+
+    func testDismissSenderUsesNotificationsCapabilityAndRequiresAck() {
+        let outbox = RecordingDismissOutbox()
+        let id = NotificationDismissSender(outbox: outbox).requestDismiss(
+            sbnKey: "0|com.chat|7|thread-123|10101"
+        )
+
+        XCTAssertEqual(id, "01JZ0000000000000000000001")
+        XCTAssertEqual(outbox.type, NotificationMirrorProtocol.typeDismissRequest)
+        XCTAssertEqual(outbox.capability, NotificationMirrorProtocol.capability)
+        XCTAssertEqual(outbox.requiresAck, true)
+        XCTAssertEqual(outbox.payload?["sbnKey"] as? String, "0|com.chat|7|thread-123|10101")
+    }
+
+    func testDismissSenderRejectsBlankKeys() {
+        let outbox = RecordingDismissOutbox()
+
+        XCTAssertNil(NotificationDismissSender(outbox: outbox).requestDismiss(sbnKey: " "))
+        XCTAssertNil(outbox.type)
     }
 
     private func payload(sbnKey: String, text: String) -> [String: Any] {

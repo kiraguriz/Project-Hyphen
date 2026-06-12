@@ -6,14 +6,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-private data class SentNotificationEnvelope(
+data class SentNotificationEnvelope(
     val type: String,
     val capability: String,
     val requiresAck: Boolean,
     val payload: Json.Obj,
 )
 
-private class RecordingNotificationOutbox : NotificationOutbox {
+class RecordingNotificationOutbox : NotificationOutbox {
     val envelopes = mutableListOf<SentNotificationEnvelope>()
 
     override fun send(

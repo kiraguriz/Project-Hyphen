@@ -29,6 +29,7 @@ import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationAccessController
+import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.EndpointConnectProbe
@@ -337,10 +338,21 @@ class MainActivity : Activity() {
 
     private fun handleSessionEnvelope(envelope: Envelope) {
         try {
+            val session = activeSession
+            if (session != null) {
+                val dismissResultId = NotificationDismissRequestHandler(
+                    canceller = HyphenNotificationListenerRuntime.notificationCanceller(),
+                    outbox = ProtocolSessionNotificationOutbox(session),
+                ).handle(envelope)
+                if (dismissResultId != null) {
+                    runOnUiThread { append("notification dismiss result sent: $dismissResultId") }
+                    return
+                }
+            }
             val request = textReceiver.handle(envelope) ?: return
             runOnUiThread { presentTextLinkConfirmation(request) }
         } catch (e: IllegalArgumentException) {
-            runOnUiThread { append("text/link rejected: ${e.message}") }
+            runOnUiThread { append("session envelope rejected: ${e.message}") }
         }
     }
 

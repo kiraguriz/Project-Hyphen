@@ -183,6 +183,20 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
 | `clearable` | boolean | yes | Whether Android reports the notification as clearable |
 | `ongoing` | boolean | yes | Whether Android reports the notification as ongoing |
 
+`notification.dismiss.request` is sent from macOS to Android with:
+
+```json
+{ "sbnKey": "0|com.example.chat|7|thread-123|10101" }
+```
+
+Android replies with `notification.dismiss.result`:
+
+```json
+{ "sbnKey": "0|com.example.chat|7|thread-123|10101", "success": true }
+```
+
+If Android cannot cancel the notification, the result MUST carry `success: false` and an error code from §8, for example `permission/notifications-denied` when notification-listener access is unavailable or `plugin/notification-key-not-found` when the key cannot be cancelled.
+
 ### 7.2 `text.send` payload
 
 `text.send` is the v0 text/link plugin message (HYP-M3-008/009). It is always sent under capability `text.v1`, requires an ack, and the receiver MUST present the content for explicit user confirmation before copying or opening it.

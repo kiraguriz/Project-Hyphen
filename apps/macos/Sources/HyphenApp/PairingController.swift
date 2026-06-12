@@ -26,8 +26,9 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
-    private let notificationReceiver = NotificationMirrorReceiver(
-        presenter: UserNotificationCenterPresenter()
+    private let notificationPresenter = UserNotificationCenterPresenter()
+    private lazy var notificationReceiver = NotificationMirrorReceiver(
+        presenter: notificationPresenter
     )
     private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
@@ -98,6 +99,7 @@ final class PairingController: NSObject, NSWindowDelegate {
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
+        notificationPresenter.setDismissHandler(nil)
         provisionalConnection?.cancel()
         provisionalConnection = nil
         pendingFingerprint = nil
@@ -263,6 +265,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                         if self?.activeSessionToken == sessionToken {
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
+                            self?.notificationPresenter.setDismissHandler(nil)
                         }
                         self?.onStatus("Phone session closed")
                     }
@@ -281,12 +284,30 @@ final class PairingController: NSObject, NSWindowDelegate {
                 self.activeSession?.stop()
                 self.activeSession = session
                 self.activeSessionToken = sessionToken
+                self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
+                    self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                }
                 session.start(replaying: handshake.leftover)
                 DispatchQueue.main.async {
                     let name = handshake.peerDeviceName ?? "Android device"
                     self.onStatus("Connected to \(name)")
                 }
             }
+        }
+    }
+
+    private func sendNotificationDismissRequest(sbnKey: String) {
+        guard let session = activeSession else {
+            onStatus("notification dismiss: no active Android session")
+            return
+        }
+        let id = NotificationDismissSender(
+            outbox: ProtocolSessionNotificationDismissOutbox(session: session)
+        ).requestDismiss(sbnKey: sbnKey)
+        if let id {
+            onStatus("notification dismiss requested: \(id)")
+        } else {
+            onStatus("notification dismiss rejected: blank key")
         }
     }
 
@@ -342,6 +363,12 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("Android notification mirrored")
         case .removed:
             onStatus("Android notification removed")
+        case .dismissResult(_, let success, let errorCode):
+            if success {
+                onStatus("Android notification dismissed")
+            } else {
+                onStatus("Android notification dismiss failed: \(errorCode ?? "unknown")")
+            }
         }
     }
 

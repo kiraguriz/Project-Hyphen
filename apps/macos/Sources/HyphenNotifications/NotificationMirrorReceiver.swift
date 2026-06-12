@@ -7,6 +7,8 @@ public enum NotificationMirrorProtocol {
     public static let typePosted = "notification.posted"
     public static let typeUpdated = "notification.updated"
     public static let typeRemoved = "notification.removed"
+    public static let typeDismissRequest = "notification.dismiss.request"
+    public static let typeDismissResult = "notification.dismiss.result"
 }
 
 public enum NotificationMirrorError: Error, Equatable {
@@ -44,9 +46,64 @@ public protocol NotificationPresenter {
     func remove(identifier: String)
 }
 
+public protocol NotificationDismissOutbox {
+    @discardableResult
+    func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String?
+}
+
+public final class ProtocolSessionNotificationDismissOutbox: NotificationDismissOutbox {
+    private let session: ProtocolSession
+
+    public init(session: ProtocolSession) {
+        self.session = session
+    }
+
+    @discardableResult
+    public func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String? {
+        session.send(
+            type: type,
+            payload: payload,
+            requiresAck: requiresAck,
+            capability: capability
+        )
+    }
+}
+
+public final class NotificationDismissSender {
+    private let outbox: NotificationDismissOutbox
+
+    public init(outbox: NotificationDismissOutbox) {
+        self.outbox = outbox
+    }
+
+    @discardableResult
+    public func requestDismiss(sbnKey: String) -> String? {
+        guard !sbnKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return outbox.send(
+            type: NotificationMirrorProtocol.typeDismissRequest,
+            capability: NotificationMirrorProtocol.capability,
+            requiresAck: true,
+            payload: ["sbnKey": sbnKey]
+        )
+    }
+}
+
 public enum NotificationMirrorAction: Equatable {
     case shown(identifier: String, sbnKey: String)
     case removed(identifier: String, sbnKey: String)
+    case dismissResult(sbnKey: String, success: Bool, errorCode: String?)
 }
 
 public struct AndroidNotificationPayload: Equatable {
@@ -122,6 +179,19 @@ public final class NotificationMirrorReceiver {
             presenter.remove(identifier: identifier)
             return .removed(identifier: identifier, sbnKey: sbnKey)
 
+        case NotificationMirrorProtocol.typeDismissResult:
+            try requireNotificationsCapability(envelope)
+            guard let sbnKey = envelope.payload["sbnKey"] as? String,
+                  !sbnKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw NotificationMirrorError.invalidPayload("sbnKey must be a non-empty string")
+            }
+            guard let success = envelope.payload["success"] as? Bool else {
+                throw NotificationMirrorError.invalidPayload("success must be boolean")
+            }
+            let errorCode = envelope.payload["errorCode"] as? String
+            return .dismissResult(sbnKey: sbnKey, success: success, errorCode: errorCode)
+
         default:
             return nil
         }
@@ -134,11 +204,28 @@ public final class NotificationMirrorReceiver {
     }
 }
 
-public final class UserNotificationCenterPresenter: NotificationPresenter {
+public final class UserNotificationCenterPresenter: NSObject, NotificationPresenter, UNUserNotificationCenterDelegate {
+    private static let categoryIdentifier = "hyphen.notification.mirror"
     private let center: UNUserNotificationCenter
+    private var onDismiss: ((String) -> Void)?
 
-    public init(center: UNUserNotificationCenter = .current()) {
+    public init(center: UNUserNotificationCenter = .current(), onDismiss: ((String) -> Void)? = nil) {
         self.center = center
+        self.onDismiss = onDismiss
+        super.init()
+        center.delegate = self
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: Self.categoryIdentifier,
+                actions: [],
+                intentIdentifiers: [],
+                options: [.customDismissAction]
+            ),
+        ])
+    }
+
+    public func setDismissHandler(_ handler: ((String) -> Void)?) {
+        onDismiss = handler
     }
 
     public func show(_ request: NotificationPresentationRequest) {
@@ -148,9 +235,8 @@ public final class UserNotificationCenterPresenter: NotificationPresenter {
             content.body = request.body
             content.subtitle = request.packageName
             content.threadIdentifier = request.sbnKey
-            if let category = request.category {
-                content.categoryIdentifier = category
-            }
+            content.categoryIdentifier = Self.categoryIdentifier
+            content.userInfo = ["sbnKey": request.sbnKey]
             center.add(
                 UNNotificationRequest(identifier: request.identifier, content: content, trigger: nil)
             )
@@ -177,5 +263,17 @@ public final class UserNotificationCenterPresenter: NotificationPresenter {
                 break
             }
         }
+    }
+
+    public func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if response.actionIdentifier == UNNotificationDismissActionIdentifier,
+           let sbnKey = response.notification.request.content.userInfo["sbnKey"] as? String {
+            onDismiss?(sbnKey)
+        }
+        completionHandler()
     }
 }
