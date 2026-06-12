@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/transfer-manifest.schema.json",
+  "title": "Hyphen protocol v0 transfer.manifest payload",
+  "description": "Validates envelope.payload when type=transfer.manifest (docs/protocol/hyphen-protocol-v0.md §7.2). The manifest is sent before chunks and carries only metadata needed to allocate, display, resume, and verify a local transfer.",
+  "type": "object",
+  "required": ["fileId", "filename", "sizeBytes", "mimeType", "sha256", "chunkSizeBytes", "chunkCount"],
+  "additionalProperties": false,
+  "properties": {
+    "fileId": {
+      "type": "string",
+      "pattern": "^f_[A-Za-z0-9_-]{8,128}$",
+      "description": "Opaque sender-generated transfer id, stable across resume attempts."
+    },
+    "filename": {
+      "type": "string",
+      "pattern": "^[^/\\\\]+$",
+      "maxLength": 255,
+      "description": "Display filename only; receivers choose the destination path."
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mimeType": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
+      "description": "Lowercase normalized media type; use application/octet-stream if unknown."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Whole-file SHA-256 in lowercase hex."
+    },
+    "chunkSizeBytes": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 2097152,
+      "description": "Effective chunk size after capability negotiation; capped to fit base64 data in a 4 MiB frame."
+    },
+    "chunkCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of transfer.chunk payloads expected. Empty files use 0."
+    }
+  }
+}

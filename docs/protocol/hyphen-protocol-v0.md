@@ -155,7 +155,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 | `transfer.complete` | both | yes | Whole-file SHA-256 verification result |
 | `transfer.cancel` | both | yes | Either side aborts; partial data kept for resume unless `discard: true` |
 
-Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M2-001/002); this table is the index.
+Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M2-001/002/HYP-M3-010); this table is the index.
 
 ### 7.1 `text.send` payload
 
@@ -174,6 +174,36 @@ Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M
 | `value` | string | yes | Non-empty after trimming; max 8192 Unicode scalar values |
 
 URL values are limited to `http` and `https` in v0. Other schemes are rejected rather than opened or copied implicitly.
+
+### 7.2 `transfer.manifest` payload
+
+`transfer.manifest` is sent before any `transfer.chunk` payload. It is always sent under capability `transfer.v1`, requires an ack, and lets the receiver allocate local state, show the user a receive prompt, and verify the completed file.
+
+The normative schema is `protocol/schema/transfer-manifest.schema.json`.
+
+```json
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "filename": "notes.txt",
+  "sizeBytes": 1234,
+  "mimeType": "text/plain",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "chunkSizeBytes": 1024,
+  "chunkCount": 2
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `fileId` | string | yes | Sender-generated opaque id matching `^f_[A-Za-z0-9_-]{8,128}$`; stable across resume attempts |
+| `filename` | string | yes | Display filename only, max 255 chars, no `/` or `\`; receivers choose the destination path |
+| `sizeBytes` | integer | yes | Whole-file size in bytes; minimum 0 |
+| `mimeType` | string | yes | Lowercase normalized media type; use `application/octet-stream` if unknown |
+| `sha256` | string | yes | Whole-file SHA-256, lowercase hex |
+| `chunkSizeBytes` | integer | yes | Effective chunk size after capability negotiation; 1024..2097152 |
+| `chunkCount` | integer | yes | Number of `transfer.chunk` payloads expected; empty files use 0 |
+
+Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when HYP-M3-011 creates chunk state.
 
 ## 8. Error taxonomy
 

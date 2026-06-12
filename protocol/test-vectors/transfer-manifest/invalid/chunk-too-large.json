@@ -1,0 +1,9 @@
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "filename": "video.mp4",
+  "sizeBytes": 5242880,
+  "mimeType": "video/mp4",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "chunkSizeBytes": 4194304,
+  "chunkCount": 2
+}
