@@ -70,4 +70,5 @@ and log templates, not completed test results.
 
 | Date | Tester | Build / commit | Artifact | Scope | Notes |
 |---|---|---|---|---|---|
+| 2026-06-12 | Codex | 79c75a1 | `/Users/haitianzhu/Library/Android/sdk/platform-tools/adb devices -l` | HYP-M4-005 Android device matrix | blocked: no attached Android devices or emulators were listed, so the first five OS/OEM/network rows could not be observed. |
 | YYYY-MM-DD | TBD | TBD | TBD | TBD |  |
