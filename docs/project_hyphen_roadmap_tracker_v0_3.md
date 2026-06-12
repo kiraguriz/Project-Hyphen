@@ -228,7 +228,7 @@ gantt
 | HYP-M6-001 | `[ ]` | P0 | Reliability | Fix top 10 beta crash/failure categories | HYP-M4-012 | All top issues closed or documented | Issue review |
 | HYP-M6-002 | `[ ]` | P0 | Reliability | Achieve ≥99% crash-free beta sessions where measurable | HYP-M4-004 | Opt-in diagnostics or manual logs support claim | Metrics review |
 | HYP-M6-003 | `[?]` | P0 | Reliability | Finalize wake/network reconnect behavior | HYP-M4-007 | Median <30s or explicit degraded state | Test log |
-| HYP-M6-004 | `[ ]` | P0 | Transfer | Finalize 1GB resume behavior | HYP-M3-015 | Passes on at least 3 Android/macOS/network combos | Test log |
+| HYP-M6-004 | `[?]` | P0 | Transfer | Finalize 1GB resume behavior | HYP-M3-015 | Passes on at least 3 Android/macOS/network combos | Test log |
 | HYP-M6-005 | `[x]` | P0 | Notifications | Finalize notification duplicate prevention | HYP-M4-008 | Duplicate notification rate acceptable | Test log |
 | HYP-M6-006 | `[ ]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
 | HYP-M6-007 | `[ ]` | P1 | Security | Run final threat-model review | HYP-M6-006 | New risks captured | Review notes |
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 4 | 5 |
 | M5 Distribution | 2 | 0 | 2 | 6 |
-| M6 Stabilization | 1 | 0 | 1 | 8 |
+| M6 Stabilization | 1 | 0 | 2 | 7 |
 
 Update this summary after each milestone review.
 
@@ -436,3 +436,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M5-006 `[x]` — Added `packaging/android-play/fgs-declaration-draft.md`, a Play Console foreground-service declaration draft for `connectedDevice` and `dataSync`. The draft ties each type to user-visible local companion behavior, explicit user triggers, stop conditions, notification copy, local-first data handling, non-use of `remoteMessaging`/SMS/Call Log/Accessibility/background clipboard/cloud sync, and release evidence still required before submission. `packaging/android-play/README.md` and `play-policy-notes.md` now link to it. Manual review complete; no runtime behavior changed.
 - 2026-06-12 — HYP-M6-005 `[x]` — Added `docs/test-plans/hyp-m6-005-notification-duplicate-prevention.md` as the final duplicate-prevention test log. It records the Android storm invariant (1,000 events across 25 keys -> 25 posted, 975 updated, 10 removed, active set bounded) and the macOS coalescing invariant (1,000 updates across 25 deterministic identifiers, latest update wins, removals leave 15 delivered identifiers). Verified: `./gradlew :app:testDebugUnitTest --tests dev.hyphen.android.notifications.NotificationMirrorEventSenderTest` green; `swift test --filter NotificationMirrorReceiverTests/testNotificationStormCoalescesByAndroidKeyAndRemovalsStayBounded` green.
 - 2026-06-12 — HYP-M6-003 `[?]` — **Final wake/network reconnect behavior blocked.** Implementation prerequisites exist (`SleepWakeObserver`, `ReconnectStateMachine`, `SessionReconnectTests`, and HYP-M4-007's prior blocker note), but this finalization requires the same real 20-cycle Mac sleep/wake timing log and/or network-transition evidence. Autonomously sleeping the user's active Mac repeatedly is unsafe, and no scheduled manual reliability log is available in this environment. **Blocker**: human-run sleep/wake or network-transition session with observed reconnect timing is required.
+- 2026-06-12 — HYP-M6-004 `[?]` — **Final 1 GiB resume behavior blocked.** HYP-M3-015 provides the deterministic fixture generator and manual run log, but this finalization requires successful observed runs across at least three Android/macOS/network combinations. HYP-M4-005 currently has no attached Android devices, and HYP-M4-006 lacks the required additional macOS combinations plus a paired Android session. **Blocker**: three real paired-device/network test combinations are unavailable in this environment.
