@@ -15,6 +15,34 @@ private final class RecordingNotificationPresenter: NotificationPresenter {
     }
 }
 
+private final class CoalescingNotificationPresenter: NotificationPresenter {
+    private var deliveredByIdentifier: [String: NotificationPresentationRequest] = [:]
+    private(set) var showCount = 0
+    private(set) var removeCount = 0
+
+    var deliveredCount: Int {
+        deliveredByIdentifier.count
+    }
+
+    var deliveredIdentifiers: Set<String> {
+        Set(deliveredByIdentifier.keys)
+    }
+
+    func body(for identifier: String) -> String? {
+        deliveredByIdentifier[identifier]?.body
+    }
+
+    func show(_ request: NotificationPresentationRequest) {
+        showCount += 1
+        deliveredByIdentifier[request.identifier] = request
+    }
+
+    func remove(identifier: String) {
+        removeCount += 1
+        deliveredByIdentifier.removeValue(forKey: identifier)
+    }
+}
+
 private final class RecordingDismissOutbox: NotificationDismissOutbox {
     var type: String?
     var capability: String?
@@ -89,6 +117,51 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         )
         XCTAssertEqual(presenter.removed, ["hyphen.notification.0|com.mail|42|null|10101"])
         XCTAssertTrue(presenter.shown.isEmpty)
+    }
+
+    func testNotificationStormCoalescesByAndroidKeyAndRemovalsStayBounded() throws {
+        let presenter = CoalescingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(presenter: presenter)
+        let keys = (0..<25).map { index in "0|com.chat|\(index)|thread-\(index)|10101" }
+        var seen = Set<String>()
+
+        for index in 0..<1_000 {
+            let key = keys[index % keys.count]
+            let type = seen.insert(key).inserted
+                ? NotificationMirrorProtocol.typePosted
+                : NotificationMirrorProtocol.typeUpdated
+
+            _ = try receiver.handle(
+                envelope(
+                    type: type,
+                    payload: payload(sbnKey: key, text: "message-\(index)")
+                )
+            )
+        }
+
+        XCTAssertEqual(presenter.showCount, 1_000)
+        XCTAssertEqual(presenter.deliveredCount, keys.count)
+        XCTAssertEqual(
+            presenter.deliveredIdentifiers,
+            Set(keys.map(AndroidNotificationPayload.identifier(for:)))
+        )
+        XCTAssertEqual(
+            presenter.body(for: AndroidNotificationPayload.identifier(for: keys[24])),
+            "message-999"
+        )
+
+        for key in keys.prefix(10) {
+            _ = try receiver.handle(
+                envelope(type: NotificationMirrorProtocol.typeRemoved, payload: ["sbnKey": key])
+            )
+        }
+
+        XCTAssertEqual(presenter.removeCount, 10)
+        XCTAssertEqual(presenter.deliveredCount, 15)
+        XCTAssertEqual(
+            presenter.deliveredIdentifiers,
+            Set(keys.dropFirst(10).map(AndroidNotificationPayload.identifier(for:)))
+        )
     }
 
     func testOtherEnvelopeTypesAreIgnored() throws {

@@ -106,6 +106,26 @@ class NotificationMirrorEventSenderTest {
         assertEquals(setOf("0|com.chat|7|thread-123|10101"), sender.activeKeys())
     }
 
+    @Test
+    fun `notification storm keeps active keys bounded and repeats become updates`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox)
+        val keys = (0 until 25).map { index -> "0|com.chat|$index|thread-$index|10101" }
+
+        repeat(1_000) { index ->
+            sender.sendPostedOrUpdated(payload(keys[index % keys.size], "message-$index"))
+        }
+        keys.take(10).forEach(sender::sendRemoved)
+
+        assertEquals(1_010, outbox.envelopes.size)
+        assertEquals(25, outbox.envelopes.count { it.type == NotificationProtocol.TYPE_POSTED })
+        assertEquals(975, outbox.envelopes.count { it.type == NotificationProtocol.TYPE_UPDATED })
+        assertEquals(10, outbox.envelopes.count { it.type == NotificationProtocol.TYPE_REMOVED })
+        assertEquals(keys.drop(10).toSet(), sender.activeKeys())
+        assertTrue(outbox.envelopes.all { it.capability == NotificationProtocol.CAPABILITY })
+        assertTrue(outbox.envelopes.all { it.requiresAck })
+    }
+
     private fun payload(sbnKey: String, text: String): NormalizedNotificationPayload =
         NormalizedNotificationPayload(
             sbnKey = sbnKey,
