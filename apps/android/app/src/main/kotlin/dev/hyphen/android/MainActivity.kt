@@ -18,6 +18,8 @@ import android.widget.TextView
 import dev.hyphen.android.companion.AssociationController
 import dev.hyphen.android.companion.AssociationEvent
 import dev.hyphen.android.companion.CdmAssociationBackend
+import dev.hyphen.android.diagnostics.DiagnosticProtocolSessionListener
+import dev.hyphen.android.diagnostics.LocalStructuredLogStore
 import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
 import dev.hyphen.android.discovery.DiscoveryEvent
@@ -58,6 +60,7 @@ class MainActivity : Activity() {
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
     private val textReceiver = TextLinkReceiver()
+    private val diagnosticLogs = LocalStructuredLogStore()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -258,28 +261,29 @@ class MainActivity : Activity() {
                 resumeToken = handshake.resumeToken
                 lastSessionId = handshake.sessionId
                 lateinit var session: ProtocolSession
+                val listener = object : ProtocolSession.Listener {
+                    override fun onLiveness(state: HeartbeatMonitor.State) {
+                        runOnUiThread { append("session liveness: $state") }
+                    }
+
+                    override fun onProtocolError(code: String, detail: String) {
+                        runOnUiThread { append("session protocol error: $code $detail") }
+                    }
+
+                    override fun onEnvelope(envelope: Envelope) {
+                        handleSessionEnvelope(envelope)
+                    }
+
+                    override fun onClosed() {
+                        if (activeSession === session) activeSession = null
+                        runOnUiThread { append("Mac session closed") }
+                    }
+                }
                 session = ProtocolSession(
                     socket = socket,
                     sessionId = handshake.sessionId,
                     config = ProtocolSession.Config(startingSeq = 1),
-                    listener = object : ProtocolSession.Listener {
-                        override fun onLiveness(state: HeartbeatMonitor.State) {
-                            runOnUiThread { append("session liveness: $state") }
-                        }
-
-                        override fun onProtocolError(code: String, detail: String) {
-                            runOnUiThread { append("session protocol error: $code $detail") }
-                        }
-
-                        override fun onEnvelope(envelope: Envelope) {
-                            handleSessionEnvelope(envelope)
-                        }
-
-                        override fun onClosed() {
-                            if (activeSession === session) activeSession = null
-                            runOnUiThread { append("Mac session closed") }
-                        }
-                    },
+                    listener = DiagnosticProtocolSessionListener(diagnosticLogs, listener),
                 )
                 activeSession?.stop()
                 activeSession = session

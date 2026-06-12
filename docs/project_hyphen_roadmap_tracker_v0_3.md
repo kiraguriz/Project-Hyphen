@@ -189,7 +189,7 @@ gantt
 
 | ID | Status | Priority | Area | Task | Dependencies | Acceptance criteria | Verification |
 |---|---|---|---|---|---|---|---|
-| HYP-M4-001 | `[ ]` | P0 | Diagnostics | Implement local structured logs | HYP-M2-013 | Logs include failure codes without sensitive payload | Unit/manual test |
+| HYP-M4-001 | `[x]` | P0 | Diagnostics | Implement local structured logs | HYP-M2-013 | Logs include failure codes without sensitive payload | Unit/manual test |
 | HYP-M4-002 | `[ ]` | P0 | Diagnostics | Implement redacted diagnostics export on Android | HYP-M4-001 | User can preview/export/delete | Manual test |
 | HYP-M4-003 | `[ ]` | P0 | Diagnostics | Implement redacted diagnostics export on macOS | HYP-M4-001 | User can preview/export/delete | Manual test |
 | HYP-M4-004 | `[ ]` | P1 | Diagnostics | Implement opt-in beta diagnostics toggle | HYP-M4-002,HYP-M4-003 | Off by default; clear copy; disable works | Manual test |
@@ -355,7 +355,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 0 | 0 | 2 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
-| M4 Beta Hardening | 0 | 0 | 0 | 12 |
+| M4 Beta Hardening | 1 | 0 | 0 | 11 |
 | M5 Distribution | 0 | 0 | 0 | 10 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
 
@@ -408,3 +408,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M3-011 `[x]` — Added cross-platform transfer chunk sender/receiver cores. Android `dev.hyphen.android.transfer` and macOS `HyphenTransfer` now build `transfer.manifest` plus acked `transfer.chunk` envelopes, provide `ProtocolSession` outbox adapters, base64-encode chunk bytes, compute per-chunk SHA-256, and assemble received chunks back into completed in-memory files with size and whole-file SHA-256 checks. Tests cover manifest-first sending, small file reconstruction in both directions, and corrupted chunk-hash rejection on both platforms. Protocol doc §7.3 now defines `transfer.chunk` fields. Verified: `./gradlew test assembleDebug` green; `swift test` green.
 - 2026-06-12 — HYP-M3-012 `[x]` — Added in-memory transfer resume checkpoints on both platforms. `TransferReceiver.checkpoint(fileId)` now reports the next contiguous missing chunk as `TransferResumeInfo(fileId,nextChunkIndex)`, `TransferSender` can emit `transfer.resume.request` / `transfer.resume.info`, and `sendRemainingBytes(...)` resumes from a receiver checkpoint after validating the same file bytes still match the manifest. Tests on Android and macOS simulate interruption by delivering only manifest + first chunk, reading checkpoint `nextChunkIndex = 1`, sending the remaining chunks, and completing the original file. Protocol doc §7.4 now defines resume payloads and names persistence as later hardening. Verified: `./gradlew test assembleDebug` green; `swift test` green.
 - 2026-06-12 — HYP-M3-013 `[x]` — SHA-256 verification is now explicitly pinned by tests on both platforms. Existing transfer receivers already verify per-chunk `chunkSha256`, assembled byte count, and whole-file manifest `sha256`; this slice added dedicated corrupted whole-file tests alongside the existing corrupted chunk-hash tests so both Android and macOS reject tampered transfer data. Verified: `./gradlew test assembleDebug` green; `swift test` green.
+- 2026-06-12 — HYP-M4-001 `[x]` — Added local structured diagnostics logs on both platforms. Android `LocalStructuredLogStore` and macOS `HyphenDiagnostics` now keep bounded in-memory events with timestamp, level, taxonomy category, failure code, and tokenized metadata only; session callback adapters record `protocol/ack-timeout` and protocol/transport failure codes while deliberately omitting callback detail, payloads, notification text, URLs, file paths, and file contents. The debug apps wrap active `ProtocolSession` callbacks with these local stores; export/delete UI is deferred to HYP-M4-002/003. Verified: `./gradlew test assembleDebug` green; `swift test` green.

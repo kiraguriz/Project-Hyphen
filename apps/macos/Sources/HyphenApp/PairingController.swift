@@ -1,5 +1,6 @@
 import AppKit
 import HyphenCore
+import HyphenDiagnostics
 import HyphenText
 import HyphenTransport
 import Network
@@ -24,6 +25,7 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
+    private let diagnosticLogs = LocalStructuredLogStore()
     private let onStatus: (String) -> Void
 
     init(onStatus: @escaping (String) -> Void) {
@@ -263,7 +265,10 @@ final class PairingController: NSObject, NSWindowDelegate {
                     connection: connection,
                     sessionId: handshake.sessionId,
                     config: config,
-                    callbacks: callbacks
+                    callbacks: DiagnosticProtocolSessionCallbacks.wrap(
+                        store: self.diagnosticLogs,
+                        forwarding: callbacks
+                    )
                 )
                 self.activeSession?.stop()
                 self.activeSession = session

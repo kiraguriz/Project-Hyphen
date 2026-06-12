@@ -14,9 +14,20 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "HyphenApp",
-            dependencies: ["HyphenCore", "HyphenDiscovery", "HyphenPower", "HyphenText", "HyphenTransport"]
+            dependencies: [
+                "HyphenCore",
+                "HyphenDiagnostics",
+                "HyphenDiscovery",
+                "HyphenPower",
+                "HyphenText",
+                "HyphenTransport",
+            ]
         ),
         .target(name: "HyphenCore"),
+        .target(
+            name: "HyphenDiagnostics",
+            dependencies: ["HyphenTransport"]
+        ),
         .target(
             name: "HyphenDiscovery",
             dependencies: ["HyphenCore"]
@@ -37,6 +48,10 @@ let package = Package(
         .testTarget(
             name: "HyphenCoreTests",
             dependencies: ["HyphenCore"]
+        ),
+        .testTarget(
+            name: "HyphenDiagnosticsTests",
+            dependencies: ["HyphenDiagnostics"]
         ),
         .testTarget(
             name: "HyphenTransportTests",
