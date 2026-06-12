@@ -84,7 +84,14 @@ public final class SessionReconnector {
             verifier: verifier,
             queue: queue
         ) { [weak self] result in
-            guard let self, !self.stopped else { return }
+            guard let self else {
+                if case .success(let connection) = result { connection.cancel() }
+                return
+            }
+            guard !self.stopped else {
+                if case .success(let connection) = result { connection.cancel() }
+                return
+            }
             switch result {
             case .failure(let error):
                 self.callbacks.onAttemptFailed("\(error)")

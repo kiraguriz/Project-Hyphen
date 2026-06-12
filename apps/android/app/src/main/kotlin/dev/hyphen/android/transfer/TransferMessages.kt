@@ -3,8 +3,12 @@ package dev.hyphen.android.transfer
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.Json
 import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.Ulid
-import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.InputStream
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -41,6 +45,14 @@ data class TransferManifest(
             "invalid chunkSizeBytes"
         }
         require(chunkCount >= 0) { "chunkCount must be >= 0" }
+        val expectedChunks = if (sizeBytes == 0L) {
+            0L
+        } else {
+            (sizeBytes + chunkSizeBytes - 1L) / chunkSizeBytes
+        }
+        require(expectedChunks <= Int.MAX_VALUE && chunkCount.toLong() == expectedChunks) {
+            "chunkCount does not match sizeBytes/chunkSizeBytes"
+        }
     }
 
     fun toJson(): Json.Obj =
@@ -58,21 +70,25 @@ data class TransferManifest(
         private val MIME_TYPE = Regex("^[a-z0-9][a-z0-9!#\$&^_.+-]*/[a-z0-9][a-z0-9!#\$&^_.+-]*$")
         private val SHA256_HEX = Regex("^[0-9a-f]{64}$")
 
-        fun fromBytes(
+        fun fromSource(
             filename: String,
             mimeType: String,
-            bytes: ByteArray,
+            source: TransferByteSource,
             chunkSizeBytes: Int,
             fileId: String = "f_${Ulid.generate()}",
         ): TransferManifest =
             TransferManifest(
                 fileId = fileId,
                 filename = filename,
-                sizeBytes = bytes.size.toLong(),
+                sizeBytes = source.sizeBytes,
                 mimeType = mimeType,
-                sha256 = sha256Hex(bytes),
+                sha256 = source.sha256Hex(),
                 chunkSizeBytes = chunkSizeBytes,
-                chunkCount = if (bytes.isEmpty()) 0 else (bytes.size + chunkSizeBytes - 1) / chunkSizeBytes,
+                chunkCount = if (source.sizeBytes == 0L) {
+                    0
+                } else {
+                    ((source.sizeBytes + chunkSizeBytes - 1L) / chunkSizeBytes).toInt()
+                },
             )
 
         fun fromJson(payload: Json.Obj): TransferManifest =
@@ -85,6 +101,53 @@ data class TransferManifest(
                 chunkSizeBytes = int(payload, "chunkSizeBytes"),
                 chunkCount = int(payload, "chunkCount"),
             )
+    }
+}
+
+interface TransferByteSource {
+    val sizeBytes: Long
+    fun openStream(): InputStream
+
+    fun sha256Hex(): String =
+        openStream().use { sha256Hex(it) }
+
+    fun readChunk(offset: Long, maxBytes: Int): ByteArray =
+        openStream().use { input ->
+            skipFully(input, offset)
+            val buffer = ByteArray(maxBytes)
+            var total = 0
+            while (total < maxBytes) {
+                val read = input.read(buffer, total, maxBytes - total)
+                if (read == -1) break
+                total += read
+            }
+            buffer.copyOf(total)
+        }
+}
+
+class FileTransferByteSource(private val file: File) : TransferByteSource {
+    override val sizeBytes: Long
+        get() = file.length()
+
+    override fun openStream(): InputStream = FileInputStream(file)
+}
+
+interface TransferStorage {
+    fun prepare(manifest: TransferManifest): File
+    fun discard(fileId: String)
+}
+
+class FileTransferStorage(private val root: File) : TransferStorage {
+    override fun prepare(manifest: TransferManifest): File {
+        require(root.exists() || root.mkdirs()) { "transfer storage unavailable" }
+        val file = File(root, "${manifest.fileId}.part")
+        if (file.exists()) require(file.delete()) { "could not reset transfer storage" }
+        require(file.createNewFile()) { "could not create transfer storage" }
+        return file
+    }
+
+    override fun discard(fileId: String) {
+        File(root, "$fileId.part").delete()
     }
 }
 
@@ -235,37 +298,56 @@ class ProtocolSessionTransferOutbox(private val session: ProtocolSession) : Tran
 
 class TransferSender(
     private val outbox: TransferOutbox,
+    private val negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities? = null,
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
-    fun sendBytes(
+    private data class RegisteredTransfer(
+        val manifest: TransferManifest,
+        val source: TransferByteSource,
+    )
+
+    private val registered = mutableMapOf<String, RegisteredTransfer>()
+
+    fun sendSource(
         filename: String,
         mimeType: String,
-        bytes: ByteArray,
+        source: TransferByteSource,
         chunkSizeBytes: Int,
         fileId: String = "f_${Ulid.generate()}",
     ): TransferManifest {
-        val manifest = TransferManifest.fromBytes(filename, mimeType, bytes, chunkSizeBytes, fileId)
+        require(negotiatedCapabilities?.contains(TransferProtocol.CAPABILITY) != false) {
+            "plugin/unsupported-capability"
+        }
+        val effectiveChunkSize = negotiatedCapabilities
+            ?.transferMaxChunkBytes()
+            ?.let { minOf(chunkSizeBytes, it) }
+            ?: chunkSizeBytes
+        val manifest = TransferManifest.fromSource(filename, mimeType, source, effectiveChunkSize, fileId)
+        registered[manifest.fileId] = RegisteredTransfer(manifest, source)
         outbox.send(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, manifest.toJson())
         onProgress(TransferProgress.from(manifest, completedChunks = 0))
-        sendRemainingBytes(manifest, bytes, fromChunkIndex = 0)
+        sendRemaining(manifest.fileId, fromChunkIndex = 0)
         return manifest
     }
 
-    fun sendRemainingBytes(
-        manifest: TransferManifest,
-        bytes: ByteArray,
-        fromChunkIndex: Int,
-    ) {
+    fun sendRemaining(fileId: String, fromChunkIndex: Int) {
+        val transfer = registered[fileId] ?: throw IllegalArgumentException("unknown outbound fileId")
+        val manifest = transfer.manifest
+        val source = transfer.source
         require(fromChunkIndex in 0..manifest.chunkCount) { "fromChunkIndex out of range" }
-        require(bytes.size.toLong() == manifest.sizeBytes) { "size mismatch" }
-        require(sha256Hex(bytes) == manifest.sha256) { "file sha256 mismatch" }
+        require(source.sizeBytes == manifest.sizeBytes) { "size mismatch" }
+        require(source.sha256Hex() == manifest.sha256) { "file sha256 mismatch" }
         for (index in fromChunkIndex until manifest.chunkCount) {
-            val start = index * manifest.chunkSizeBytes
-            val end = minOf(start + manifest.chunkSizeBytes, bytes.size)
-            val chunk = TransferChunk(manifest.fileId, index, bytes.copyOfRange(start, end))
+            val start = index.toLong() * manifest.chunkSizeBytes.toLong()
+            val expected = manifest.expectedChunkBytes(index)
+            val chunk = TransferChunk(manifest.fileId, index, source.readChunk(start, expected))
             outbox.send(TransferProtocol.TYPE_CHUNK, TransferProtocol.CAPABILITY, true, chunk.toJson())
             onProgress(TransferProgress.from(manifest, completedChunks = index + 1))
         }
+    }
+
+    fun handleResumeInfo(info: TransferResumeInfo) {
+        sendRemaining(info.fileId, info.nextChunkIndex)
     }
 
     fun requestResume(fileId: String): String =
@@ -295,10 +377,21 @@ class TransferSender(
 
 data class TransferCompleted(
     val manifest: TransferManifest,
-    val bytes: ByteArray,
+    val file: File,
+    val sha256: String,
 )
 
+sealed class TransferEvent {
+    data class Completed(val completed: TransferCompleted) : TransferEvent()
+    data class ResumeRequested(val info: TransferResumeInfo) : TransferEvent()
+    data class Cancelled(val cancel: TransferCancel) : TransferEvent()
+    object Ignored : TransferEvent()
+}
+
 class TransferReceiver(
+    private val storage: TransferStorage = FileTransferStorage(
+        File(System.getProperty("java.io.tmpdir") ?: ".", "hyphen-transfer"),
+    ),
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
     private val states = mutableMapOf<String, TransferState>()
@@ -306,69 +399,91 @@ class TransferReceiver(
     fun checkpoint(fileId: String): TransferResumeInfo? =
         states[fileId]?.checkpoint()
 
-    fun handle(envelope: Envelope): TransferCompleted? {
-        if (envelope.capability != TransferProtocol.CAPABILITY) return null
+    fun handle(envelope: Envelope): TransferEvent {
+        if (envelope.capability != TransferProtocol.CAPABILITY) return TransferEvent.Ignored
         return when (envelope.type) {
             TransferProtocol.TYPE_MANIFEST -> {
                 val manifest = TransferManifest.fromJson(envelope.payload)
-                val state = TransferState(manifest)
+                val state = TransferState(manifest, storage.prepare(manifest))
                 states[manifest.fileId] = state
                 onProgress(TransferProgress.from(manifest, completedChunks = 0))
-                completeIfReady(state)
+                completeIfReady(state)?.let(TransferEvent::Completed) ?: TransferEvent.Ignored
             }
             TransferProtocol.TYPE_CHUNK -> {
                 val chunk = TransferChunk.fromJson(envelope.payload)
                 val state = states[chunk.fileId] ?: throw IllegalArgumentException("unknown fileId")
                 state.accept(chunk)
                 onProgress(state.progress())
-                completeIfReady(state)
+                completeIfReady(state)?.let(TransferEvent::Completed) ?: TransferEvent.Ignored
+            }
+            TransferProtocol.TYPE_RESUME_REQUEST -> {
+                val request = TransferResumeRequest.fromJson(envelope.payload)
+                TransferEvent.ResumeRequested(
+                    states[request.fileId]?.checkpoint() ?: TransferResumeInfo(request.fileId, nextChunkIndex = 0),
+                )
             }
             TransferProtocol.TYPE_CANCEL -> {
                 val cancel = TransferCancel.fromJson(envelope.payload)
-                if (cancel.discard) states.remove(cancel.fileId)
-                null
+                if (cancel.discard) {
+                    states.remove(cancel.fileId)
+                    storage.discard(cancel.fileId)
+                }
+                TransferEvent.Cancelled(cancel)
             }
-            else -> null
+            else -> TransferEvent.Ignored
         }
     }
 
     private fun completeIfReady(state: TransferState): TransferCompleted? {
-        val bytes = state.bytesIfComplete() ?: return null
-        require(bytes.size.toLong() == state.manifest.sizeBytes) { "size mismatch" }
-        require(sha256Hex(bytes) == state.manifest.sha256) { "file sha256 mismatch" }
+        val file = state.fileIfComplete() ?: return null
+        require(file.length() == state.manifest.sizeBytes) { "size mismatch" }
+        val digest = file.inputStream().use { sha256Hex(it) }
+        require(digest == state.manifest.sha256) { "file sha256 mismatch" }
         states.remove(state.manifest.fileId)
-        return TransferCompleted(state.manifest, bytes)
+        return TransferCompleted(state.manifest, file, digest)
     }
 }
 
-private class TransferState(val manifest: TransferManifest) {
-    private val chunks = arrayOfNulls<ByteArray>(manifest.chunkCount)
+private class TransferState(
+    val manifest: TransferManifest,
+    private val file: File,
+) {
+    private val received = BooleanArray(manifest.chunkCount)
 
     fun accept(chunk: TransferChunk) {
-        require(chunk.chunkIndex < chunks.size) { "chunkIndex out of range" }
-        chunks[chunk.chunkIndex] = chunk.data
+        require(chunk.chunkIndex < received.size) { "chunkIndex out of range" }
+        require(chunk.data.size == manifest.expectedChunkBytes(chunk.chunkIndex)) { "chunk size mismatch" }
+        RandomAccessFile(file, "rw").use {
+            it.seek(chunk.chunkIndex.toLong() * manifest.chunkSizeBytes.toLong())
+            it.write(chunk.data)
+        }
+        received[chunk.chunkIndex] = true
     }
 
-    fun bytesIfComplete(): ByteArray? {
-        val out = ByteArrayOutputStream()
-        for (chunk in chunks) {
-            if (chunk == null) return null
-            out.write(chunk)
+    fun fileIfComplete(): File? {
+        for (chunk in received) {
+            if (!chunk) return null
         }
-        return out.toByteArray()
+        return file
     }
 
     fun checkpoint(): TransferResumeInfo {
         var next = 0
-        while (next < chunks.size && chunks[next] != null) next += 1
+        while (next < received.size && received[next]) next += 1
         return TransferResumeInfo(manifest.fileId, next)
     }
 
     fun progress(): TransferProgress {
         var completed = 0
-        while (completed < chunks.size && chunks[completed] != null) completed += 1
+        while (completed < received.size && received[completed]) completed += 1
         return TransferProgress.from(manifest, completed)
     }
+}
+
+private fun TransferManifest.expectedChunkBytes(chunkIndex: Int): Int {
+    require(chunkIndex in 0 until chunkCount) { "chunkIndex out of range" }
+    val offset = chunkIndex.toLong() * chunkSizeBytes.toLong()
+    return minOf(chunkSizeBytes.toLong(), sizeBytes - offset).toInt()
 }
 
 private fun string(payload: Json.Obj, field: String): String =
@@ -389,3 +504,28 @@ private fun sha256Hex(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
+
+private fun sha256Hex(input: InputStream): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        val read = input.read(buffer)
+        if (read == -1) break
+        digest.update(buffer, 0, read)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+private fun skipFully(input: InputStream, bytes: Long) {
+    var remaining = bytes
+    while (remaining > 0) {
+        val skipped = input.skip(remaining)
+        if (skipped > 0) {
+            remaining -= skipped
+        } else if (input.read() == -1) {
+            throw IllegalArgumentException("source ended before requested chunk")
+        } else {
+            remaining--
+        }
+    }
+}

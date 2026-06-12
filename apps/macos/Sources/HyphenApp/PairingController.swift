@@ -25,6 +25,7 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var provisionalConnection: NWConnection?
     private var activeSession: ProtocolSession?
     private var activeSessionToken: UUID?
+    private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
     private var lastTransferProgress: TransferProgress?
@@ -275,6 +276,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                         if self?.activeSessionToken == sessionToken {
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
+                            self?.activeCapabilities = nil
                             self?.lastTransferProgress = nil
                             self?.notificationPresenter.setDismissHandler(nil)
                             self?.notificationPresenter.setReplyHandler(nil)
@@ -296,6 +298,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                 self.activeSession?.stop()
                 self.activeSession = session
                 self.activeSessionToken = sessionToken
+                self.activeCapabilities = handshake.negotiatedCapabilities
                 self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
                     self?.sendNotificationDismissRequest(sbnKey: sbnKey)
                 }
@@ -370,6 +373,38 @@ final class PairingController: NSObject, NSWindowDelegate {
 
     private func handleSessionEnvelope(_ envelope: Envelope) {
         do {
+            if envelope.type == Envelope.typeError {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus(Self.peerErrorLine(envelope))
+                }
+                return
+            }
+            if let session = activeSession,
+               let expected = Self.expectedCapability(for: envelope.type),
+               envelope.capability != expected {
+                let id = sendProtocolError(
+                    session: session,
+                    regarding: envelope,
+                    code: "plugin/unsupported-capability",
+                    message: "Message type was sent under the wrong capability."
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
+                }
+                return
+            }
+            if let session = activeSession, !isNegotiatedCapability(envelope.capability) {
+                let id = sendProtocolError(
+                    session: session,
+                    regarding: envelope,
+                    code: "plugin/unsupported-capability",
+                    message: "Capability is not negotiated for this session."
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
+                }
+                return
+            }
             if let action = try notificationReceiver.handle(envelope) {
                 DispatchQueue.main.async { [weak self] in
                     self?.renderNotificationAction(action)
@@ -377,24 +412,118 @@ final class PairingController: NSObject, NSWindowDelegate {
                 return
             }
             if envelope.capability == TransferProtocol.capability {
-                let completed = try transferReceiver.handle(envelope)
-                if let completed {
+                switch try transferReceiver.handle(envelope) {
+                case .completed(let completed):
                     DispatchQueue.main.async { [weak self] in
                         self?.lastTransferProgress = nil
-                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.bytes.count) bytes)")
+                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes)")
                     }
+                case .resumeRequested(let info):
+                    let session = activeSession
+                    DispatchQueue.main.async { [weak self] in
+                        guard let session else {
+                            self?.onStatus("transfer resume requested without active session")
+                            return
+                        }
+                        let id = TransferSender(outbox: ProtocolSessionTransferOutbox(session: session)).sendResumeInfo(info)
+                        self?.onStatus("transfer resume info sent: \(id ?? "session closed")")
+                    }
+                case .cancelled(let cancel):
+                    DispatchQueue.main.async { [weak self] in
+                        self?.lastTransferProgress = nil
+                        self?.onStatus("transfer cancelled: \(cancel.fileId)")
+                    }
+                case .ignored:
+                    break
                 }
                 return
             }
-            guard let request = try textReceiver.handle(envelope) else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.presentTextLinkConfirmation(request)
+            if let request = try textReceiver.handle(envelope) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.presentTextLinkConfirmation(request)
+                }
+                return
+            }
+            if Self.isPluginEnvelope(envelope), let session = activeSession {
+                let id = sendProtocolError(
+                    session: session,
+                    regarding: envelope,
+                    code: "protocol/unknown-type",
+                    message: "No handler is registered for this message type."
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus("unknown type reported: \(id ?? "session closed")")
+                }
             }
         } catch {
+            if envelope.type != Envelope.typeError, let session = activeSession {
+                _ = sendProtocolError(
+                    session: session,
+                    regarding: envelope,
+                    code: "protocol/invalid-envelope",
+                    message: "Envelope payload is invalid for its type."
+                )
+            }
             DispatchQueue.main.async { [weak self] in
-                self?.onStatus("Text/link rejected: \(error)")
+                self?.onStatus("session envelope rejected: \(error)")
             }
         }
+    }
+
+    private func isNegotiatedCapability(_ capability: String?) -> Bool {
+        guard let capability else { return true }
+        return activeCapabilities?.contains(capability) != false
+    }
+
+    private static func isPluginEnvelope(_ envelope: Envelope) -> Bool {
+        ![Envelope.typeAck, Envelope.typeHeartbeat, Envelope.typeHello, Envelope.typeError].contains(envelope.type)
+    }
+
+    private static func expectedCapability(for type: String) -> String? {
+        switch type {
+        case NotificationMirrorProtocol.typePosted,
+             NotificationMirrorProtocol.typeUpdated,
+             NotificationMirrorProtocol.typeRemoved,
+             NotificationMirrorProtocol.typeDismissResult,
+             NotificationMirrorProtocol.typeReplyResult:
+            return NotificationMirrorProtocol.capability
+        case TransferProtocol.typeManifest,
+             TransferProtocol.typeChunk,
+             TransferProtocol.typeResumeRequest,
+             TransferProtocol.typeResumeInfo,
+             TransferProtocol.typeCancel:
+            return TransferProtocol.capability
+        case TextLinkMessage.typeSend:
+            return TextLinkMessage.capability
+        default:
+            return nil
+        }
+    }
+
+    @discardableResult
+    private func sendProtocolError(
+        session: ProtocolSession,
+        regarding envelope: Envelope,
+        code: String,
+        message: String,
+        retryable: Bool = false
+    ) -> String? {
+        session.send(
+            type: Envelope.typeError,
+            payload: [
+                "code": code,
+                "message": String(message.prefix(256)),
+                "regarding": envelope.messageId,
+                "retryable": retryable,
+            ],
+            requiresAck: false
+        )
+    }
+
+    private static func peerErrorLine(_ envelope: Envelope) -> String {
+        let code = envelope.payload["code"] as? String ?? "unknown"
+        let regarding = envelope.payload["regarding"] as? String ?? "none"
+        return "peer error: \(code) regarding \(regarding)"
     }
 
     private func renderNotificationAction(_ action: NotificationMirrorAction) {

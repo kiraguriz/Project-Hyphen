@@ -51,6 +51,20 @@ public final class FrameReader {
         return frames
     }
 
+    /// Returns the first completed payload and all bytes that must be replayed
+    /// by the next protocol layer, preserving coalesced complete frames and any
+    /// partial trailing frame already buffered by this reader.
+    public func feedUntilFirst(_ data: Data) throws -> (frame: Data, leftover: Data)? {
+        let frames = try feed(data)
+        guard let first = frames.first else { return nil }
+        var leftover = Data()
+        for frame in frames.dropFirst() {
+            leftover.append(try FrameCodec.encode(frame))
+        }
+        leftover.append(remainder())
+        return (first, leftover)
+    }
+
     /// Hands off any partially-buffered bytes and resets — used when one
     /// layer (handshake) stops reading and another (session) takes over.
     public func remainder() -> Data {

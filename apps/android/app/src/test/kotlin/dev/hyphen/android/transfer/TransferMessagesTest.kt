@@ -2,10 +2,13 @@ package dev.hyphen.android.transfer
 
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.Json
-import org.junit.Assert.assertArrayEquals
+import dev.hyphen.android.transport.SessionHandshake
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 private data class SentTransferEnvelope(
     val type: String,
@@ -29,14 +32,19 @@ private class RecordingTransferOutbox : TransferOutbox {
 }
 
 class TransferMessagesTest {
+    @Rule
+    @JvmField
+    val temp = TemporaryFolder()
+
     @Test
     fun `sender emits manifest first and acked chunks`() {
         val outbox = RecordingTransferOutbox()
+        val bytes = ByteArray(1500) { it.toByte() }
 
-        val manifest = TransferSender(outbox).sendBytes(
+        val manifest = TransferSender(outbox).sendSource(
             filename = "notes.txt",
             mimeType = "text/plain",
-            bytes = ByteArray(1500) { it.toByte() },
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = "f_android_to_mac",
         )
@@ -53,8 +61,26 @@ class TransferMessagesTest {
         val androidToMac = ByteArray(1500) { (it % 251).toByte() }
         val macToAndroid = "hello back from mac".toByteArray()
 
-        assertArrayEquals(androidToMac, sendThroughReceiver(androidToMac, "f_android_to_mac").bytes)
-        assertArrayEquals(macToAndroid, sendThroughReceiver(macToAndroid, "f_mac_to_android").bytes)
+        assertEquals(androidToMac.toList(), sendThroughReceiver(androidToMac, "f_android_to_mac").file.readBytes().toList())
+        assertEquals(macToAndroid.toList(), sendThroughReceiver(macToAndroid, "f_mac_to_android").file.readBytes().toList())
+    }
+
+    @Test
+    fun `receiver completes empty files without chunks`() {
+        val outbox = RecordingTransferOutbox()
+        TransferSender(outbox).sendSource(
+            filename = "empty.txt",
+            mimeType = "text/plain",
+            source = source(ByteArray(0)),
+            chunkSizeBytes = 1024,
+            fileId = "f_empty_file",
+        )
+
+        val event = receiver().handle(toEnvelope(outbox.envelopes.single(), index = 0))
+
+        val completed = (event as TransferEvent.Completed).completed
+        assertEquals(0L, completed.file.length())
+        assertEquals(completed.manifest.sha256, completed.sha256)
     }
 
     @Test
@@ -71,14 +97,14 @@ class TransferMessagesTest {
     fun `receiver rejects completed files whose sha256 does not match the manifest`() {
         val bytes = ByteArray(1500) { (it % 251).toByte() }
         val outbox = RecordingTransferOutbox()
-        TransferSender(outbox).sendBytes(
+        TransferSender(outbox).sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
-            bytes = bytes,
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = "f_bad_file_hash",
         )
-        val receiver = TransferReceiver()
+        val receiver = receiver()
         val first = outbox.envelopes.first()
         val badManifest = first.copy(
             payload = Json.Obj(first.payload.entries + ("sha256" to Json.Str("0".repeat(64)))),
@@ -95,30 +121,37 @@ class TransferMessagesTest {
     @Test
     fun `interrupted transfer resumes from receiver checkpoint`() {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
-        val firstOutbox = RecordingTransferOutbox()
-        val manifest = TransferSender(firstOutbox).sendBytes(
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox)
+        val manifest = sender.sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
-            bytes = bytes,
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = "f_resume_test",
         )
-        val receiver = TransferReceiver()
+        val receiver = receiver()
 
-        firstOutbox.envelopes.take(2).forEachIndexed { index, sent ->
+        outbox.envelopes.take(2).forEachIndexed { index, sent ->
             receiver.handle(toEnvelope(sent, index))
         }
-        val checkpoint = receiver.checkpoint(manifest.fileId)
-        assertEquals(1, checkpoint?.nextChunkIndex)
+        outbox.envelopes.clear()
 
-        val resumeOutbox = RecordingTransferOutbox()
-        TransferSender(resumeOutbox).sendRemainingBytes(manifest, bytes, checkpoint!!.nextChunkIndex)
+        sender.requestResume(manifest.fileId)
+        val resumeRequest = outbox.envelopes.single()
+        val resumeEvent = receiver.handle(toEnvelope(resumeRequest, index = 2))
+        val info = (resumeEvent as TransferEvent.ResumeRequested).info
+        assertEquals(1, info.nextChunkIndex)
+        outbox.envelopes.clear()
+
+        sender.handleResumeInfo(info)
         var completed: TransferCompleted? = null
-        resumeOutbox.envelopes.forEachIndexed { index, sent ->
-            completed = receiver.handle(toEnvelope(sent, index + 2)) ?: completed
+        outbox.envelopes.forEachIndexed { index, sent ->
+            val event = receiver.handle(toEnvelope(sent, index + 3))
+            if (event is TransferEvent.Completed) completed = event.completed
         }
 
-        assertArrayEquals(bytes, completed?.bytes)
+        assertEquals(bytes.toList(), completed?.file?.readBytes()?.toList())
     }
 
     @Test
@@ -136,19 +169,49 @@ class TransferMessagesTest {
     }
 
     @Test
+    fun `sender uses negotiated transfer max chunk size and rejects unsupported transfer`() {
+        val outbox = RecordingTransferOutbox()
+        val bytes = ByteArray(3000) { it.toByte() }
+        val capped = TransferSender(
+            outbox,
+            negotiatedCapabilities = SessionHandshake.NegotiatedCapabilities.advertised(maxTransferChunkBytes = 1024),
+        ).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 2048,
+            fileId = "f_negotiated_chunk",
+        )
+
+        assertEquals(1024, capped.chunkSizeBytes)
+        assertRejected("unsupported transfer") {
+            TransferSender(
+                RecordingTransferOutbox(),
+                negotiatedCapabilities = SessionHandshake.NegotiatedCapabilities.empty(),
+            ).sendSource(
+                filename = "sample.bin",
+                mimeType = "application/octet-stream",
+                source = source(bytes),
+                chunkSizeBytes = 1024,
+                fileId = "f_unsupported_transfer",
+            )
+        }
+    }
+
+    @Test
     fun `sender and receiver report transfer progress`() {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
         val outbox = RecordingTransferOutbox()
         val sendProgress = mutableListOf<TransferProgress>()
-        val manifest = TransferSender(outbox, onProgress = sendProgress::add).sendBytes(
+        val manifest = TransferSender(outbox, onProgress = sendProgress::add).sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
-            bytes = bytes,
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = "f_progress_test",
         )
         val receiveProgress = mutableListOf<TransferProgress>()
-        val receiver = TransferReceiver(onProgress = receiveProgress::add)
+        val receiver = receiver(onProgress = receiveProgress::add)
 
         outbox.envelopes.forEachIndexed { index, sent ->
             receiver.handle(toEnvelope(sent, index))
@@ -165,14 +228,14 @@ class TransferMessagesTest {
     fun `cancel message uses protocol wire name and discard clears receiver checkpoint`() {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
         val firstOutbox = RecordingTransferOutbox()
-        val manifest = TransferSender(firstOutbox).sendBytes(
+        val manifest = TransferSender(firstOutbox).sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
-            bytes = bytes,
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = "f_cancel_test",
         )
-        val receiver = TransferReceiver()
+        val receiver = receiver()
         firstOutbox.envelopes.take(2).forEachIndexed { index, sent ->
             receiver.handle(toEnvelope(sent, index))
         }
@@ -189,21 +252,71 @@ class TransferMessagesTest {
         assertEquals(null, receiver.checkpoint(manifest.fileId))
     }
 
-    private fun sendThroughReceiver(bytes: ByteArray, fileId: String): TransferCompleted {
+    @Test
+    fun `receiver rejects chunk sizes that do not match the manifest`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
         val outbox = RecordingTransferOutbox()
-        TransferSender(outbox).sendBytes(
+        val manifest = TransferSender(outbox).sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
-            bytes = bytes,
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_bad_chunk_size",
+        )
+        val receiver = receiver()
+        receiver.handle(toEnvelope(outbox.envelopes.first(), index = 0))
+
+        assertRejected("short non-final chunk") {
+            receiver.handle(toEnvelope(chunk(manifest.fileId, 0, ByteArray(1000)), index = 1))
+        }
+        assertRejected("oversized non-final chunk") {
+            receiver.handle(toEnvelope(chunk(manifest.fileId, 0, ByteArray(1025)), index = 2))
+        }
+        assertRejected("wrong final chunk") {
+            receiver.handle(toEnvelope(chunk(manifest.fileId, 2, ByteArray(500)), index = 3))
+        }
+    }
+
+    private fun sendThroughReceiver(bytes: ByteArray, fileId: String): TransferCompleted {
+        val outbox = RecordingTransferOutbox()
+        TransferSender(outbox).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
             chunkSizeBytes = 1024,
             fileId = fileId,
         )
-        val receiver = TransferReceiver()
+        val receiver = receiver()
         var completed: TransferCompleted? = null
         outbox.envelopes.forEachIndexed { index, sent ->
-            completed = receiver.handle(toEnvelope(sent, index)) ?: completed
+            val event = receiver.handle(toEnvelope(sent, index))
+            if (event is TransferEvent.Completed) completed = event.completed
         }
         return completed ?: error("transfer did not complete")
+    }
+
+    private fun source(bytes: ByteArray): FileTransferByteSource {
+        val file = temp.newFile("source-${System.nanoTime()}.bin")
+        file.writeBytes(bytes)
+        return FileTransferByteSource(file)
+    }
+
+    private fun receiver(
+        onProgress: (TransferProgress) -> Unit = {},
+    ): TransferReceiver =
+        TransferReceiver(FileTransferStorage(temp.newFolder("receive-${System.nanoTime()}")), onProgress)
+
+    private fun chunk(fileId: String, chunkIndex: Int, bytes: ByteArray): SentTransferEnvelope =
+        SentTransferEnvelope(
+            type = TransferProtocol.TYPE_CHUNK,
+            capability = TransferProtocol.CAPABILITY,
+            requiresAck = true,
+            payload = TransferChunk(fileId, chunkIndex, bytes).toJson(),
+        )
+
+    private fun assertRejected(label: String, block: () -> Unit) {
+        val error = runCatching(block).exceptionOrNull()
+        if (error !is IllegalArgumentException) fail("$label should reject with IllegalArgumentException")
     }
 
     private fun toEnvelope(sent: SentTransferEnvelope, index: Int): Envelope =

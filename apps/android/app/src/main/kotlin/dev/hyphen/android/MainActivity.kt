@@ -31,6 +31,7 @@ import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationAccessController
 import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
+import dev.hyphen.android.notifications.NotificationProtocol
 import dev.hyphen.android.notifications.NotificationReplyRequestHandler
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.EndpointConnectProbe
@@ -48,6 +49,8 @@ import dev.hyphen.android.text.TextLinkSender
 import dev.hyphen.android.transfer.ProtocolSessionTransferOutbox
 import dev.hyphen.android.transfer.TransferCancel
 import dev.hyphen.android.transfer.TransferCompleted
+import dev.hyphen.android.transfer.TransferEvent
+import dev.hyphen.android.transfer.FileTransferStorage
 import dev.hyphen.android.transfer.TransferProgress
 import dev.hyphen.android.transfer.TransferProtocol
 import dev.hyphen.android.transfer.TransferReceiver
@@ -55,11 +58,13 @@ import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.HeartbeatMonitor
+import dev.hyphen.android.transport.Json
 import dev.hyphen.android.transport.ProtocolSession
 import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
 import dev.hyphen.android.trust.TrustedPeer
+import java.io.File
 import javax.net.ssl.SSLSocket
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
@@ -71,14 +76,17 @@ class MainActivity : Activity() {
     private lateinit var button: Button
     private lateinit var betaDiagnosticsButton: Button
     private var activeSession: ProtocolSession? = null
+    private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
     private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = LocalStructuredLogStore()
     private var lastTransferProgress: TransferProgress? = null
-    private val transferReceiver = TransferReceiver { progress ->
-        lastTransferProgress = progress
-        runOnUiThread { append(transferProgressLine(progress)) }
+    private val transferReceiver by lazy {
+        TransferReceiver(FileTransferStorage(File(cacheDir, "transfers"))) { progress ->
+            lastTransferProgress = progress
+            runOnUiThread { append(transferProgressLine(progress)) }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -414,12 +422,13 @@ class MainActivity : Activity() {
                         handleSessionEnvelope(envelope)
                     }
 
-                    override fun onClosed() {
-                        if (activeSession === session) {
+	                    override fun onClosed() {
+	                        if (activeSession === session) {
                             activeSession = null
+	                            activeCapabilities = null
                             lastTransferProgress = null
-                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
-                        }
+	                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
+	                        }
                         runOnUiThread { append("Mac session closed") }
                     }
                 }
@@ -431,6 +440,7 @@ class MainActivity : Activity() {
                 )
                 activeSession?.stop()
                 activeSession = session
+                activeCapabilities = handshake.negotiatedCapabilities
                 HyphenNotificationListenerRuntime.bindNotificationOutbox(
                     ProtocolSessionNotificationOutbox(session),
                 )
@@ -448,6 +458,31 @@ class MainActivity : Activity() {
     private fun handleSessionEnvelope(envelope: Envelope) {
         try {
             val session = activeSession
+            if (envelope.type == Envelope.TYPE_ERROR) {
+                runOnUiThread { append(peerErrorLine(envelope)) }
+                return
+            }
+            val expectedCapability = expectedCapability(envelope.type)
+            if (session != null && expectedCapability != null && envelope.capability != expectedCapability) {
+                val id = sendProtocolError(
+                    session = session,
+                    regarding = envelope,
+                    code = "plugin/unsupported-capability",
+                    message = "Message type was sent under the wrong capability.",
+                )
+                runOnUiThread { append("unsupported capability reported: $id (${envelope.capability})") }
+                return
+            }
+            if (session != null && !isNegotiatedCapability(envelope.capability)) {
+                val id = sendProtocolError(
+                    session = session,
+                    regarding = envelope,
+                    code = "plugin/unsupported-capability",
+                    message = "Capability is not negotiated for this session.",
+                )
+                runOnUiThread { append("unsupported capability reported: $id (${envelope.capability})") }
+                return
+            }
             if (session != null) {
                 val dismissResultId = NotificationDismissRequestHandler(
                     canceller = HyphenNotificationListenerRuntime.notificationCanceller(),
@@ -467,18 +502,98 @@ class MainActivity : Activity() {
                 }
             }
             if (envelope.capability == TransferProtocol.CAPABILITY) {
-                val completed = transferReceiver.handle(envelope)
-                if (completed != null) {
-                    lastTransferProgress = null
-                    runOnUiThread { append(transferCompletedLine(completed)) }
+                when (val event = transferReceiver.handle(envelope)) {
+                    is TransferEvent.Completed -> {
+                        lastTransferProgress = null
+                        runOnUiThread { append(transferCompletedLine(event.completed)) }
+                    }
+                    is TransferEvent.ResumeRequested -> {
+                        if (session != null) {
+                            val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendResumeInfo(event.info)
+                            runOnUiThread { append("transfer resume info sent: $id (${event.info.fileId})") }
+                        } else {
+                            runOnUiThread { append("transfer resume requested without active session") }
+                        }
+                    }
+                    is TransferEvent.Cancelled -> {
+                        lastTransferProgress = null
+                        runOnUiThread { append("transfer cancelled: ${event.cancel.fileId}") }
+                    }
+                    TransferEvent.Ignored -> Unit
                 }
                 return
             }
-            val request = textReceiver.handle(envelope) ?: return
-            runOnUiThread { presentTextLinkConfirmation(request) }
+            val request = textReceiver.handle(envelope)
+            if (request != null) {
+                runOnUiThread { presentTextLinkConfirmation(request) }
+                return
+            }
         } catch (e: IllegalArgumentException) {
+            activeSession?.let { session ->
+                sendProtocolError(
+                    session = session,
+                    regarding = envelope,
+                    code = "protocol/invalid-envelope",
+                    message = "Envelope payload is invalid for its type.",
+                )
+            }
             runOnUiThread { append("session envelope rejected: ${e.message}") }
+            return
         }
+        if (isPluginEnvelope(envelope)) {
+            activeSession?.let { session ->
+                val id = sendProtocolError(
+                    session = session,
+                    regarding = envelope,
+                    code = "protocol/unknown-type",
+                    message = "No handler is registered for this message type.",
+                )
+                runOnUiThread { append("unknown type reported: $id (${envelope.type})") }
+            }
+        }
+    }
+
+    private fun isNegotiatedCapability(capability: String?): Boolean =
+        capability == null || activeCapabilities?.contains(capability) != false
+
+    private fun isPluginEnvelope(envelope: Envelope): Boolean =
+        envelope.type !in setOf(Envelope.TYPE_ACK, Envelope.TYPE_HEARTBEAT, Envelope.TYPE_HELLO, Envelope.TYPE_ERROR)
+
+    private fun expectedCapability(type: String): String? =
+        when (type) {
+            NotificationProtocol.TYPE_DISMISS_REQUEST,
+            NotificationProtocol.TYPE_REPLY_REQUEST -> NotificationProtocol.CAPABILITY
+            TransferProtocol.TYPE_MANIFEST,
+            TransferProtocol.TYPE_CHUNK,
+            TransferProtocol.TYPE_RESUME_REQUEST,
+            TransferProtocol.TYPE_RESUME_INFO,
+            TransferProtocol.TYPE_CANCEL -> TransferProtocol.CAPABILITY
+            TextLinkMessage.TYPE_SEND -> TextLinkMessage.CAPABILITY
+            else -> null
+        }
+
+    private fun sendProtocolError(
+        session: ProtocolSession,
+        regarding: Envelope,
+        code: String,
+        message: String,
+        retryable: Boolean = false,
+    ): String =
+        session.send(
+            type = Envelope.TYPE_ERROR,
+            payload = Json.obj(
+                "code" to Json.Str(code),
+                "message" to Json.Str(message.take(256)),
+                "regarding" to Json.Str(regarding.messageId),
+                "retryable" to Json.Bool(retryable),
+            ),
+            requiresAck = false,
+        )
+
+    private fun peerErrorLine(envelope: Envelope): String {
+        val code = (envelope.payload["code"] as? Json.Str)?.value ?: "unknown"
+        val regarding = (envelope.payload["regarding"] as? Json.Str)?.value ?: "none"
+        return "peer error: $code regarding $regarding"
     }
 
     private fun cancelActiveTransfer() {
@@ -504,7 +619,7 @@ class MainActivity : Activity() {
             "(${progress.completedChunks}/${progress.totalChunks})"
 
     private fun transferCompletedLine(completed: TransferCompleted): String =
-        "transfer received: ${completed.manifest.filename} (${completed.bytes.size} bytes)"
+        "transfer received: ${completed.manifest.filename} (${completed.file.length()} bytes)"
 
     private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
         val isUrl = request.message.kind == TextLinkKind.URL

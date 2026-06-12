@@ -152,7 +152,6 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 | `transfer.manifest` | both | yes | `fileId`, name, size, mime, sha256, chunk size/count (HYP-M3-010) |
 | `transfer.chunk` | both | yes | `fileId`, `chunkIndex`, base64 data, `chunkSha256` |
 | `transfer.resume.request` / `.info` | both | yes | Receiver reports highest contiguous verified chunk per `fileId` |
-| `transfer.complete` | both | yes | Whole-file SHA-256 verification result |
 | `transfer.cancel` | both | yes | Either side aborts; partial data kept for resume unless `discard: true` |
 
 Detailed payload schemas are normative in `protocol/schema/` where present (JSON Schema, HYP-M2-001/002/HYP-M3-010); this table is the index.
@@ -278,10 +277,10 @@ Schema validation intentionally does not encode cross-field arithmetic such as `
 |---|---|---:|---|
 | `fileId` | string | yes | Matches a received/accepted manifest |
 | `chunkIndex` | integer | yes | Zero-based chunk index, less than manifest `chunkCount` |
-| `dataBase64` | string | yes | Base64 chunk bytes; decoded byte count must be <= manifest `chunkSizeBytes` |
+| `dataBase64` | string | yes | Base64 chunk bytes; decoded byte count must match the manifest-derived expected size |
 | `chunkSha256` | string | yes | SHA-256 of decoded chunk bytes, lowercase hex |
 
-Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 covers corrupted whole-file and corrupted-chunk rejection on both platforms.
+Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, chunk-hash mismatch, or decoded-size mismatch. For every non-final chunk, decoded byte count MUST equal `manifest.chunkSizeBytes`; for the final chunk it MUST equal `manifest.sizeBytes - chunkIndex * manifest.chunkSizeBytes`. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 covers corrupted whole-file and corrupted-chunk rejection on both platforms.
 
 ### 7.5 `transfer.resume.request` / `transfer.resume.info` payloads
 
@@ -305,7 +304,9 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 | `fileId` | string | yes | Existing manifest id |
 | `nextChunkIndex` | integer | `resume.info` only | Highest contiguous verified chunk index plus one |
 
-If the receiver has no checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. Persistent checkpoints across app restarts are outside HYP-M3-012's in-memory MVP and belong to later hardening.
+If the receiver has no checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. In v0, chunk bytes are written to receiver-owned temporary files and the checkpoint is in memory; persistent checkpoints across app restarts are outside HYP-M3-012's MVP and belong to later hardening.
+
+The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data.
 
 ### 7.6 `transfer.cancel` payload and local progress
 
@@ -349,9 +350,9 @@ These decisions document the Android and macOS behavior frozen for the current v
 
 - Envelope JSON is strict on both platforms: unknown envelope fields are rejected as `protocol/invalid-envelope`.
 - `trace` is strict: only `localOnly` and `spanId` are allowed; `localOnly` must be `true`; `spanId`, when present, must be a ULID.
-- `hello` payloads are strict: only `device`, `resumeToken`, and `capabilities` are accepted; `resumeToken` must be a string or `null`; `capabilities` must be an object.
+- `hello` payloads are strict: only `device`, `resumeToken`, and `capabilities` are accepted; `device.kind` must be `android` or `macos`; `device.appVersion` must match the semantic-version pattern in `capability.schema.json`; capability names must match `feature.vN`; `transfer.v1.maxChunkBytes` must be 1024..2097152; `resumeToken` must be a string or `null`; `capabilities` must be an object.
 - Malformed envelopes are surfaced to diagnostics and skipped; the connection stays open unless the frame layer or transport fails.
-- The session layer treats `ack` and `heartbeat` as core. All other valid envelope types are delivered to the feature/plugin layer so the feature can apply capability-specific validation and return the right error.
+- The session layer treats `ack` and `heartbeat` as core. All other valid envelope types are delivered to the feature/plugin layer, which gates them with the negotiated capabilities from the handshake result. Unsupported capabilities return `plugin/unsupported-capability`; decoded but unhandled plugin types are acked if requested by the session layer and then answered with `protocol/unknown-type`.
 
 ### 9.2 Session and resume behavior
 

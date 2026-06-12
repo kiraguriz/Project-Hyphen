@@ -156,7 +156,10 @@ public final class ProtocolSession {
         do {
             let frame = try FrameCodec.encode(try envelope.encode())
             connection.send(content: frame, completion: .contentProcessed { [weak self] error in
-                if error != nil { self?.close() }
+                guard error != nil else { return }
+                self?.queue.async { [weak self] in
+                    self?.close()
+                }
             })
         } catch {
             callbacks.onProtocolError("protocol/invalid-envelope", "encode failed: \(error)")
@@ -168,23 +171,26 @@ public final class ProtocolSession {
 
     private func receiveLoop() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
-            guard let self, !self.closed else { return }
-            if let data, !data.isEmpty {
-                do {
-                    for frame in try self.reader.feed(data) {
-                        self.handleFrame(frame)
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, !self.closed else { return }
+                if let data, !data.isEmpty {
+                    do {
+                        for frame in try self.reader.feed(data) {
+                            self.handleFrame(frame)
+                        }
+                    } catch {
+                        self.callbacks.onProtocolError("transport/frame-too-large", "\(error)")
+                        self.close()
+                        return
                     }
-                } catch {
-                    self.callbacks.onProtocolError("transport/frame-too-large", "\(error)")
+                }
+                if isComplete || error != nil {
                     self.close()
                     return
                 }
+                self.receiveLoop()
             }
-            if isComplete || error != nil {
-                self.close()
-                return
-            }
-            self.receiveLoop()
         }
     }
 

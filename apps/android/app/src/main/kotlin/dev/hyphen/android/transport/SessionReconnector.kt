@@ -62,6 +62,7 @@ class SessionReconnector(
     }
 
     private val stopped = AtomicBoolean(false)
+    private val stateLock = Any()
     private var consecutiveFailures = 0
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
@@ -74,14 +75,17 @@ class SessionReconnector(
 
     fun stop() {
         if (stopped.getAndSet(true)) return
-        activeSession?.stop()
+        val session = synchronized(stateLock) {
+            activeSession.also { activeSession = null }
+        }
+        session?.stop()
         scheduler.shutdown()
     }
 
     private fun attempt() {
         if (stopped.get()) return
         val handshake: SessionHandshake.Result
-        val socket: SSLSocket
+        var socket: SSLSocket? = null
         try {
             socket = dial()
             handshake = SessionHandshake.initiate(
@@ -91,17 +95,23 @@ class SessionReconnector(
                 previousSessionId = lastSessionId,
             )
         } catch (e: Exception) {
+            runCatching { socket?.close() }
             listener.onAttemptFailed(e.message)
             scheduleRetry()
             return
         }
+        if (stopped.get()) {
+            runCatching { socket.close() }
+            return
+        }
+        val connectedSocket = checkNotNull(socket)
         // A presented token is spent either way (§4.6 single-use).
         resumeToken = handshake.resumeToken
         lastSessionId = handshake.sessionId
         consecutiveFailures = 0
 
         val session = ProtocolSession(
-            socket = socket,
+            socket = connectedSocket,
             sessionId = handshake.sessionId,
             config = sessionConfig.copy(
                 // Hello consumed seq 1 on this connection.
@@ -119,8 +129,23 @@ class SessionReconnector(
                 }
             },
         )
-        activeSession = session
+        val assigned = synchronized(stateLock) {
+            if (stopped.get()) {
+                false
+            } else {
+                activeSession = session
+                true
+            }
+        }
+        if (!assigned) {
+            runCatching { connectedSocket.close() }
+            return
+        }
         session.start()
+        if (stopped.get()) {
+            session.stop()
+            return
+        }
         listener.onSession(session, handshake)
     }
 

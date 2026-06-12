@@ -1,8 +1,19 @@
 package dev.hyphen.android.transport
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.SocketAddress
+import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.HandshakeCompletedListener
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSession
 import javax.net.ssl.SSLSocket
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -177,5 +188,211 @@ class SessionReconnectTest {
 
         assertTrue(connected.await(5, TimeUnit.SECONDS))
         assertEquals(listOf(1L, 5L, 15L, 30L, 30L, 30L), delays)
+    }
+
+    @Test
+    fun `handshake failure closes the dialed socket`() {
+        val socket = TrackingSocket(input = ByteArrayInputStream(ByteArray(0)))
+        val scheduler = OneShotScheduler()
+
+        reconnector = SessionReconnector(
+            dial = { socket },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) = Unit
+            },
+        ).also { it.start() }
+
+        assertTrue("handshake failure must close the socket", socket.closed.get())
+    }
+
+    @Test
+    fun `stop racing successful handshake closes socket before session assignment`() {
+        val releaseReply = CountDownLatch(1)
+        val dialed = CountDownLatch(1)
+        val socket = TrackingSocket(input = ReleasableInputStream(helloReplyFrame(), releaseReply))
+        val onSession = CountDownLatch(1)
+
+        reconnector = SessionReconnector(
+            dial = {
+                dialed.countDown()
+                socket
+            },
+            device = device,
+            scheduler = ImmediateScheduler(),
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    onSession.countDown()
+                }
+            },
+        ).also { it.start() }
+
+        assertTrue(dialed.await(5, TimeUnit.SECONDS))
+        reconnector?.stop()
+        releaseReply.countDown()
+
+        assertFalse("stopped reconnector must not publish a session", onSession.await(500, TimeUnit.MILLISECONDS))
+        assertTrue("socket must be closed after stop wins the handshake race", socket.closed.get())
+    }
+
+    @Test
+    fun `hello rejects bad device kind and invalid transfer max chunk bytes`() {
+        val badKind = runCatching {
+            SessionHandshake.initiate(
+                TrackingSocket(input = ByteArrayInputStream(helloReplyFrame(deviceKind = "ios"))),
+                device,
+                resumeToken = null,
+                previousSessionId = null,
+            )
+        }.exceptionOrNull()
+        assertTrue(badKind is SessionHandshake.HandshakeException)
+
+        val badChunk = runCatching {
+            SessionHandshake.initiate(
+                TrackingSocket(
+                    input = ByteArrayInputStream(
+                        helloReplyFrame(
+                            capabilities = Json.obj(
+                                "transfer.v1" to Json.obj(
+                                    "resume" to Json.Bool(true),
+                                    "maxChunkBytes" to Json.Num("512"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                device,
+                resumeToken = null,
+                previousSessionId = null,
+            )
+        }.exceptionOrNull()
+        assertTrue(badChunk is SessionHandshake.HandshakeException)
+    }
+
+    @Test
+    fun `hello negotiates transfer max chunk bytes as the local and peer minimum`() {
+        val result = SessionHandshake.initiate(
+            TrackingSocket(
+                input = ByteArrayInputStream(
+                    helloReplyFrame(
+                        capabilities = Json.obj(
+                            "transfer.v1" to Json.obj(
+                                "resume" to Json.Bool(true),
+                                "maxChunkBytes" to Json.Num("2048"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            device,
+            resumeToken = null,
+            previousSessionId = null,
+        )
+
+        assertEquals(2048, result.negotiatedCapabilities.transferMaxChunkBytes())
+    }
+
+    private class OneShotScheduler : SessionReconnector.RetryScheduler {
+        private var used = false
+
+        override fun schedule(delayMs: Long, action: () -> Unit) {
+            if (used) return
+            used = true
+            action()
+        }
+    }
+
+    private class ReleasableInputStream(
+        private val bytes: ByteArray,
+        private val release: CountDownLatch,
+    ) : InputStream() {
+        private var index = 0
+
+        override fun read(): Int {
+            release.await(5, TimeUnit.SECONDS)
+            if (index >= bytes.size) return -1
+            return bytes[index++].toInt() and 0xff
+        }
+    }
+
+    private class TrackingSocket(
+        private val input: InputStream,
+        private val output: OutputStream = ByteArrayOutputStream(),
+    ) : SSLSocket() {
+        val closed = AtomicBoolean(false)
+        private var soTimeoutValue = 0
+
+        override fun getInputStream(): InputStream = input
+        override fun getOutputStream(): OutputStream = output
+        override fun close() {
+            closed.set(true)
+        }
+
+        override fun setSoTimeout(timeout: Int) {
+            soTimeoutValue = timeout
+        }
+
+        override fun getSoTimeout(): Int = soTimeoutValue
+        override fun getSupportedCipherSuites(): Array<String> = emptyArray()
+        override fun getEnabledCipherSuites(): Array<String> = emptyArray()
+        override fun setEnabledCipherSuites(suites: Array<out String>?) = Unit
+        override fun getSupportedProtocols(): Array<String> = emptyArray()
+        override fun getEnabledProtocols(): Array<String> = emptyArray()
+        override fun setEnabledProtocols(protocols: Array<out String>?) = Unit
+        override fun getSession(): SSLSession = SSLContext.getDefault().createSSLEngine().session
+        override fun addHandshakeCompletedListener(listener: HandshakeCompletedListener?) = Unit
+        override fun removeHandshakeCompletedListener(listener: HandshakeCompletedListener?) = Unit
+        override fun startHandshake() = Unit
+        override fun setUseClientMode(mode: Boolean) = Unit
+        override fun getUseClientMode(): Boolean = true
+        override fun setNeedClientAuth(need: Boolean) = Unit
+        override fun getNeedClientAuth(): Boolean = false
+        override fun setWantClientAuth(want: Boolean) = Unit
+        override fun getWantClientAuth(): Boolean = false
+        override fun setEnableSessionCreation(flag: Boolean) = Unit
+        override fun getEnableSessionCreation(): Boolean = true
+        override fun connect(endpoint: SocketAddress?) = Unit
+        override fun connect(endpoint: SocketAddress?, timeout: Int) = Unit
+        override fun bind(bindpoint: SocketAddress?) = Unit
+        override fun getInetAddress(): InetAddress? = null
+        override fun getLocalAddress(): InetAddress? = null
+        override fun getPort(): Int = 0
+        override fun getLocalPort(): Int = 0
+        override fun getRemoteSocketAddress(): SocketAddress? = null
+        override fun getLocalSocketAddress(): SocketAddress? = null
+    }
+
+    private fun helloReplyFrame(
+        deviceKind: String = "macos",
+        appVersion: String = "0.0.1",
+        capabilities: Json.Obj = Json.obj(
+            "notifications.v1" to Json.obj("reply" to Json.Str("beta"), "dismiss" to Json.Bool(true)),
+            "transfer.v1" to Json.obj("resume" to Json.Bool(true), "maxChunkBytes" to Json.Num("1048576")),
+            "text.v1" to Json.obj("direction" to Json.Str("bidirectional")),
+            "diagnostics.v1" to Json.obj("redactedExport" to Json.Bool(true)),
+        ),
+    ): ByteArray {
+        val reply = Envelope(
+            messageId = Ulid.generate(),
+            sessionId = "s_test1",
+            type = Envelope.TYPE_HELLO,
+            seq = 1,
+            sentAtUnixMs = System.currentTimeMillis(),
+            requiresAck = false,
+            payload = Json.obj(
+                "device" to Json.obj(
+                    "kind" to Json.Str(deviceKind),
+                    "appVersion" to Json.Str(appVersion),
+                    "deviceName" to Json.Str("Test Mac"),
+                ),
+                "resumeToken" to Json.Str("resume-token-test"),
+                "capabilities" to capabilities,
+            ),
+        ).encode()
+        return ByteBuffer.allocate(4 + reply.size)
+            .putInt(reply.size)
+            .put(reply)
+            .array()
     }
 }

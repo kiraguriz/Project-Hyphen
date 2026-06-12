@@ -112,6 +112,23 @@ final class EnvelopeAndFrameTests: XCTestCase {
         XCTAssertEqual(frames, payloads)
     }
 
+    func testFeedUntilFirstPreservesCoalescedFramesForSessionReplay() throws {
+        let hello = Data("hello".utf8)
+        let postHello = Data("post-hello".utf8)
+        let trailing = try FrameCodec.encode(Data("partial".utf8))
+        var wire = Data()
+        wire.append(try FrameCodec.encode(hello))
+        wire.append(try FrameCodec.encode(postHello))
+        wire.append(trailing.prefix(5))
+
+        let first = try XCTUnwrap(FrameReader().feedUntilFirst(wire))
+        XCTAssertEqual(first.frame, hello)
+
+        let replayReader = FrameReader()
+        XCTAssertEqual(try replayReader.feed(first.leftover), [postHello])
+        XCTAssertEqual(try replayReader.feed(Data(trailing.dropFirst(5))), [Data("partial".utf8)])
+    }
+
     func testOversizedFrameIsRejected() {
         let fiveMiB = UInt32(5 * 1024 * 1024)
         let header = Data([
