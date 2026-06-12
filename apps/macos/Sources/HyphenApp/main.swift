@@ -27,6 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(sendTextLink(_:)),
         keyEquivalent: "t"
     )
+    private let cancelTransferItem = NSMenuItem(
+        title: "Cancel Active Transfer",
+        action: #selector(cancelActiveTransfer(_:)),
+        keyEquivalent: ""
+    )
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
         action: #selector(toggleAdvertising(_:)),
@@ -66,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         pairItem.target = self
         sendTextItem.target = self
+        cancelTransferItem.target = self
         previewDiagnosticsItem.target = self
         exportDiagnosticsItem.target = self
         deleteDiagnosticsItem.target = self
@@ -76,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(advertiseItem)
         menu.addItem(pairItem)
         menu.addItem(sendTextItem)
+        menu.addItem(cancelTransferItem)
         menu.addItem(.separator())
         menu.addItem(previewDiagnosticsItem)
         menu.addItem(exportDiagnosticsItem)
@@ -165,6 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         pairingController.sendTextLink(raw: input.stringValue)
+    }
+
+    @objc private func cancelActiveTransfer(_ sender: NSMenuItem) {
+        guard let pairingController else {
+            stateItem.title = "transfer cancel: no active Android session"
+            return
+        }
+        pairingController.cancelActiveTransfer()
     }
 
     @objc private func previewDiagnostics(_ sender: NSMenuItem) {

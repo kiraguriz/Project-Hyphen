@@ -307,6 +307,24 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 
 If the receiver has no checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. Persistent checkpoints across app restarts are outside HYP-M3-012's in-memory MVP and belong to later hardening.
 
+### 7.6 `transfer.cancel` payload and local progress
+
+`transfer.cancel` is sent by either side when the user cancels an active transfer. It is sent under capability `transfer.v1` and requires an ack.
+
+```json
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "discard": true
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `fileId` | string | yes | Transfer id being cancelled |
+| `discard` | boolean | yes | `true` means the receiver drops any in-memory checkpoint; `false` lets the receiver keep partial state for resume |
+
+Transfer progress is local UI state derived from `transfer.manifest` and accepted/sent chunks. It is not a separate wire message in v0.
+
 ## 8. Error taxonomy
 
 Error payload: `{ "code": "category/short-code", "message": "human readable, no sensitive content", "regarding": "<messageId|null>", "retryable": true|false }`

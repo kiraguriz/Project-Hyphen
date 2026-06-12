@@ -4,6 +4,7 @@ import HyphenDiagnostics
 import HyphenNotifications
 import HyphenText
 import HyphenTransport
+import HyphenTransfer
 import Network
 
 /// Mac side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
@@ -26,6 +27,13 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
+    private var lastTransferProgress: TransferProgress?
+    private lazy var transferReceiver = TransferReceiver { [weak self] progress in
+        DispatchQueue.main.async {
+            self?.lastTransferProgress = progress
+            self?.onStatus(Self.transferProgressLine(progress))
+        }
+    }
     private let notificationPresenter = UserNotificationCenterPresenter()
     private lazy var notificationReceiver = NotificationMirrorReceiver(
         presenter: notificationPresenter
@@ -99,6 +107,7 @@ final class PairingController: NSObject, NSWindowDelegate {
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
+        lastTransferProgress = nil
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
         provisionalConnection?.cancel()
@@ -266,6 +275,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                         if self?.activeSessionToken == sessionToken {
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
+                            self?.lastTransferProgress = nil
                             self?.notificationPresenter.setDismissHandler(nil)
                             self?.notificationPresenter.setReplyHandler(nil)
                         }
@@ -366,6 +376,16 @@ final class PairingController: NSObject, NSWindowDelegate {
                 }
                 return
             }
+            if envelope.capability == TransferProtocol.capability {
+                let completed = try transferReceiver.handle(envelope)
+                if let completed {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.lastTransferProgress = nil
+                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.bytes.count) bytes)")
+                    }
+                }
+                return
+            }
             guard let request = try textReceiver.handle(envelope) else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.presentTextLinkConfirmation(request)
@@ -396,6 +416,31 @@ final class PairingController: NSObject, NSWindowDelegate {
                 onStatus("Android notification reply failed: \(errorCode ?? "unknown")")
             }
         }
+    }
+
+    func cancelActiveTransfer() {
+        guard let progress = lastTransferProgress, !progress.isComplete else {
+            onStatus("transfer cancel: no active transfer")
+            return
+        }
+        guard let session = activeSession else {
+            onStatus("transfer cancel: no active Android session")
+            return
+        }
+        do {
+            let id = TransferSender(outbox: ProtocolSessionTransferOutbox(session: session)).sendCancel(
+                try TransferCancel(fileId: progress.fileId, discard: true)
+            )
+            lastTransferProgress = nil
+            onStatus("transfer cancel sent: \(id ?? "session closed")")
+        } catch {
+            onStatus("transfer cancel failed: \(error)")
+        }
+    }
+
+    private static func transferProgressLine(_ progress: TransferProgress) -> String {
+        "transfer \(progress.filename): \(progress.completedBytes)/\(progress.totalBytes) bytes " +
+            "(\(progress.completedChunks)/\(progress.totalChunks))"
     }
 
     private func presentTextLinkConfirmation(_ request: TextLinkConfirmationRequest) {

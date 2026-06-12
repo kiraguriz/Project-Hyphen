@@ -135,6 +135,60 @@ class TransferMessagesTest {
         assertEquals(Json.Num("2"), outbox.envelopes[1].payload["nextChunkIndex"])
     }
 
+    @Test
+    fun `sender and receiver report transfer progress`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val sendProgress = mutableListOf<TransferProgress>()
+        val manifest = TransferSender(outbox, onProgress = sendProgress::add).sendBytes(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            bytes = bytes,
+            chunkSizeBytes = 1024,
+            fileId = "f_progress_test",
+        )
+        val receiveProgress = mutableListOf<TransferProgress>()
+        val receiver = TransferReceiver(onProgress = receiveProgress::add)
+
+        outbox.envelopes.forEachIndexed { index, sent ->
+            receiver.handle(toEnvelope(sent, index))
+        }
+
+        assertEquals(listOf(0, 1, 2, 3), sendProgress.map { it.completedChunks })
+        assertEquals(listOf(0, 1, 2, 3), receiveProgress.map { it.completedChunks })
+        assertEquals(bytes.size.toLong(), sendProgress.last().completedBytes)
+        assertEquals(manifest.sizeBytes, receiveProgress.last().totalBytes)
+        assertTrue(sendProgress.last().isComplete)
+    }
+
+    @Test
+    fun `cancel message uses protocol wire name and discard clears receiver checkpoint`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val firstOutbox = RecordingTransferOutbox()
+        val manifest = TransferSender(firstOutbox).sendBytes(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            bytes = bytes,
+            chunkSizeBytes = 1024,
+            fileId = "f_cancel_test",
+        )
+        val receiver = TransferReceiver()
+        firstOutbox.envelopes.take(2).forEachIndexed { index, sent ->
+            receiver.handle(toEnvelope(sent, index))
+        }
+        assertEquals(1, receiver.checkpoint(manifest.fileId)?.nextChunkIndex)
+
+        val cancelOutbox = RecordingTransferOutbox()
+        TransferSender(cancelOutbox).sendCancel(TransferCancel(manifest.fileId, discard = true))
+        val cancel = cancelOutbox.envelopes.single()
+        assertEquals(TransferProtocol.TYPE_CANCEL, cancel.type)
+        assertEquals(Json.Bool(true), cancel.payload["discard"])
+
+        receiver.handle(toEnvelope(cancel, index = 2))
+
+        assertEquals(null, receiver.checkpoint(manifest.fileId))
+    }
+
     private fun sendThroughReceiver(bytes: ByteArray, fileId: String): TransferCompleted {
         val outbox = RecordingTransferOutbox()
         TransferSender(outbox).sendBytes(

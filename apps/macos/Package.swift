@@ -22,6 +22,7 @@ let package = Package(
                 "HyphenPower",
                 "HyphenText",
                 "HyphenTransport",
+                "HyphenTransfer",
             ]
         ),
         .target(name: "HyphenCore"),

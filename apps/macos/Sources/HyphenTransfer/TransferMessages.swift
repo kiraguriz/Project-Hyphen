@@ -8,6 +8,7 @@ public enum TransferProtocol {
     public static let typeChunk = "transfer.chunk"
     public static let typeResumeRequest = "transfer.resume.request"
     public static let typeResumeInfo = "transfer.resume.info"
+    public static let typeCancel = "transfer.cancel"
     public static let minChunkSizeBytes = 1024
     public static let maxChunkSizeBytes = 2 * 1024 * 1024
 }
@@ -194,6 +195,59 @@ public struct TransferResumeInfo: Equatable {
     }
 }
 
+public struct TransferCancel: Equatable {
+    public let fileId: String
+    public let discard: Bool
+
+    public init(fileId: String, discard: Bool = false) throws {
+        guard isValidFileId(fileId) else { throw TransferError.invalidPayload("invalid fileId") }
+        self.fileId = fileId
+        self.discard = discard
+    }
+
+    public init(payload: [String: Any]) throws {
+        guard let discard = payload["discard"] as? Bool else {
+            throw TransferError.invalidPayload("discard must be boolean")
+        }
+        try self.init(fileId: try string(payload, "fileId"), discard: discard)
+    }
+
+    public var payload: [String: Any] {
+        [
+            "fileId": fileId,
+            "discard": discard,
+        ]
+    }
+}
+
+public struct TransferProgress: Equatable {
+    public let fileId: String
+    public let filename: String
+    public let completedChunks: Int
+    public let totalChunks: Int
+    public let completedBytes: Int64
+    public let totalBytes: Int64
+
+    public var isComplete: Bool {
+        completedChunks == totalChunks
+    }
+
+    public init(manifest: TransferManifest, completedChunks: Int) throws {
+        guard (0...manifest.chunkCount).contains(completedChunks) else {
+            throw TransferError.invalidPayload("completedChunks out of range")
+        }
+        self.fileId = manifest.fileId
+        self.filename = manifest.filename
+        self.completedChunks = completedChunks
+        self.totalChunks = manifest.chunkCount
+        self.completedBytes = min(
+            manifest.sizeBytes,
+            Int64(completedChunks) * Int64(manifest.chunkSizeBytes)
+        )
+        self.totalBytes = manifest.sizeBytes
+    }
+}
+
 public protocol TransferOutbox {
     @discardableResult
     func send(
@@ -224,9 +278,11 @@ public final class ProtocolSessionTransferOutbox: TransferOutbox {
 
 public final class TransferSender {
     private let outbox: TransferOutbox
+    private let onProgress: (TransferProgress) -> Void
 
-    public init(outbox: TransferOutbox) {
+    public init(outbox: TransferOutbox, onProgress: @escaping (TransferProgress) -> Void = { _ in }) {
         self.outbox = outbox
+        self.onProgress = onProgress
     }
 
     @discardableResult
@@ -250,6 +306,7 @@ public final class TransferSender {
             requiresAck: true,
             payload: manifest.payload
         )
+        onProgress(try TransferProgress(manifest: manifest, completedChunks: 0))
         try sendRemainingBytes(manifest: manifest, bytes: bytes, fromChunkIndex: 0)
         return manifest
     }
@@ -282,6 +339,7 @@ public final class TransferSender {
                 requiresAck: true,
                 payload: chunk.payload
             )
+            onProgress(try TransferProgress(manifest: manifest, completedChunks: index + 1))
         }
     }
 
@@ -304,6 +362,16 @@ public final class TransferSender {
             payload: info.payload
         )
     }
+
+    @discardableResult
+    public func sendCancel(_ cancel: TransferCancel) -> String? {
+        outbox.send(
+            type: TransferProtocol.typeCancel,
+            capability: TransferProtocol.capability,
+            requiresAck: true,
+            payload: cancel.payload
+        )
+    }
 }
 
 public struct TransferCompleted: Equatable {
@@ -313,8 +381,11 @@ public struct TransferCompleted: Equatable {
 
 public final class TransferReceiver {
     private var states: [String: TransferState] = [:]
+    private let onProgress: (TransferProgress) -> Void
 
-    public init() {}
+    public init(onProgress: @escaping (TransferProgress) -> Void = { _ in }) {
+        self.onProgress = onProgress
+    }
 
     public func checkpoint(fileId: String) -> TransferResumeInfo? {
         try? states[fileId]?.checkpoint()
@@ -327,6 +398,7 @@ public final class TransferReceiver {
             let manifest = try TransferManifest(payload: envelope.payload)
             let state = TransferState(manifest: manifest)
             states[manifest.fileId] = state
+            onProgress(try TransferProgress(manifest: manifest, completedChunks: 0))
             return try completeIfReady(state)
         case TransferProtocol.typeChunk:
             let chunk = try TransferChunk(payload: envelope.payload)
@@ -334,7 +406,14 @@ public final class TransferReceiver {
                 throw TransferError.invalidPayload("unknown fileId")
             }
             try state.accept(chunk)
+            onProgress(try state.progress())
             return try completeIfReady(state)
+        case TransferProtocol.typeCancel:
+            let cancel = try TransferCancel(payload: envelope.payload)
+            if cancel.discard {
+                states.removeValue(forKey: cancel.fileId)
+            }
+            return nil
         default:
             return nil
         }
@@ -384,6 +463,14 @@ private final class TransferState {
             next += 1
         }
         return try TransferResumeInfo(fileId: manifest.fileId, nextChunkIndex: next)
+    }
+
+    func progress() throws -> TransferProgress {
+        var completed = 0
+        while completed < chunks.count && chunks[completed] != nil {
+            completed += 1
+        }
+        return try TransferProgress(manifest: manifest, completedChunks: completed)
     }
 }
 

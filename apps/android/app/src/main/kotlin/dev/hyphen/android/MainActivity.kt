@@ -45,6 +45,13 @@ import dev.hyphen.android.text.TextLinkKind
 import dev.hyphen.android.text.TextLinkMessage
 import dev.hyphen.android.text.TextLinkReceiver
 import dev.hyphen.android.text.TextLinkSender
+import dev.hyphen.android.transfer.ProtocolSessionTransferOutbox
+import dev.hyphen.android.transfer.TransferCancel
+import dev.hyphen.android.transfer.TransferCompleted
+import dev.hyphen.android.transfer.TransferProgress
+import dev.hyphen.android.transfer.TransferProtocol
+import dev.hyphen.android.transfer.TransferReceiver
+import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.HeartbeatMonitor
@@ -66,6 +73,11 @@ class MainActivity : Activity() {
     private var lastSessionId: String? = null
     private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = LocalStructuredLogStore()
+    private var lastTransferProgress: TransferProgress? = null
+    private val transferReceiver = TransferReceiver { progress ->
+        lastTransferProgress = progress
+        runOnUiThread { append(transferProgressLine(progress)) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,6 +148,10 @@ class MainActivity : Activity() {
             text = "Send text/link to Mac"
             setOnClickListener { sendTextLink(textInput.text.toString()) }
         }
+        val cancelTransferButton = Button(this).apply {
+            text = "Cancel active transfer"
+            setOnClickListener { cancelActiveTransfer() }
+        }
         val previewDiagnosticsButton = Button(this).apply {
             text = "Preview diagnostics"
             setOnClickListener { previewDiagnostics() }
@@ -163,6 +179,7 @@ class MainActivity : Activity() {
                 addView(notificationPrivacyButton)
                 addView(textInput)
                 addView(sendTextButton)
+                addView(cancelTransferButton)
                 addView(previewDiagnosticsButton)
                 addView(exportDiagnosticsButton)
                 addView(deleteDiagnosticsButton)
@@ -310,6 +327,7 @@ class MainActivity : Activity() {
                     override fun onClosed() {
                         if (activeSession === session) {
                             activeSession = null
+                            lastTransferProgress = null
                             HyphenNotificationListenerRuntime.clearNotificationOutbox()
                         }
                         runOnUiThread { append("Mac session closed") }
@@ -358,12 +376,45 @@ class MainActivity : Activity() {
                     return
                 }
             }
+            if (envelope.capability == TransferProtocol.CAPABILITY) {
+                val completed = transferReceiver.handle(envelope)
+                if (completed != null) {
+                    lastTransferProgress = null
+                    runOnUiThread { append(transferCompletedLine(completed)) }
+                }
+                return
+            }
             val request = textReceiver.handle(envelope) ?: return
             runOnUiThread { presentTextLinkConfirmation(request) }
         } catch (e: IllegalArgumentException) {
             runOnUiThread { append("session envelope rejected: ${e.message}") }
         }
     }
+
+    private fun cancelActiveTransfer() {
+        val progress = lastTransferProgress
+        if (progress == null || progress.isComplete) {
+            append("transfer cancel: no active transfer")
+            return
+        }
+        val session = activeSession
+        if (session == null) {
+            append("transfer cancel: no active session")
+            return
+        }
+        val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendCancel(
+            TransferCancel(progress.fileId, discard = true),
+        )
+        lastTransferProgress = null
+        append("transfer cancel sent: $id (${progress.filename})")
+    }
+
+    private fun transferProgressLine(progress: TransferProgress): String =
+        "transfer ${progress.filename}: ${progress.completedBytes}/${progress.totalBytes} bytes " +
+            "(${progress.completedChunks}/${progress.totalChunks})"
+
+    private fun transferCompletedLine(completed: TransferCompleted): String =
+        "transfer received: ${completed.manifest.filename} (${completed.bytes.size} bytes)"
 
     private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
         val isUrl = request.message.kind == TextLinkKind.URL

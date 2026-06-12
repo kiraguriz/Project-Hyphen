@@ -133,6 +133,58 @@ final class TransferMessagesTests: XCTestCase {
         XCTAssertEqual(outbox.envelopes[1].payload["nextChunkIndex"] as? Int, 2)
     }
 
+    func testSenderAndReceiverReportTransferProgress() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        var sendProgress: [TransferProgress] = []
+        let manifest = try TransferSender(outbox: outbox) { sendProgress.append($0) }.sendBytes(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            bytes: bytes,
+            chunkSizeBytes: 1024,
+            fileId: "f_progress_test"
+        )
+        var receiveProgress: [TransferProgress] = []
+        let receiver = TransferReceiver { receiveProgress.append($0) }
+
+        for (index, sent) in outbox.envelopes.enumerated() {
+            _ = try receiver.handle(toEnvelope(sent, index: index))
+        }
+
+        XCTAssertEqual(sendProgress.map(\.completedChunks), [0, 1, 2, 3])
+        XCTAssertEqual(receiveProgress.map(\.completedChunks), [0, 1, 2, 3])
+        XCTAssertEqual(sendProgress.last?.completedBytes, Int64(bytes.count))
+        XCTAssertEqual(receiveProgress.last?.totalBytes, manifest.sizeBytes)
+        XCTAssertEqual(sendProgress.last?.isComplete, true)
+    }
+
+    func testCancelMessageUsesProtocolWireNameAndDiscardClearsReceiverCheckpoint() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let firstOutbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: firstOutbox).sendBytes(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            bytes: bytes,
+            chunkSizeBytes: 1024,
+            fileId: "f_cancel_test"
+        )
+        let receiver = TransferReceiver()
+        for (index, sent) in firstOutbox.envelopes.prefix(2).enumerated() {
+            _ = try receiver.handle(toEnvelope(sent, index: index))
+        }
+        XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, 1)
+
+        let cancelOutbox = RecordingTransferOutbox()
+        try TransferSender(outbox: cancelOutbox).sendCancel(TransferCancel(fileId: manifest.fileId, discard: true))
+        let cancel = try XCTUnwrap(cancelOutbox.envelopes.single)
+        XCTAssertEqual(cancel.type, TransferProtocol.typeCancel)
+        XCTAssertEqual(cancel.payload["discard"] as? Bool, true)
+
+        _ = try receiver.handle(toEnvelope(cancel, index: 2))
+
+        XCTAssertNil(receiver.checkpoint(fileId: manifest.fileId))
+    }
+
     private func sendThroughReceiver(_ bytes: Data, fileId: String) throws -> TransferCompleted {
         let outbox = RecordingTransferOutbox()
         try TransferSender(outbox: outbox).sendBytes(
@@ -172,5 +224,11 @@ final class TransferMessagesTests: XCTestCase {
             requiresAck: sent.requiresAck,
             payload: sent.payload
         )
+    }
+}
+
+private extension Array {
+    var single: Element? {
+        count == 1 ? self[0] : nil
     }
 }

@@ -14,6 +14,7 @@ object TransferProtocol {
     const val TYPE_CHUNK = "transfer.chunk"
     const val TYPE_RESUME_REQUEST = "transfer.resume.request"
     const val TYPE_RESUME_INFO = "transfer.resume.info"
+    const val TYPE_CANCEL = "transfer.cancel"
     const val MIN_CHUNK_SIZE_BYTES = 1024
     const val MAX_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
 }
@@ -160,6 +161,59 @@ data class TransferResumeInfo(
     }
 }
 
+data class TransferCancel(
+    val fileId: String,
+    val discard: Boolean = false,
+) {
+    init {
+        require(FILE_ID.matches(fileId)) { "invalid fileId" }
+    }
+
+    fun toJson(): Json.Obj =
+        Json.obj(
+            "fileId" to Json.Str(fileId),
+            "discard" to Json.Bool(discard),
+        )
+
+    companion object {
+        fun fromJson(payload: Json.Obj): TransferCancel =
+            TransferCancel(
+                fileId = string(payload, "fileId"),
+                discard = bool(payload, "discard"),
+            )
+    }
+}
+
+data class TransferProgress(
+    val fileId: String,
+    val filename: String,
+    val completedChunks: Int,
+    val totalChunks: Int,
+    val completedBytes: Long,
+    val totalBytes: Long,
+) {
+    val isComplete: Boolean
+        get() = completedChunks == totalChunks
+
+    companion object {
+        fun from(manifest: TransferManifest, completedChunks: Int): TransferProgress {
+            require(completedChunks in 0..manifest.chunkCount) { "completedChunks out of range" }
+            val completedBytes = minOf(
+                manifest.sizeBytes,
+                completedChunks.toLong() * manifest.chunkSizeBytes.toLong(),
+            )
+            return TransferProgress(
+                fileId = manifest.fileId,
+                filename = manifest.filename,
+                completedChunks = completedChunks,
+                totalChunks = manifest.chunkCount,
+                completedBytes = completedBytes,
+                totalBytes = manifest.sizeBytes,
+            )
+        }
+    }
+}
+
 interface TransferOutbox {
     fun send(
         type: String,
@@ -179,7 +233,10 @@ class ProtocolSessionTransferOutbox(private val session: ProtocolSession) : Tran
         session.send(type = type, capability = capability, requiresAck = requiresAck, payload = payload)
 }
 
-class TransferSender(private val outbox: TransferOutbox) {
+class TransferSender(
+    private val outbox: TransferOutbox,
+    private val onProgress: (TransferProgress) -> Unit = {},
+) {
     fun sendBytes(
         filename: String,
         mimeType: String,
@@ -189,6 +246,7 @@ class TransferSender(private val outbox: TransferOutbox) {
     ): TransferManifest {
         val manifest = TransferManifest.fromBytes(filename, mimeType, bytes, chunkSizeBytes, fileId)
         outbox.send(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, manifest.toJson())
+        onProgress(TransferProgress.from(manifest, completedChunks = 0))
         sendRemainingBytes(manifest, bytes, fromChunkIndex = 0)
         return manifest
     }
@@ -206,6 +264,7 @@ class TransferSender(private val outbox: TransferOutbox) {
             val end = minOf(start + manifest.chunkSizeBytes, bytes.size)
             val chunk = TransferChunk(manifest.fileId, index, bytes.copyOfRange(start, end))
             outbox.send(TransferProtocol.TYPE_CHUNK, TransferProtocol.CAPABILITY, true, chunk.toJson())
+            onProgress(TransferProgress.from(manifest, completedChunks = index + 1))
         }
     }
 
@@ -224,6 +283,14 @@ class TransferSender(private val outbox: TransferOutbox) {
             true,
             info.toJson(),
         )
+
+    fun sendCancel(cancel: TransferCancel): String =
+        outbox.send(
+            TransferProtocol.TYPE_CANCEL,
+            TransferProtocol.CAPABILITY,
+            true,
+            cancel.toJson(),
+        )
 }
 
 data class TransferCompleted(
@@ -231,7 +298,9 @@ data class TransferCompleted(
     val bytes: ByteArray,
 )
 
-class TransferReceiver {
+class TransferReceiver(
+    private val onProgress: (TransferProgress) -> Unit = {},
+) {
     private val states = mutableMapOf<String, TransferState>()
 
     fun checkpoint(fileId: String): TransferResumeInfo? =
@@ -244,13 +313,20 @@ class TransferReceiver {
                 val manifest = TransferManifest.fromJson(envelope.payload)
                 val state = TransferState(manifest)
                 states[manifest.fileId] = state
+                onProgress(TransferProgress.from(manifest, completedChunks = 0))
                 completeIfReady(state)
             }
             TransferProtocol.TYPE_CHUNK -> {
                 val chunk = TransferChunk.fromJson(envelope.payload)
                 val state = states[chunk.fileId] ?: throw IllegalArgumentException("unknown fileId")
                 state.accept(chunk)
+                onProgress(state.progress())
                 completeIfReady(state)
+            }
+            TransferProtocol.TYPE_CANCEL -> {
+                val cancel = TransferCancel.fromJson(envelope.payload)
+                if (cancel.discard) states.remove(cancel.fileId)
+                null
             }
             else -> null
         }
@@ -287,6 +363,12 @@ private class TransferState(val manifest: TransferManifest) {
         while (next < chunks.size && chunks[next] != null) next += 1
         return TransferResumeInfo(manifest.fileId, next)
     }
+
+    fun progress(): TransferProgress {
+        var completed = 0
+        while (completed < chunks.size && chunks[completed] != null) completed += 1
+        return TransferProgress.from(manifest, completed)
+    }
 }
 
 private fun string(payload: Json.Obj, field: String): String =
@@ -299,6 +381,9 @@ private fun int(payload: Json.Obj, field: String): Int =
     long(payload, field).also {
         require(it in Int.MIN_VALUE..Int.MAX_VALUE) { "$field out of int range" }
     }.toInt()
+
+private fun bool(payload: Json.Obj, field: String): Boolean =
+    (payload[field] as? Json.Bool)?.value ?: throw IllegalArgumentException("$field must be boolean")
 
 private fun sha256Hex(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256")
