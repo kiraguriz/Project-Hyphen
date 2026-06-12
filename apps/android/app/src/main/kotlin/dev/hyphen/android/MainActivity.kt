@@ -575,9 +575,13 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Enable notification mirror")
             .setMessage(
-                "Hyphen can mirror Android notifications to a paired Mac over local TLS. " +
-                    "It does not request SMS or Call Log access, does not store notification " +
-                    "history, and does not use a cloud relay.",
+                "Hyphen can read Android notification titles, actions, and content so " +
+                    "it can mirror them to your paired Mac over local TLS.\n\n" +
+                    "Notifications are not sent to a cloud relay, and Hyphen does not " +
+                    "store notification history. You can switch to hidden-body mode " +
+                    "after enabling if you want less detail on the Mac.\n\n" +
+                    "Hyphen never asks for SMS or Call Log access. You can turn " +
+                    "notification access off later in Android Settings.",
             )
             .setPositiveButton("Open settings") { _, _ -> openNotificationSettings() }
             .setNegativeButton("Not now") { _, _ ->
