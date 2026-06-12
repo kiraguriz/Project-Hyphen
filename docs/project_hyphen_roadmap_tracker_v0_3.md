@@ -233,7 +233,7 @@ gantt
 | HYP-M6-006 | `[x]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
 | HYP-M6-007 | `[x]` | P1 | Security | Run final threat-model review | HYP-M6-006 | New risks captured | Review notes |
 | HYP-M6-008 | `[?]` | P1 | License | Run dependency/license audit | HYP-M5-004 | Audit complete; public-release license gate blocked by missing formal root license files/map/notice policy | Audit report |
-| HYP-M6-009 | `[ ]` | P0 | Release | Create v1.0 release candidate | HYP-M6-001..008 | RC artifacts published privately | Release checklist |
+| HYP-M6-009 | `[?]` | P0 | Release | Create v1.0 release candidate | HYP-M6-001..008 | Blocked: prerequisite reliability/beta/license gates prevent RC artifacts | Release checklist |
 | HYP-M6-010 | `[ ]` | P0 | Release | Tag v1.0 | HYP-M6-009 | Git tag, release notes, checksums, docs | GitHub release |
 
 ---
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 4 | 0 | 8 | 0 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
-| M6 Stabilization | 3 | 0 | 5 | 2 |
+| M6 Stabilization | 3 | 0 | 6 | 1 |
 
 Update this summary after each milestone review.
 
@@ -453,3 +453,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M4-011 `[x]` — Added `docs/release/private-beta-release-notes.md` for technical private beta testers. The draft lists what to test, privacy/safety defaults, known blocked matrix and reliability areas, unsupported v1 surfaces, required feedback fields, and stop conditions. Manual review complete; no runtime behavior changed. HYP-M4-012 remains the external recruiting/channel task.
 - 2026-06-12 — HYP-M4-012 `[?]` — Added `docs/release/private-beta-feedback.md` plus `.github/ISSUE_TEMPLATE/private_beta_bug.yml`. The local packet defines target cohorts, channel setup checklist, invitation copy, bug-report fields, safety checklist, and triage rules. **Blocker**: recruiting 20-50 technical beta users and configuring the actual private feedback channel require external maintainer action; no invited tester list, accepted cohort, or beta feedback corpus exists in this repo.
 - 2026-06-12 — HYP-M6-001 `[?]` — Added `docs/reports/hyp-m6-001-beta-failure-category-review.md` after searching for beta issue exports, crash ledgers, session logs, diagnostics corpora, and feedback reports. The repo has intake templates and known blocker buckets but no real beta failure corpus, so no top-10 categories can be ranked or fixed. Updated the HYP-M6-002 metrics note to reflect that HYP-M4-011/HYP-M4-012 local prep now exists while recruitment and feedback remain external blockers.
+- 2026-06-12 — HYP-M6-009 `[?]` — Added `docs/reports/hyp-m6-009-rc-readiness-review.md`. RC creation is blocked by HYP-M6-001/002/003/004/008 plus external release gates: no beta failure corpus, no crash-free denominator, no final wake/reconnect log, no 1GB multi-combo evidence, incomplete root license/map/notice policy, missing macOS Developer ID/notary credentials, missing Android release/upload keystore, and no Play/F-Droid/private beta channel evidence. No RC artifacts were created.
