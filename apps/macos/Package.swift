@@ -30,6 +30,10 @@ let package = Package(
             name: "HyphenText",
             dependencies: ["HyphenTransport"]
         ),
+        .target(
+            name: "HyphenTransfer",
+            dependencies: ["HyphenTransport"]
+        ),
         .testTarget(
             name: "HyphenCoreTests",
             dependencies: ["HyphenCore"]
@@ -41,6 +45,10 @@ let package = Package(
         .testTarget(
             name: "HyphenTextTests",
             dependencies: ["HyphenText"]
+        ),
+        .testTarget(
+            name: "HyphenTransferTests",
+            dependencies: ["HyphenTransfer"]
         ),
         .testTarget(
             name: "HyphenDiscoveryTests",

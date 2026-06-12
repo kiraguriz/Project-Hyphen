@@ -177,7 +177,7 @@ gantt
 | HYP-M3-008 | `[?]` | P0 | Text/Link | Implement Android → macOS text/link send | HYP-M2-013 | Text/link appears on Mac with user confirmation | Manual test |
 | HYP-M3-009 | `[?]` | P0 | Text/Link | Implement macOS → Android text/link send | HYP-M2-013 | Android receives and can copy/open | Manual test |
 | HYP-M3-010 | `[x]` | P0 | Transfer | Define file manifest schema | HYP-M2-001 | filename, size, mime, sha256, chunks | Schema test |
-| HYP-M3-011 | `[ ]` | P0 | Transfer | Implement chunk sender/receiver | HYP-M3-010 | Small file transfers both directions | Integration test |
+| HYP-M3-011 | `[x]` | P0 | Transfer | Implement chunk sender/receiver | HYP-M3-010 | Small file transfers both directions | Integration test |
 | HYP-M3-012 | `[ ]` | P0 | Transfer | Implement resume checkpoints | HYP-M3-011 | Interrupted transfer resumes | Integration test |
 | HYP-M3-013 | `[ ]` | P0 | Transfer | Implement SHA-256 verification | HYP-M3-011 | Corrupted chunk/file rejected | Unit test |
 | HYP-M3-014 | `[ ]` | P1 | Transfer | Implement progress/cancel UI | HYP-M3-011 | User sees progress and can cancel | Manual test |
@@ -354,7 +354,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M0 Scope/Ops | 10 | 0 | 0 | 5 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 0 | 0 | 2 |
-| M3 Feature MVP | 1 | 0 | 3 | 11 |
+| M3 Feature MVP | 2 | 0 | 3 | 10 |
 | M4 Beta Hardening | 0 | 0 | 0 | 12 |
 | M5 Distribution | 0 | 0 | 0 | 10 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
@@ -405,3 +405,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M3-008 `[?]` — **Implementation complete, manual verification blocked.** Android now keeps the post-SAS socket alive as the first steady-state `ProtocolSession`, adds a debug text/link send control, validates `text` vs http(s) `url`, and sends the existing `text.send/text.v1` payload through the session with ack required. macOS now upgrades the accepted post-SAS connection into a session, routes incoming `text.send` envelopes through `HyphenText.TextLinkReceiver`, and presents an NSAlert confirmation before copying text to NSPasteboard or opening a link with NSWorkspace. Verified: `./gradlew test assembleDebug` green; `swift test` green. **Blocker**: `adb devices` lists no Android device/emulator, so the required paired Android-to-Mac manual send test cannot run here.
 - 2026-06-12 — HYP-M3-009 `[?]` — **Implementation complete, manual verification blocked.** macOS now exposes a menu-bar "Send Text/Link to Android..." action that collects user input, classifies http(s) as `url` and everything else as `text`, and sends the shared `text.send/text.v1` payload through the active `ProtocolSession` with ack required. Android now has a `TextLinkReceiver`, routes incoming session envelopes to it, and presents an AlertDialog before copying received text to the clipboard or opening received links with ACTION_VIEW. Verified: `./gradlew test assembleDebug` green; `swift test` green. **Blocker**: `adb devices` lists no Android device/emulator, so the required paired Mac-to-Android manual receive/copy/open test cannot run here.
 - 2026-06-12 — HYP-M3-010 `[x]` — Added normative `protocol/schema/transfer-manifest.schema.json` for `transfer.manifest` payloads: `fileId`, display-only `filename`, `sizeBytes`, normalized `mimeType`, whole-file lowercase-hex `sha256`, negotiated `chunkSizeBytes`, and `chunkCount`. Added 2 valid fixtures (small file, empty file) and 5 invalid fixtures (bad hash, oversized chunk, missing filename, path-like filename, smuggled destination path). Protocol doc §7.2 now defines the field rules and explicitly defers cross-field arithmetic (`chunkCount == ceil(sizeBytes / chunkSizeBytes)`) to HYP-M3-011 implementations. Verified: `./scripts/test-protocol.sh` green.
+- 2026-06-12 — HYP-M3-011 `[x]` — Added cross-platform transfer chunk sender/receiver cores. Android `dev.hyphen.android.transfer` and macOS `HyphenTransfer` now build `transfer.manifest` plus acked `transfer.chunk` envelopes, provide `ProtocolSession` outbox adapters, base64-encode chunk bytes, compute per-chunk SHA-256, and assemble received chunks back into completed in-memory files with size and whole-file SHA-256 checks. Tests cover manifest-first sending, small file reconstruction in both directions, and corrupted chunk-hash rejection on both platforms. Protocol doc §7.3 now defines `transfer.chunk` fields. Verified: `./gradlew test assembleDebug` green; `swift test` green.

@@ -205,6 +205,28 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 
 Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when HYP-M3-011 creates chunk state.
 
+### 7.3 `transfer.chunk` payload
+
+`transfer.chunk` carries one base64-encoded chunk for a previously acknowledged `transfer.manifest`. It is always sent under capability `transfer.v1` and requires an ack.
+
+```json
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "chunkIndex": 0,
+  "dataBase64": "aGVsbG8=",
+  "chunkSha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `fileId` | string | yes | Matches a received/accepted manifest |
+| `chunkIndex` | integer | yes | Zero-based chunk index, less than manifest `chunkCount` |
+| `dataBase64` | string | yes | Base64 chunk bytes; decoded byte count must be <= manifest `chunkSizeBytes` |
+| `chunkSha256` | string | yes | SHA-256 of decoded chunk bytes, lowercase hex |
+
+Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 hardens corruption coverage around that path.
+
 ## 8. Error taxonomy
 
 Error payload: `{ "code": "category/short-code", "message": "human readable, no sensitive content", "regarding": "<messageId|null>", "retryable": true|false }`
