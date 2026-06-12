@@ -27,11 +27,21 @@ class ProtocolSessionNotificationOutbox(private val session: ProtocolSession) : 
         )
 }
 
-class NotificationMirrorEventSender(private val outbox: NotificationOutbox) {
+class NotificationMirrorEventSender(
+    private val outbox: NotificationOutbox,
+    initialPrivacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL,
+) {
     private val activeKeys = linkedSetOf<String>()
+    @Volatile
+    private var privacyFilter = NotificationPrivacyFilter(initialPrivacyMode)
+
+    fun setPrivacyMode(mode: NotificationPrivacyMode) {
+        privacyFilter = NotificationPrivacyFilter(mode)
+    }
 
     @Synchronized
     fun sendPostedOrUpdated(payload: NormalizedNotificationPayload): String {
+        val filteredPayload = privacyFilter.apply(payload)
         val type = if (activeKeys.add(payload.sbnKey)) {
             NotificationProtocol.TYPE_POSTED
         } else {
@@ -41,7 +51,7 @@ class NotificationMirrorEventSender(private val outbox: NotificationOutbox) {
             type = type,
             capability = NotificationProtocol.CAPABILITY,
             requiresAck = true,
-            payload = payload.toJson(),
+            payload = filteredPayload.toJson(),
         )
     }
 

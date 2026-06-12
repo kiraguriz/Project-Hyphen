@@ -2,6 +2,7 @@ package dev.hyphen.android.notifications
 
 import dev.hyphen.android.transport.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -73,6 +74,36 @@ class NotificationMirrorEventSenderTest {
 
         assertEquals(NotificationProtocol.TYPE_REMOVED, outbox.envelopes.single().type)
         assertTrue(sender.activeKeys().isEmpty())
+    }
+
+    @Test
+    fun `hidden body mode strips notification text before sending`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox, NotificationPrivacyMode.HIDE_BODY)
+
+        sender.sendPostedOrUpdated(payload("0|com.chat|7|thread-123|10101", "secret body"))
+
+        val sent = outbox.envelopes.single()
+        assertEquals(NotificationProtocol.TYPE_POSTED, sent.type)
+        assertEquals(Json.Str("Example"), sent.payload["title"])
+        assertFalse(sent.payload.entries.containsKey("text"))
+        assertFalse(sent.payload.encode().contains("secret body"))
+    }
+
+    @Test
+    fun `changing privacy mode preserves active key update behavior`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox)
+
+        sender.sendPostedOrUpdated(payload("0|com.chat|7|thread-123|10101", "first body"))
+        sender.setPrivacyMode(NotificationPrivacyMode.HIDE_BODY)
+        sender.sendPostedOrUpdated(payload("0|com.chat|7|thread-123|10101", "second body"))
+
+        val updated = outbox.envelopes.last()
+        assertEquals(NotificationProtocol.TYPE_UPDATED, updated.type)
+        assertFalse(updated.payload.entries.containsKey("text"))
+        assertFalse(updated.payload.encode().contains("second body"))
+        assertEquals(setOf("0|com.chat|7|thread-123|10101"), sender.activeKeys())
     }
 
     private fun payload(sbnKey: String, text: String): NormalizedNotificationPayload =

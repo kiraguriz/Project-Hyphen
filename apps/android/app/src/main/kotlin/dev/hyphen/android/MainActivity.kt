@@ -29,6 +29,7 @@ import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationAccessController
+import dev.hyphen.android.notifications.NotificationPrivacyMode
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.EndpointConnectProbe
 import dev.hyphen.android.pairing.EndpointParser
@@ -113,6 +114,18 @@ class MainActivity : Activity() {
             text = "Enable notification mirror"
             setOnClickListener { showNotificationAccessOnboarding() }
         }
+        val notificationPrivacyButton = Button(this).apply {
+            text = notificationPrivacyButtonText(HyphenNotificationListenerRuntime.notificationPrivacyMode())
+            setOnClickListener {
+                val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
+                    NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
+                    NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.SHOW_FULL
+                }
+                HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
+                text = notificationPrivacyButtonText(next)
+                append("notification privacy: ${notificationPrivacyStatus(next)}")
+            }
+        }
 
         val textInput = EditText(this).apply {
             hint = "Text or https:// link to send to Mac"
@@ -145,6 +158,7 @@ class MainActivity : Activity() {
                 addView(listButton)
                 addView(notificationStatusButton)
                 addView(notificationSettingsButton)
+                addView(notificationPrivacyButton)
                 addView(textInput)
                 addView(sendTextButton)
                 addView(previewDiagnosticsButton)
@@ -425,6 +439,15 @@ class MainActivity : Activity() {
             "listener=${HyphenNotificationListenerRuntime.state()}; " +
             "component=${status.componentName}"
     }
+
+    private fun notificationPrivacyButtonText(mode: NotificationPrivacyMode): String =
+        "Notification privacy: ${notificationPrivacyStatus(mode)}"
+
+    private fun notificationPrivacyStatus(mode: NotificationPrivacyMode): String =
+        when (mode) {
+            NotificationPrivacyMode.SHOW_FULL -> "full"
+            NotificationPrivacyMode.HIDE_BODY -> "hidden body"
+        }
 
     private fun previewDiagnostics() {
         val json = diagnosticsExporter().previewJson()
