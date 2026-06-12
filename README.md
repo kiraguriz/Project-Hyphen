@@ -40,6 +40,7 @@ packaging/       macOS / Play / F-Droid packaging notes and dry runs
 - [Roadmap tracker](docs/project_hyphen_roadmap_tracker_v0_3.md) — source of truth for implementation status
 - [ADR-0001 — v1 product scope freeze](docs/adr/0001-product-scope.md)
 - Installation: [English](docs/install/installation_en.md) · [中文](docs/install/installation_zh.md)
+- Troubleshooting: [English](docs/troubleshooting_en.md) · [中文](docs/troubleshooting_zh.md)
 
 ## Contributing and security
 

@@ -6,6 +6,7 @@ describe a trusted public release yet.
 
 Use this guide with the current tracker:
 [roadmap tracker](../project_hyphen_roadmap_tracker_v0_3.md).
+For failure diagnosis, see [Troubleshooting](../troubleshooting_en.md).
 
 ## Current Install Paths
 
