@@ -67,6 +67,49 @@ class TransferMessagesTest {
         assertTrue(error is IllegalArgumentException)
     }
 
+    @Test
+    fun `interrupted transfer resumes from receiver checkpoint`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val firstOutbox = RecordingTransferOutbox()
+        val manifest = TransferSender(firstOutbox).sendBytes(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            bytes = bytes,
+            chunkSizeBytes = 1024,
+            fileId = "f_resume_test",
+        )
+        val receiver = TransferReceiver()
+
+        firstOutbox.envelopes.take(2).forEachIndexed { index, sent ->
+            receiver.handle(toEnvelope(sent, index))
+        }
+        val checkpoint = receiver.checkpoint(manifest.fileId)
+        assertEquals(1, checkpoint?.nextChunkIndex)
+
+        val resumeOutbox = RecordingTransferOutbox()
+        TransferSender(resumeOutbox).sendRemainingBytes(manifest, bytes, checkpoint!!.nextChunkIndex)
+        var completed: TransferCompleted? = null
+        resumeOutbox.envelopes.forEachIndexed { index, sent ->
+            completed = receiver.handle(toEnvelope(sent, index + 2)) ?: completed
+        }
+
+        assertArrayEquals(bytes, completed?.bytes)
+    }
+
+    @Test
+    fun `resume request and info use protocol wire names`() {
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox)
+
+        sender.requestResume("f_resume_test")
+        sender.sendResumeInfo(TransferResumeInfo("f_resume_test", nextChunkIndex = 2))
+
+        assertEquals(TransferProtocol.TYPE_RESUME_REQUEST, outbox.envelopes[0].type)
+        assertEquals(Json.Str("f_resume_test"), outbox.envelopes[0].payload["fileId"])
+        assertEquals(TransferProtocol.TYPE_RESUME_INFO, outbox.envelopes[1].type)
+        assertEquals(Json.Num("2"), outbox.envelopes[1].payload["nextChunkIndex"])
+    }
+
     private fun sendThroughReceiver(bytes: ByteArray, fileId: String): TransferCompleted {
         val outbox = RecordingTransferOutbox()
         TransferSender(outbox).sendBytes(
@@ -79,19 +122,20 @@ class TransferMessagesTest {
         val receiver = TransferReceiver()
         var completed: TransferCompleted? = null
         outbox.envelopes.forEachIndexed { index, sent ->
-            completed = receiver.handle(
-                Envelope(
-                    messageId = "01JZ000000000000000000000$index",
-                    sessionId = "s_test1",
-                    type = sent.type,
-                    capability = sent.capability,
-                    seq = (index + 1).toLong(),
-                    sentAtUnixMs = 1_781_020_800_000,
-                    requiresAck = sent.requiresAck,
-                    payload = sent.payload,
-                ),
-            ) ?: completed
+            completed = receiver.handle(toEnvelope(sent, index)) ?: completed
         }
         return completed ?: error("transfer did not complete")
     }
+
+    private fun toEnvelope(sent: SentTransferEnvelope, index: Int): Envelope =
+        Envelope(
+            messageId = "01JZ000000000000000000000$index",
+            sessionId = "s_test1",
+            type = sent.type,
+            capability = sent.capability,
+            seq = (index + 1).toLong(),
+            sentAtUnixMs = 1_781_020_800_000,
+            requiresAck = sent.requiresAck,
+            payload = sent.payload,
+        )
 }

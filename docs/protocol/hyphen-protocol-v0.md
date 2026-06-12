@@ -227,6 +227,30 @@ Schema validation intentionally does not encode cross-field arithmetic such as `
 
 Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 hardens corruption coverage around that path.
 
+### 7.4 `transfer.resume.request` / `transfer.resume.info` payloads
+
+`transfer.resume.request` asks the receiver for its current checkpoint for a `fileId`. `transfer.resume.info` reports the next chunk the sender should transmit. Both messages are sent under capability `transfer.v1` and require an ack.
+
+```json
+{
+  "fileId": "f_01JZ0000000000000000000000"
+}
+```
+
+```json
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "nextChunkIndex": 2
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `fileId` | string | yes | Existing manifest id |
+| `nextChunkIndex` | integer | `resume.info` only | Highest contiguous verified chunk index plus one |
+
+If the receiver has no checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. Persistent checkpoints across app restarts are outside HYP-M3-012's in-memory MVP and belong to later hardening.
+
 ## 8. Error taxonomy
 
 Error payload: `{ "code": "category/short-code", "message": "human readable, no sensitive content", "regarding": "<messageId|null>", "retryable": true|false }`

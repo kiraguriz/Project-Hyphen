@@ -12,9 +12,13 @@ object TransferProtocol {
     const val CAPABILITY = "transfer.v1"
     const val TYPE_MANIFEST = "transfer.manifest"
     const val TYPE_CHUNK = "transfer.chunk"
+    const val TYPE_RESUME_REQUEST = "transfer.resume.request"
+    const val TYPE_RESUME_INFO = "transfer.resume.info"
     const val MIN_CHUNK_SIZE_BYTES = 1024
     const val MAX_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
 }
+
+private val FILE_ID = Regex("^f_[A-Za-z0-9_-]{8,128}$")
 
 data class TransferManifest(
     val fileId: String,
@@ -50,7 +54,6 @@ data class TransferManifest(
         )
 
     companion object {
-        private val FILE_ID = Regex("^f_[A-Za-z0-9_-]{8,128}$")
         private val MIME_TYPE = Regex("^[a-z0-9][a-z0-9!#\$&^_.+-]*/[a-z0-9][a-z0-9!#\$&^_.+-]*$")
         private val SHA256_HEX = Regex("^[0-9a-f]{64}$")
 
@@ -120,6 +123,43 @@ data class TransferChunk(
     }
 }
 
+data class TransferResumeRequest(val fileId: String) {
+    init {
+        require(FILE_ID.matches(fileId)) { "invalid fileId" }
+    }
+
+    fun toJson(): Json.Obj = Json.obj("fileId" to Json.Str(fileId))
+
+    companion object {
+        fun fromJson(payload: Json.Obj): TransferResumeRequest =
+            TransferResumeRequest(string(payload, "fileId"))
+    }
+}
+
+data class TransferResumeInfo(
+    val fileId: String,
+    val nextChunkIndex: Int,
+) {
+    init {
+        require(FILE_ID.matches(fileId)) { "invalid fileId" }
+        require(nextChunkIndex >= 0) { "nextChunkIndex must be >= 0" }
+    }
+
+    fun toJson(): Json.Obj =
+        Json.obj(
+            "fileId" to Json.Str(fileId),
+            "nextChunkIndex" to Json.Num(nextChunkIndex.toString()),
+        )
+
+    companion object {
+        fun fromJson(payload: Json.Obj): TransferResumeInfo =
+            TransferResumeInfo(
+                fileId = string(payload, "fileId"),
+                nextChunkIndex = int(payload, "nextChunkIndex"),
+            )
+    }
+}
+
 interface TransferOutbox {
     fun send(
         type: String,
@@ -149,14 +189,41 @@ class TransferSender(private val outbox: TransferOutbox) {
     ): TransferManifest {
         val manifest = TransferManifest.fromBytes(filename, mimeType, bytes, chunkSizeBytes, fileId)
         outbox.send(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, manifest.toJson())
-        for (index in 0 until manifest.chunkCount) {
+        sendRemainingBytes(manifest, bytes, fromChunkIndex = 0)
+        return manifest
+    }
+
+    fun sendRemainingBytes(
+        manifest: TransferManifest,
+        bytes: ByteArray,
+        fromChunkIndex: Int,
+    ) {
+        require(fromChunkIndex in 0..manifest.chunkCount) { "fromChunkIndex out of range" }
+        require(bytes.size.toLong() == manifest.sizeBytes) { "size mismatch" }
+        require(sha256Hex(bytes) == manifest.sha256) { "file sha256 mismatch" }
+        for (index in fromChunkIndex until manifest.chunkCount) {
             val start = index * manifest.chunkSizeBytes
             val end = minOf(start + manifest.chunkSizeBytes, bytes.size)
             val chunk = TransferChunk(manifest.fileId, index, bytes.copyOfRange(start, end))
             outbox.send(TransferProtocol.TYPE_CHUNK, TransferProtocol.CAPABILITY, true, chunk.toJson())
         }
-        return manifest
     }
+
+    fun requestResume(fileId: String): String =
+        outbox.send(
+            TransferProtocol.TYPE_RESUME_REQUEST,
+            TransferProtocol.CAPABILITY,
+            true,
+            TransferResumeRequest(fileId).toJson(),
+        )
+
+    fun sendResumeInfo(info: TransferResumeInfo): String =
+        outbox.send(
+            TransferProtocol.TYPE_RESUME_INFO,
+            TransferProtocol.CAPABILITY,
+            true,
+            info.toJson(),
+        )
 }
 
 data class TransferCompleted(
@@ -166,6 +233,9 @@ data class TransferCompleted(
 
 class TransferReceiver {
     private val states = mutableMapOf<String, TransferState>()
+
+    fun checkpoint(fileId: String): TransferResumeInfo? =
+        states[fileId]?.checkpoint()
 
     fun handle(envelope: Envelope): TransferCompleted? {
         if (envelope.capability != TransferProtocol.CAPABILITY) return null
@@ -210,6 +280,12 @@ private class TransferState(val manifest: TransferManifest) {
             out.write(chunk)
         }
         return out.toByteArray()
+    }
+
+    fun checkpoint(): TransferResumeInfo {
+        var next = 0
+        while (next < chunks.size && chunks[next] != null) next += 1
+        return TransferResumeInfo(manifest.fileId, next)
     }
 }
 

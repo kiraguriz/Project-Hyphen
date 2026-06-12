@@ -6,6 +6,8 @@ public enum TransferProtocol {
     public static let capability = "transfer.v1"
     public static let typeManifest = "transfer.manifest"
     public static let typeChunk = "transfer.chunk"
+    public static let typeResumeRequest = "transfer.resume.request"
+    public static let typeResumeInfo = "transfer.resume.info"
     public static let minChunkSizeBytes = 1024
     public static let maxChunkSizeBytes = 2 * 1024 * 1024
 }
@@ -32,7 +34,7 @@ public struct TransferManifest: Equatable {
         chunkSizeBytes: Int,
         chunkCount: Int
     ) throws {
-        guard Self.matches(fileId, #"^f_[A-Za-z0-9_-]{8,128}$"#) else {
+        guard isValidFileId(fileId) else {
             throw TransferError.invalidPayload("invalid fileId")
         }
         guard !filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -149,6 +151,49 @@ public struct TransferChunk: Equatable {
     }
 }
 
+public struct TransferResumeRequest: Equatable {
+    public let fileId: String
+
+    public init(fileId: String) throws {
+        guard isValidFileId(fileId) else { throw TransferError.invalidPayload("invalid fileId") }
+        self.fileId = fileId
+    }
+
+    public init(payload: [String: Any]) throws {
+        try self.init(fileId: try string(payload, "fileId"))
+    }
+
+    public var payload: [String: Any] {
+        ["fileId": fileId]
+    }
+}
+
+public struct TransferResumeInfo: Equatable {
+    public let fileId: String
+    public let nextChunkIndex: Int
+
+    public init(fileId: String, nextChunkIndex: Int) throws {
+        guard isValidFileId(fileId) else { throw TransferError.invalidPayload("invalid fileId") }
+        guard nextChunkIndex >= 0 else { throw TransferError.invalidPayload("nextChunkIndex must be >= 0") }
+        self.fileId = fileId
+        self.nextChunkIndex = nextChunkIndex
+    }
+
+    public init(payload: [String: Any]) throws {
+        try self.init(
+            fileId: try string(payload, "fileId"),
+            nextChunkIndex: Int(try int64(payload, "nextChunkIndex"))
+        )
+    }
+
+    public var payload: [String: Any] {
+        [
+            "fileId": fileId,
+            "nextChunkIndex": nextChunkIndex,
+        ]
+    }
+}
+
 public protocol TransferOutbox {
     @discardableResult
     func send(
@@ -205,7 +250,25 @@ public final class TransferSender {
             requiresAck: true,
             payload: manifest.payload
         )
-        for index in 0..<manifest.chunkCount {
+        try sendRemainingBytes(manifest: manifest, bytes: bytes, fromChunkIndex: 0)
+        return manifest
+    }
+
+    public func sendRemainingBytes(
+        manifest: TransferManifest,
+        bytes: Data,
+        fromChunkIndex: Int
+    ) throws {
+        guard (0...manifest.chunkCount).contains(fromChunkIndex) else {
+            throw TransferError.invalidPayload("fromChunkIndex out of range")
+        }
+        guard Int64(bytes.count) == manifest.sizeBytes else {
+            throw TransferError.invalidPayload("size mismatch")
+        }
+        guard sha256Hex(bytes) == manifest.sha256 else {
+            throw TransferError.invalidPayload("file sha256 mismatch")
+        }
+        for index in fromChunkIndex..<manifest.chunkCount {
             let start = index * manifest.chunkSizeBytes
             let end = min(start + manifest.chunkSizeBytes, bytes.count)
             let chunk = try TransferChunk(
@@ -220,7 +283,26 @@ public final class TransferSender {
                 payload: chunk.payload
             )
         }
-        return manifest
+    }
+
+    @discardableResult
+    public func requestResume(fileId: String) throws -> String? {
+        try outbox.send(
+            type: TransferProtocol.typeResumeRequest,
+            capability: TransferProtocol.capability,
+            requiresAck: true,
+            payload: TransferResumeRequest(fileId: fileId).payload
+        )
+    }
+
+    @discardableResult
+    public func sendResumeInfo(_ info: TransferResumeInfo) -> String? {
+        outbox.send(
+            type: TransferProtocol.typeResumeInfo,
+            capability: TransferProtocol.capability,
+            requiresAck: true,
+            payload: info.payload
+        )
     }
 }
 
@@ -233,6 +315,10 @@ public final class TransferReceiver {
     private var states: [String: TransferState] = [:]
 
     public init() {}
+
+    public func checkpoint(fileId: String) -> TransferResumeInfo? {
+        try? states[fileId]?.checkpoint()
+    }
 
     public func handle(_ envelope: Envelope) throws -> TransferCompleted? {
         guard envelope.capability == TransferProtocol.capability else { return nil }
@@ -291,6 +377,18 @@ private final class TransferState {
         }
         return out
     }
+
+    func checkpoint() throws -> TransferResumeInfo {
+        var next = 0
+        while next < chunks.count && chunks[next] != nil {
+            next += 1
+        }
+        return try TransferResumeInfo(fileId: manifest.fileId, nextChunkIndex: next)
+    }
+}
+
+private func isValidFileId(_ value: String) -> Bool {
+    value.range(of: #"^f_[A-Za-z0-9_-]{8,128}$"#, options: .regularExpression) != nil
 }
 
 private func string(_ payload: [String: Any], _ field: String) throws -> String {

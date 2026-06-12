@@ -67,6 +67,51 @@ final class TransferMessagesTests: XCTestCase {
         XCTAssertThrowsError(try TransferChunk(payload: payload))
     }
 
+    func testInterruptedTransferResumesFromReceiverCheckpoint() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let firstOutbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: firstOutbox).sendBytes(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            bytes: bytes,
+            chunkSizeBytes: 1024,
+            fileId: "f_resume_test"
+        )
+        let receiver = TransferReceiver()
+
+        for (index, sent) in firstOutbox.envelopes.prefix(2).enumerated() {
+            _ = try receiver.handle(toEnvelope(sent, index: index))
+        }
+        let checkpoint = try XCTUnwrap(receiver.checkpoint(fileId: manifest.fileId))
+        XCTAssertEqual(checkpoint.nextChunkIndex, 1)
+
+        let resumeOutbox = RecordingTransferOutbox()
+        try TransferSender(outbox: resumeOutbox).sendRemainingBytes(
+            manifest: manifest,
+            bytes: bytes,
+            fromChunkIndex: checkpoint.nextChunkIndex
+        )
+        var completed: TransferCompleted?
+        for (index, sent) in resumeOutbox.envelopes.enumerated() {
+            completed = try receiver.handle(toEnvelope(sent, index: index + 2)) ?? completed
+        }
+
+        XCTAssertEqual(completed?.bytes, bytes)
+    }
+
+    func testResumeRequestAndInfoUseProtocolWireNames() throws {
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox)
+
+        try sender.requestResume(fileId: "f_resume_test")
+        sender.sendResumeInfo(try TransferResumeInfo(fileId: "f_resume_test", nextChunkIndex: 2))
+
+        XCTAssertEqual(outbox.envelopes[0].type, TransferProtocol.typeResumeRequest)
+        XCTAssertEqual(outbox.envelopes[0].payload["fileId"] as? String, "f_resume_test")
+        XCTAssertEqual(outbox.envelopes[1].type, TransferProtocol.typeResumeInfo)
+        XCTAssertEqual(outbox.envelopes[1].payload["nextChunkIndex"] as? Int, 2)
+    }
+
     private func sendThroughReceiver(_ bytes: Data, fileId: String) throws -> TransferCompleted {
         let outbox = RecordingTransferOutbox()
         try TransferSender(outbox: outbox).sendBytes(
@@ -93,5 +138,18 @@ final class TransferMessagesTests: XCTestCase {
             ) ?? completed
         }
         return try XCTUnwrap(completed)
+    }
+
+    private func toEnvelope(_ sent: SentTransferEnvelope, index: Int) -> Envelope {
+        Envelope(
+            messageId: "01JZ000000000000000000000\(index)",
+            sessionId: "s_test1",
+            type: sent.type,
+            capability: sent.capability,
+            seq: Int64(index + 1),
+            sentAtUnixMs: 1_781_020_800_000,
+            requiresAck: sent.requiresAck,
+            payload: sent.payload
+        )
     }
 }
