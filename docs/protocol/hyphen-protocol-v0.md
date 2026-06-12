@@ -155,9 +155,35 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 | `transfer.complete` | both | yes | Whole-file SHA-256 verification result |
 | `transfer.cancel` | both | yes | Either side aborts; partial data kept for resume unless `discard: true` |
 
-Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M2-001/002/HYP-M3-010); this table is the index.
+Detailed payload schemas are normative in `protocol/schema/` where present (JSON Schema, HYP-M2-001/002/HYP-M3-010); this table is the index.
 
-### 7.1 `text.send` payload
+### 7.1 Notification payloads
+
+`notification.posted` and `notification.updated` carry the same normalized Android notification payload. `notification.removed` carries only `sbnKey`. The `sbnKey` field is exactly `StatusBarNotification.getKey()` and is the only v0 notification identity. Android `postTime` MUST NOT appear in the payload or be used to decide whether a Mac notification is new or updated.
+
+```json
+{
+  "sbnKey": "0|com.example.chat|7|thread-123|10101",
+  "packageName": "com.example.chat",
+  "title": "Alice",
+  "text": "See you soon",
+  "category": "msg",
+  "clearable": true,
+  "ongoing": false
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `sbnKey` | string | yes | Exact Android notification key from `StatusBarNotification.getKey()` |
+| `packageName` | string | yes | Android package name that posted the notification |
+| `title` | string | no | Trimmed display title; omitted when blank |
+| `text` | string | no | Trimmed display summary/body; omitted when blank; privacy filters may replace this later |
+| `category` | string | no | Android notification category when present |
+| `clearable` | boolean | yes | Whether Android reports the notification as clearable |
+| `ongoing` | boolean | yes | Whether Android reports the notification as ongoing |
+
+### 7.2 `text.send` payload
 
 `text.send` is the v0 text/link plugin message (HYP-M3-008/009). It is always sent under capability `text.v1`, requires an ack, and the receiver MUST present the content for explicit user confirmation before copying or opening it.
 
@@ -175,7 +201,7 @@ Detailed payload schemas are normative in `protocol/schema/` (JSON Schema, HYP-M
 
 URL values are limited to `http` and `https` in v0. Other schemes are rejected rather than opened or copied implicitly.
 
-### 7.2 `transfer.manifest` payload
+### 7.3 `transfer.manifest` payload
 
 `transfer.manifest` is sent before any `transfer.chunk` payload. It is always sent under capability `transfer.v1`, requires an ack, and lets the receiver allocate local state, show the user a receive prompt, and verify the completed file.
 
@@ -205,7 +231,7 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 
 Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when HYP-M3-011 creates chunk state.
 
-### 7.3 `transfer.chunk` payload
+### 7.4 `transfer.chunk` payload
 
 `transfer.chunk` carries one base64-encoded chunk for a previously acknowledged `transfer.manifest`. It is always sent under capability `transfer.v1` and requires an ack.
 
@@ -227,7 +253,7 @@ Schema validation intentionally does not encode cross-field arithmetic such as `
 
 Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 hardens corruption coverage around that path.
 
-### 7.4 `transfer.resume.request` / `transfer.resume.info` payloads
+### 7.5 `transfer.resume.request` / `transfer.resume.info` payloads
 
 `transfer.resume.request` asks the receiver for its current checkpoint for a `fileId`. `transfer.resume.info` reports the next chunk the sender should transmit. Both messages are sent under capability `transfer.v1` and require an ack.
 
