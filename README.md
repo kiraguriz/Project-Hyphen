@@ -46,4 +46,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). All parti
 
 ## License
 
-Not yet finalized (tracked as HYP-M0-015). Intended direction per plan §12.2: Apache-2.0 for protocol specs/schemas/test vectors, MPL-2.0 or Apache-2.0 for app code, CC-BY-4.0 for documentation. Until a LICENSE file lands, all rights reserved by the authors.
+The license decision is recorded in [ADR-0005](docs/adr/0005-license-and-clean-room-policy.md): app source code uses MPL-2.0, protocol specs/schemas/test vectors use Apache-2.0, and documentation uses CC-BY-4.0 unless a file says otherwise. Formal root license files, SPDX sweeps, and contribution terms still need to land before public release packaging or external code contributions.

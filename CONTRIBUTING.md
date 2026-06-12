@@ -25,4 +25,4 @@ Thanks for your interest. Hyphen is in pre-alpha; the most useful contributions 
 
 ## Licensing of contributions
 
-The project license is not finalized yet (HYP-M0-015; intended direction: Apache-2.0 / MPL-2.0, CC-BY-4.0 for docs). By contributing before that lands, you agree your contribution may be licensed under the license ultimately chosen from that set. A DCO or CLA decision is pending and will be documented before external contributions are merged.
+The project license decision is recorded in [ADR-0005](docs/adr/0005-license-and-clean-room-policy.md): app source code uses MPL-2.0, protocol specs/schemas/test vectors use Apache-2.0, and documentation uses CC-BY-4.0 unless a file says otherwise. Formal root license files, SPDX sweeps, and a DCO or CLA decision must land before external code contributions are merged.

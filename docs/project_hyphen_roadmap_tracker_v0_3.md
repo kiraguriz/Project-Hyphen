@@ -115,7 +115,7 @@ gantt
 | HYP-M0-012 | `[x]` | P1 | Distribution | Create `packaging/android-play/play-policy-notes.md` | HYP-M0-010 | FGS/Data safety/closed testing notes listed | Manual review |
 | HYP-M0-013 | `[x]` | P1 | Distribution | Create `packaging/android-fdroid/metadata-notes.md` | HYP-M0-010 | F-Droid metadata and reproducibility considerations listed | Manual review |
 | HYP-M0-014 | `[x]` | P1 | Devices | Create `docs/compatibility-matrix.md` | none | Blank matrix for Android/macOS/network cases | Manual review |
-| HYP-M0-015 | `[ ]` | P1 | License | Add license decision note | HYP-M0-003 | MPL/Apache clean-room rules stated | Manual review |
+| HYP-M0-015 | `[x]` | P1 | License | Add license decision note | HYP-M0-003 | MPL/Apache clean-room rules stated | Manual review |
 
 ---
 
@@ -351,7 +351,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
-| M0 Scope/Ops | 14 | 0 | 0 | 1 |
+| M0 Scope/Ops | 15 | 0 | 0 | 0 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 0 | 0 | 2 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
@@ -419,3 +419,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M0-012 `[x]` — Added `packaging/android-play/play-policy-notes.md` listing the Play track boundary, expected `connectedDevice` and user-initiated `dataSync` foreground-service areas, Data safety draft inputs, closed-testing setup notes, and review risks around Notification Listener, foreground-service declarations, diagnostics exports, and ADR-0003 excluded features. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-013 `[x]` — Added `packaging/android-fdroid/metadata-notes.md` listing F-Droid track boundaries, candidate metadata fields, current app ID/version seeds, source/repo requirements, reproducibility considerations for pinned toolchains and signing-key strategy, and inclusion-review risks around licensing, dependencies, Notification Listener, foreground service, and future scanner/diagnostics dependencies. Manual review complete; no automated behavior changed.
 - 2026-06-12 — HYP-M0-014 `[x]` — Added `docs/compatibility-matrix.md` as a blank execution matrix with recording rules, Android/OEM coverage targets, macOS coverage targets, network cases, scenario rows, and a redacted evidence-log template. Rows are explicitly initialized as `not-run` or blocked where human sleep/wake scheduling is required, so future M4 compatibility work records observed evidence instead of inferred support. Manual review complete; no automated behavior changed.
+- 2026-06-12 — HYP-M0-015 `[x]` — Added `docs/adr/0005-license-and-clean-room-policy.md`: app source code uses MPL-2.0, protocol specs/schemas/test vectors use Apache-2.0, documentation uses CC-BY-4.0, third-party files keep upstream notices, and clean-room rules forbid GPL/AGPL/proprietary code copying or close paraphrase. README and CONTRIBUTING now point to the ADR while noting that formal root license files, SPDX sweeps, and DCO/CLA terms remain release-readiness follow-ups. Manual review complete; no automated behavior changed. **All M0 tasks are now complete.**
