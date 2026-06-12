@@ -6,7 +6,7 @@ private struct SentTransferEnvelope {
     let type: String
     let capability: String
     let requiresAck: Bool
-    let payload: [String: Any]
+    var payload: [String: Any]
 }
 
 private final class RecordingTransferOutbox: TransferOutbox {
@@ -65,6 +65,27 @@ final class TransferMessagesTests: XCTestCase {
         payload["chunkSha256"] = String(repeating: "0", count: 64)
 
         XCTAssertThrowsError(try TransferChunk(payload: payload))
+    }
+
+    func testReceiverRejectsCompletedFilesWhoseSHA256DoesNotMatchTheManifest() throws {
+        let bytes = Data((0..<1500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        try TransferSender(outbox: outbox).sendBytes(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            bytes: bytes,
+            chunkSizeBytes: 1024,
+            fileId: "f_bad_file_hash"
+        )
+        let receiver = TransferReceiver()
+        var first = outbox.envelopes[0]
+        first.payload["sha256"] = String(repeating: "0", count: 64)
+
+        XCTAssertThrowsError(
+            try ([first] + outbox.envelopes.dropFirst()).enumerated().forEach { index, sent in
+                _ = try receiver.handle(toEnvelope(sent, index: index))
+            }
+        )
     }
 
     func testInterruptedTransferResumesFromReceiverCheckpoint() throws {

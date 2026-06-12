@@ -68,6 +68,31 @@ class TransferMessagesTest {
     }
 
     @Test
+    fun `receiver rejects completed files whose sha256 does not match the manifest`() {
+        val bytes = ByteArray(1500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        TransferSender(outbox).sendBytes(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            bytes = bytes,
+            chunkSizeBytes = 1024,
+            fileId = "f_bad_file_hash",
+        )
+        val receiver = TransferReceiver()
+        val first = outbox.envelopes.first()
+        val badManifest = first.copy(
+            payload = Json.Obj(first.payload.entries + ("sha256" to Json.Str("0".repeat(64)))),
+        )
+        val error = runCatching {
+            (listOf(badManifest) + outbox.envelopes.drop(1)).forEachIndexed { index, sent ->
+                receiver.handle(toEnvelope(sent, index))
+            }
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalArgumentException)
+    }
+
+    @Test
     fun `interrupted transfer resumes from receiver checkpoint`() {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
         val firstOutbox = RecordingTransferOutbox()
