@@ -229,7 +229,7 @@ gantt
 | HYP-M6-002 | `[ ]` | P0 | Reliability | Achieve ≥99% crash-free beta sessions where measurable | HYP-M4-004 | Opt-in diagnostics or manual logs support claim | Metrics review |
 | HYP-M6-003 | `[ ]` | P0 | Reliability | Finalize wake/network reconnect behavior | HYP-M4-007 | Median <30s or explicit degraded state | Test log |
 | HYP-M6-004 | `[ ]` | P0 | Transfer | Finalize 1GB resume behavior | HYP-M3-015 | Passes on at least 3 Android/macOS/network combos | Test log |
-| HYP-M6-005 | `[ ]` | P0 | Notifications | Finalize notification duplicate prevention | HYP-M4-008 | Duplicate notification rate acceptable | Test log |
+| HYP-M6-005 | `[x]` | P0 | Notifications | Finalize notification duplicate prevention | HYP-M4-008 | Duplicate notification rate acceptable | Test log |
 | HYP-M6-006 | `[ ]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
 | HYP-M6-007 | `[ ]` | P1 | Security | Run final threat-model review | HYP-M6-006 | New risks captured | Review notes |
 | HYP-M6-008 | `[ ]` | P1 | License | Run dependency/license audit | HYP-M5-004 | No blocking dependency/license issue | Audit report |
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 4 | 5 |
 | M5 Distribution | 2 | 0 | 2 | 6 |
-| M6 Stabilization | 0 | 0 | 0 | 10 |
+| M6 Stabilization | 1 | 0 | 0 | 9 |
 
 Update this summary after each milestone review.
 
@@ -434,3 +434,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M4-005 `[?]` — **Manual Android compatibility matrix blocked.** Checked attached Android targets with `/Users/haitianzhu/Library/Android/sdk/platform-tools/adb devices -l`; output listed no attached devices, so no Pixel/Samsung/Xiaomi/OnePlus/Oppo/OEM rows can be observed or recorded. Added an evidence-log entry in `docs/compatibility-matrix.md`. **Blocker**: at least five physical Android devices or authorized emulators covering the required OS/OEM/network cases are unavailable in this environment.
 - 2026-06-12 — HYP-M4-006 `[?]` — **Manual macOS compatibility matrix blocked.** Current host reports macOS 26.5.1 build 25F80 via `sw_vers`, but this environment does not provide the three distinct macOS OS/device combinations required by the row, and the matrix scenarios also need a paired Android session for notification/text/transfer checks. Added an evidence-log entry in `docs/compatibility-matrix.md`. **Blocker**: two additional Mac OS/device combinations plus a paired Android device/session are unavailable here.
 - 2026-06-12 — HYP-M5-006 `[x]` — Added `packaging/android-play/fgs-declaration-draft.md`, a Play Console foreground-service declaration draft for `connectedDevice` and `dataSync`. The draft ties each type to user-visible local companion behavior, explicit user triggers, stop conditions, notification copy, local-first data handling, non-use of `remoteMessaging`/SMS/Call Log/Accessibility/background clipboard/cloud sync, and release evidence still required before submission. `packaging/android-play/README.md` and `play-policy-notes.md` now link to it. Manual review complete; no runtime behavior changed.
+- 2026-06-12 — HYP-M6-005 `[x]` — Added `docs/test-plans/hyp-m6-005-notification-duplicate-prevention.md` as the final duplicate-prevention test log. It records the Android storm invariant (1,000 events across 25 keys -> 25 posted, 975 updated, 10 removed, active set bounded) and the macOS coalescing invariant (1,000 updates across 25 deterministic identifiers, latest update wins, removals leave 15 delivered identifiers). Verified: `./gradlew :app:testDebugUnitTest --tests dev.hyphen.android.notifications.NotificationMirrorEventSenderTest` green; `swift test --filter NotificationMirrorReceiverTests/testNotificationStormCoalescesByAndroidKeyAndRemovalsStayBounded` green.
