@@ -52,6 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(deleteDiagnostics(_:)),
         keyEquivalent: ""
     )
+    private let betaDiagnosticsItem = NSMenuItem(
+        title: "Beta Diagnostics: Off",
+        action: #selector(toggleBetaDiagnostics(_:)),
+        keyEquivalent: ""
+    )
     private let stateItem = NSMenuItem(title: "Not advertising", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -75,6 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         previewDiagnosticsItem.target = self
         exportDiagnosticsItem.target = self
         deleteDiagnosticsItem.target = self
+        betaDiagnosticsItem.target = self
+        renderBetaDiagnosticsItem()
 
         menu.addItem(header)
         menu.addItem(.separator())
@@ -84,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(sendTextItem)
         menu.addItem(cancelTransferItem)
         menu.addItem(.separator())
+        menu.addItem(betaDiagnosticsItem)
         menu.addItem(previewDiagnosticsItem)
         menu.addItem(exportDiagnosticsItem)
         menu.addItem(deleteDiagnosticsItem)
@@ -196,13 +204,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let alert = NSAlert()
             alert.messageText = "Diagnostics preview"
-            alert.informativeText = "Local, redacted bundle. Review before exporting."
+            alert.informativeText = diagnosticsPreviewExplanation()
             alert.alertStyle = .informational
             alert.accessoryView = scroll
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
-            stateItem.title = "Diagnostics previewed (\(diagnosticLogs.snapshot().count) event(s))"
+            stateItem.title = "Diagnostics previewed (\(diagnosticLogs.snapshot().count) event(s), beta \(betaDiagnosticsStatus()))"
         } catch {
             stateItem.title = "Diagnostics preview failed: \(error)"
         }
@@ -233,6 +241,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stateItem.title = "Diagnostics deleted (\(count) event(s))"
     }
 
+    @objc private func toggleBetaDiagnostics(_ sender: NSMenuItem) {
+        if betaDiagnosticsEnabled() {
+            setBetaDiagnosticsEnabled(false)
+            stateItem.title = "Beta diagnostics disabled"
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Enable beta diagnostics?"
+        alert.informativeText = """
+        Beta diagnostics are off by default.
+
+        Enable only when debugging a beta issue. Local previews and exports may include trace IDs for failure correlation. Notification bodies, file names, URLs, and IP suffixes stay redacted.
+
+        Hyphen never uploads diagnostics automatically. Export stays user-triggered, and this menu item disables beta extras immediately.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            stateItem.title = "Beta diagnostics left off"
+            return
+        }
+        setBetaDiagnosticsEnabled(true)
+        stateItem.title = "Beta diagnostics enabled"
+    }
+
+    private func setBetaDiagnosticsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.betaDiagnosticsOptInKey)
+        renderBetaDiagnosticsItem()
+    }
+
+    private func betaDiagnosticsEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: Self.betaDiagnosticsOptInKey)
+    }
+
+    private func renderBetaDiagnosticsItem() {
+        let enabled = betaDiagnosticsEnabled()
+        betaDiagnosticsItem.title = "Beta Diagnostics: \(enabled ? "On" : "Off")"
+        betaDiagnosticsItem.state = enabled ? .on : .off
+    }
+
+    private func betaDiagnosticsStatus() -> String {
+        betaDiagnosticsEnabled() ? "on" : "off"
+    }
+
+    private func diagnosticsPreviewExplanation() -> String {
+        if betaDiagnosticsEnabled() {
+            return "Local, redacted bundle. Beta diagnostics are on, so local trace IDs are included when present. No automatic upload."
+        }
+        return "Local, redacted bundle. Beta diagnostics are off, so trace IDs stay hidden. No automatic upload."
+    }
+
     private func diagnosticsExporter() -> RedactedDiagnosticsExporter {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         return RedactedDiagnosticsExporter(
@@ -240,7 +302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appVersion: HyphenCore.version,
             osMajor: os.majorVersion,
             osMinor: os.minorVersion,
-            osPatch: os.patchVersion
+            osPatch: os.patchVersion,
+            includeTraceIds: betaDiagnosticsEnabled()
         )
     }
 
@@ -293,6 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stateItem.title = "Not advertising"
         }
     }
+
+    private static let betaDiagnosticsOptInKey = "dev.hyphen.betaDiagnostics.includeTraceIds"
 }
 
 let app = NSApplication.shared

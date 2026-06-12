@@ -68,6 +68,7 @@ class MainActivity : Activity() {
     private var manager: DiscoveryManager? = null
     private lateinit var log: TextView
     private lateinit var button: Button
+    private lateinit var betaDiagnosticsButton: Button
     private var activeSession: ProtocolSession? = null
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
@@ -164,6 +165,10 @@ class MainActivity : Activity() {
             text = "Delete diagnostics"
             setOnClickListener { deleteDiagnostics() }
         }
+        betaDiagnosticsButton = Button(this).apply {
+            text = betaDiagnosticsButtonText()
+            setOnClickListener { toggleBetaDiagnostics() }
+        }
 
         setContentView(
             LinearLayout(this).apply {
@@ -180,6 +185,7 @@ class MainActivity : Activity() {
                 addView(textInput)
                 addView(sendTextButton)
                 addView(cancelTransferButton)
+                addView(betaDiagnosticsButton)
                 addView(previewDiagnosticsButton)
                 addView(exportDiagnosticsButton)
                 addView(deleteDiagnosticsButton)
@@ -521,6 +527,54 @@ class MainActivity : Activity() {
             NotificationPrivacyMode.HIDE_BODY -> "hidden body"
         }
 
+    private fun toggleBetaDiagnostics() {
+        if (betaDiagnosticsEnabled()) {
+            setBetaDiagnosticsEnabled(false)
+            append("beta diagnostics: disabled")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Enable beta diagnostics?")
+            .setMessage(
+                "Beta diagnostics are off by default.\n\n" +
+                    "Enable only when debugging a beta issue. Local previews and exports " +
+                    "may include trace IDs for failure correlation. Notification bodies, " +
+                    "file names, URLs, and IP suffixes stay redacted.\n\n" +
+                    "Hyphen never uploads diagnostics automatically. Export stays " +
+                    "user-triggered, and this button disables beta extras immediately.",
+            )
+            .setPositiveButton("Enable") { _, _ ->
+                setBetaDiagnosticsEnabled(true)
+                append("beta diagnostics: enabled")
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                append("beta diagnostics: unchanged (off)")
+            }
+            .show()
+    }
+
+    private fun setBetaDiagnosticsEnabled(enabled: Boolean) {
+        getSharedPreferences(DIAGNOSTICS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(PREF_BETA_DIAGNOSTICS_ENABLED, enabled)
+            .apply()
+        renderBetaDiagnosticsButton()
+    }
+
+    private fun betaDiagnosticsEnabled(): Boolean =
+        getSharedPreferences(DIAGNOSTICS_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(PREF_BETA_DIAGNOSTICS_ENABLED, false)
+
+    private fun renderBetaDiagnosticsButton() {
+        betaDiagnosticsButton.text = betaDiagnosticsButtonText()
+    }
+
+    private fun betaDiagnosticsButtonText(): String =
+        "Beta diagnostics: ${betaDiagnosticsStatus()}"
+
+    private fun betaDiagnosticsStatus(): String =
+        if (betaDiagnosticsEnabled()) "on" else "off"
+
     private fun previewDiagnostics() {
         val json = diagnosticsExporter().previewJson()
         AlertDialog.Builder(this)
@@ -528,7 +582,7 @@ class MainActivity : Activity() {
             .setMessage(json)
             .setPositiveButton("OK", null)
             .show()
-        append("diagnostics preview: ${diagnosticLogs.snapshot().size} event(s)")
+        append("diagnostics preview: ${diagnosticLogs.snapshot().size} event(s), beta ${betaDiagnosticsStatus()}")
     }
 
     private fun exportDiagnostics() {
@@ -556,6 +610,7 @@ class MainActivity : Activity() {
             logs = diagnosticLogs,
             appVersion = appVersionName(),
             sdkInt = Build.VERSION.SDK_INT,
+            includeTraceIds = betaDiagnosticsEnabled(),
         )
 
     @Suppress("DEPRECATION")
@@ -601,5 +656,10 @@ class MainActivity : Activity() {
         activeSession?.stop()
         activeSession = null
         manager?.stop()
+    }
+
+    private companion object {
+        const val DIAGNOSTICS_PREFS = "dev.hyphen.android.diagnostics"
+        const val PREF_BETA_DIAGNOSTICS_ENABLED = "beta_diagnostics_enabled"
     }
 }
