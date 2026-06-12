@@ -85,3 +85,54 @@ public final class TextLinkReceiver {
         return request
     }
 }
+
+public protocol TextLinkOutbox {
+    @discardableResult
+    func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String?
+}
+
+public final class ProtocolSessionTextLinkOutbox: TextLinkOutbox {
+    private let session: ProtocolSession
+
+    public init(session: ProtocolSession) {
+        self.session = session
+    }
+
+    @discardableResult
+    public func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String? {
+        session.send(
+            type: type,
+            payload: payload,
+            requiresAck: requiresAck,
+            capability: capability
+        )
+    }
+}
+
+public final class TextLinkSender {
+    private let outbox: TextLinkOutbox
+
+    public init(outbox: TextLinkOutbox) {
+        self.outbox = outbox
+    }
+
+    @discardableResult
+    public func send(_ message: TextLinkMessage) -> String? {
+        outbox.send(
+            type: TextLinkMessage.typeSend,
+            capability: TextLinkMessage.capability,
+            requiresAck: true,
+            payload: message.payload
+        )
+    }
+}

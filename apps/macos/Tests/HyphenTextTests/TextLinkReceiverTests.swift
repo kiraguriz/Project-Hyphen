@@ -3,6 +3,25 @@ import XCTest
 @testable import HyphenText
 
 final class TextLinkReceiverTests: XCTestCase {
+    private final class RecordingTextLinkOutbox: TextLinkOutbox {
+        var type: String?
+        var capability: String?
+        var requiresAck: Bool?
+        var payload: [String: Any]?
+
+        func send(
+            type: String,
+            capability: String,
+            requiresAck: Bool,
+            payload: [String: Any]
+        ) -> String? {
+            self.type = type
+            self.capability = capability
+            self.requiresAck = requiresAck
+            self.payload = payload
+            return "01JZ0000000000000000000001"
+        }
+    }
 
     private func envelope(
         type: String = TextLinkMessage.typeSend,
@@ -72,5 +91,17 @@ final class TextLinkReceiverTests: XCTestCase {
         XCTAssertThrowsError(
             try TextLinkMessage(kind: .text, value: "  ")
         )
+    }
+
+    func testSenderUsesTextSendCapabilityAndRequiresAck() throws {
+        let outbox = RecordingTextLinkOutbox()
+        let id = try TextLinkSender(outbox: outbox).send(TextLinkMessage(kind: .text, value: "from Mac"))
+
+        XCTAssertEqual(id, "01JZ0000000000000000000001")
+        XCTAssertEqual(outbox.type, TextLinkMessage.typeSend)
+        XCTAssertEqual(outbox.capability, TextLinkMessage.capability)
+        XCTAssertEqual(outbox.requiresAck, true)
+        XCTAssertEqual(outbox.payload?["kind"] as? String, "text")
+        XCTAssertEqual(outbox.payload?["value"] as? String, "from Mac")
     }
 }

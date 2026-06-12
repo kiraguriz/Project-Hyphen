@@ -2,7 +2,12 @@ package dev.hyphen.android
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
@@ -28,9 +33,13 @@ import dev.hyphen.android.pairing.ParseResult
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.pairing.SasConfirmationGate
 import dev.hyphen.android.text.ProtocolSessionTextLinkOutbox
+import dev.hyphen.android.text.TextLinkConfirmationRequest
+import dev.hyphen.android.text.TextLinkKind
 import dev.hyphen.android.text.TextLinkMessage
+import dev.hyphen.android.text.TextLinkReceiver
 import dev.hyphen.android.text.TextLinkSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
+import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.HeartbeatMonitor
 import dev.hyphen.android.transport.ProtocolSession
 import dev.hyphen.android.transport.SessionHandshake
@@ -48,6 +57,7 @@ class MainActivity : Activity() {
     private var activeSession: ProtocolSession? = null
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
+    private val textReceiver = TextLinkReceiver()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -261,6 +271,10 @@ class MainActivity : Activity() {
                             runOnUiThread { append("session protocol error: $code $detail") }
                         }
 
+                        override fun onEnvelope(envelope: Envelope) {
+                            handleSessionEnvelope(envelope)
+                        }
+
                         override fun onClosed() {
                             if (activeSession === session) activeSession = null
                             runOnUiThread { append("Mac session closed") }
@@ -278,6 +292,48 @@ class MainActivity : Activity() {
                 runOnUiThread { append("session failed: ${e.message}") }
             }
         }.start()
+    }
+
+    private fun handleSessionEnvelope(envelope: Envelope) {
+        try {
+            val request = textReceiver.handle(envelope) ?: return
+            runOnUiThread { presentTextLinkConfirmation(request) }
+        } catch (e: IllegalArgumentException) {
+            runOnUiThread { append("text/link rejected: ${e.message}") }
+        }
+    }
+
+    private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
+        val isUrl = request.message.kind == TextLinkKind.URL
+        AlertDialog.Builder(this)
+            .setTitle(if (isUrl) "Open link from Mac?" else "Copy text from Mac?")
+            .setMessage(request.message.value)
+            .setPositiveButton(if (isUrl) "Open" else "Copy") { _, _ ->
+                if (isUrl) {
+                    openConfirmedLink(request.message.value)
+                } else {
+                    copyConfirmedText(request.message.value)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                append("text/link declined")
+            }
+            .show()
+    }
+
+    private fun copyConfirmedText(value: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Hyphen text", value))
+        append("text copied from Mac")
+    }
+
+    private fun openConfirmedLink(value: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value)))
+            append("link opened from Mac")
+        } catch (e: ActivityNotFoundException) {
+            append("link open failed: ${e.message}")
+        }
     }
 
     private fun sendTextLink(raw: String) {

@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(beginPairing(_:)),
         keyEquivalent: "p"
     )
+    private let sendTextItem = NSMenuItem(
+        title: "Send Text/Link to Android…",
+        action: #selector(sendTextLink(_:)),
+        keyEquivalent: "t"
+    )
     private let advertiseItem = NSMenuItem(
         title: "Start advertising",
         action: #selector(toggleAdvertising(_:)),
@@ -42,12 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         advertiseItem.target = self
 
         pairItem.target = self
+        sendTextItem.target = self
 
         menu.addItem(header)
         menu.addItem(.separator())
         menu.addItem(stateItem)
         menu.addItem(advertiseItem)
         menu.addItem(pairItem)
+        menu.addItem(sendTextItem)
         menu.addItem(.separator())
         menu.addItem(
             NSMenuItem(
@@ -109,6 +116,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }) { complete in
             complete(Self.presentLocalNetworkExplanation())
         }
+    }
+
+    @objc private func sendTextLink(_ sender: NSMenuItem) {
+        guard let pairingController else {
+            stateItem.title = "text/link: no active Android session"
+            return
+        }
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.placeholderString = "Text or https:// link"
+
+        let alert = NSAlert()
+        alert.messageText = "Send to Android"
+        alert.informativeText = "Text will be copied on Android after confirmation; links open after confirmation."
+        alert.alertStyle = .informational
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            stateItem.title = "text/link send cancelled"
+            return
+        }
+        pairingController.sendTextLink(raw: input.stringValue)
     }
 
     @objc private func toggleAdvertising(_ sender: NSMenuItem) {

@@ -35,6 +35,16 @@ data class TextLinkMessage(
 
         fun url(value: String): TextLinkMessage = TextLinkMessage(TextLinkKind.URL, value)
 
+        fun fromJson(payload: Json.Obj): TextLinkMessage {
+            val rawKind = (payload["kind"] as? Json.Str)?.value
+                ?: throw IllegalArgumentException("kind must be text or url")
+            val value = (payload["value"] as? Json.Str)?.value
+                ?: throw IllegalArgumentException("value must be string")
+            val kind = TextLinkKind.entries.firstOrNull { it.wireName == rawKind }
+                ?: throw IllegalArgumentException("kind must be text or url")
+            return TextLinkMessage(kind, value)
+        }
+
         private fun isAllowedUrl(value: String): Boolean {
             val scheme = runCatching { URI(value).scheme?.lowercase() }.getOrNull()
             return scheme == "http" || scheme == "https"

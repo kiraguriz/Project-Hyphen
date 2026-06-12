@@ -21,6 +21,7 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var pendingFingerprint: Data?
     private var provisionalConnection: NWConnection?
     private var activeSession: ProtocolSession?
+    private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
     private let onStatus: (String) -> Void
@@ -86,6 +87,7 @@ final class PairingController: NSObject, NSWindowDelegate {
         listener = nil
         activeSession?.stop()
         activeSession = nil
+        activeSessionToken = nil
         provisionalConnection?.cancel()
         provisionalConnection = nil
         pendingFingerprint = nil
@@ -241,12 +243,17 @@ final class PairingController: NSObject, NSWindowDelegate {
                     self.onStatus("Session handshake failed: \(error)")
                 }
             case .success(let handshake):
+                let sessionToken = UUID()
                 var callbacks = ProtocolSession.Callbacks()
                 callbacks.onEnvelope = { [weak self] envelope in
                     self?.handleSessionEnvelope(envelope)
                 }
                 callbacks.onClosed = { [weak self] in
                     DispatchQueue.main.async {
+                        if self?.activeSessionToken == sessionToken {
+                            self?.activeSession = nil
+                            self?.activeSessionToken = nil
+                        }
                         self?.onStatus("Phone session closed")
                     }
                 }
@@ -258,7 +265,9 @@ final class PairingController: NSObject, NSWindowDelegate {
                     config: config,
                     callbacks: callbacks
                 )
+                self.activeSession?.stop()
                 self.activeSession = session
+                self.activeSessionToken = sessionToken
                 session.start(replaying: handshake.leftover)
                 DispatchQueue.main.async {
                     let name = handshake.peerDeviceName ?? "Android device"
@@ -266,6 +275,33 @@ final class PairingController: NSObject, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    func sendTextLink(raw: String) {
+        guard let session = activeSession else {
+            onStatus("text/link: no active Android session")
+            return
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let kind: TextLinkKind = Self.isHTTPURL(trimmed) ? .url : .text
+            let message = try TextLinkMessage(kind: kind, value: trimmed)
+            let id = TextLinkSender(outbox: ProtocolSessionTextLinkOutbox(session: session)).send(message)
+            if let id {
+                onStatus("text/link sent: \(id)")
+            } else {
+                onStatus("text/link send failed: session closed")
+            }
+        } catch {
+            onStatus("text/link rejected: \(error)")
+        }
+    }
+
+    private static func isHTTPURL(_ value: String) -> Bool {
+        guard let scheme = URLComponents(string: value)?.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "http" || scheme == "https"
     }
 
     private func handleSessionEnvelope(_ envelope: Envelope) {
