@@ -25,10 +25,14 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSessionToken: UUID?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
-    private let diagnosticLogs = LocalStructuredLogStore()
+    private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
 
-    init(onStatus: @escaping (String) -> Void) {
+    init(
+        diagnosticLogs: LocalStructuredLogStore = LocalStructuredLogStore(),
+        onStatus: @escaping (String) -> Void
+    ) {
+        self.diagnosticLogs = diagnosticLogs
         self.onStatus = onStatus
     }
 

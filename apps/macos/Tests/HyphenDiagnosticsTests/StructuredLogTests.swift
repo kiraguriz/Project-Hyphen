@@ -78,6 +78,64 @@ final class StructuredLogTests: XCTestCase {
             )
         )
     }
+
+    func testRedactedExporterIncludesCodesWithoutSensitiveCallbackDetail() throws {
+        let store = LocalStructuredLogStore(clock: { 100 })
+        let callbacks = ProtocolSession.Callbacks()
+        let wrapped = DiagnosticProtocolSessionCallbacks.wrap(store: store, forwarding: callbacks)
+        let sensitiveDetail = "notification body /Users/alice/private.txt https://secret.example"
+        wrapped.onProtocolError("transport/frame-too-large", sensitiveDetail)
+
+        let json = try RedactedDiagnosticsExporter(
+            logs: store,
+            appVersion: "0.0.1",
+            osMajor: 15,
+            osMinor: 5,
+            osPatch: 0,
+            clock: { 200 }
+        ).previewJSON()
+
+        XCTAssertFalse(json.contains("notification body"))
+        XCTAssertFalse(json.contains("/Users/alice"))
+        XCTAssertFalse(json.contains("https://secret.example"))
+
+        let bundle = try XCTUnwrap(parseObject(json))
+        XCTAssertEqual(bundle["schema"] as? String, "hyphen-diagnostics-v0")
+        XCTAssertEqual(bundle["platform"] as? String, "macos")
+        XCTAssertEqual(bundle["appVersion"] as? String, "0.0.1")
+        XCTAssertEqual(bundle["eventCount"] as? Int, 1)
+        XCTAssertEqual((bundle["os"] as? [String: Int])?["major"], 15)
+
+        let events = try XCTUnwrap(bundle["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["code"] as? String, "transport/frame-too-large")
+        XCTAssertEqual(events[0]["category"] as? String, "transport")
+        XCTAssertEqual(events[0]["level"] as? String, "error")
+    }
+
+    func testRedactedExporterDeleteClearsNextBundle() throws {
+        let store = LocalStructuredLogStore(clock: { 100 })
+        try store.recordFailure(code: "protocol/invalid-envelope", component: "protocol-session", operation: "decode")
+        let exporter = RedactedDiagnosticsExporter(
+            logs: store,
+            appVersion: "0.0.1",
+            osMajor: 15,
+            osMinor: 5,
+            osPatch: 0,
+            clock: { 200 }
+        )
+
+        exporter.deleteLocalDiagnostics()
+
+        let bundle = try XCTUnwrap(parseObject(try exporter.previewJSON()))
+        XCTAssertEqual(bundle["eventCount"] as? Int, 0)
+        XCTAssertEqual((bundle["events"] as? [[String: Any]])?.count, 0)
+    }
+
+    private func parseObject(_ json: String) throws -> [String: Any]? {
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
 }
 
 private extension Array {

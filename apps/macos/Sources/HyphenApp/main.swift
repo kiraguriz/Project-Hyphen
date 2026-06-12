@@ -1,7 +1,9 @@
 import AppKit
 import HyphenCore
+import HyphenDiagnostics
 import HyphenDiscovery
 import HyphenPower
+import UniformTypeIdentifiers
 
 // Menu-bar-only skeleton (HYP-M1-010) + Bonjour advertise PoC toggle
 // (HYP-M1-011) + sleep/wake observer (HYP-M1-013). Advertising starts only
@@ -13,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var sleepWakeObserver: SleepWakeObserver?
     private var reconnectMachine: ReconnectStateMachine?
     private var pairingController: PairingController?
+    private let diagnosticLogs = LocalStructuredLogStore()
     private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
     private let pairItem = NSMenuItem(
         title: "Pair New Device…",
@@ -28,6 +31,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title: "Start advertising",
         action: #selector(toggleAdvertising(_:)),
         keyEquivalent: "a"
+    )
+    private let previewDiagnosticsItem = NSMenuItem(
+        title: "Preview Diagnostics…",
+        action: #selector(previewDiagnostics(_:)),
+        keyEquivalent: "d"
+    )
+    private let exportDiagnosticsItem = NSMenuItem(
+        title: "Export Diagnostics…",
+        action: #selector(exportDiagnostics(_:)),
+        keyEquivalent: "e"
+    )
+    private let deleteDiagnosticsItem = NSMenuItem(
+        title: "Delete Diagnostics",
+        action: #selector(deleteDiagnostics(_:)),
+        keyEquivalent: ""
     )
     private let stateItem = NSMenuItem(title: "Not advertising", action: nil, keyEquivalent: "")
 
@@ -48,6 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         pairItem.target = self
         sendTextItem.target = self
+        previewDiagnosticsItem.target = self
+        exportDiagnosticsItem.target = self
+        deleteDiagnosticsItem.target = self
 
         menu.addItem(header)
         menu.addItem(.separator())
@@ -55,6 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(advertiseItem)
         menu.addItem(pairItem)
         menu.addItem(sendTextItem)
+        menu.addItem(.separator())
+        menu.addItem(previewDiagnosticsItem)
+        menu.addItem(exportDiagnosticsItem)
+        menu.addItem(deleteDiagnosticsItem)
         menu.addItem(.separator())
         menu.addItem(
             NSMenuItem(
@@ -108,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lnpGate.run(action: { [weak self] in
             guard let self else { return }
             if self.pairingController == nil {
-                self.pairingController = PairingController { [weak self] status in
+                self.pairingController = PairingController(diagnosticLogs: self.diagnosticLogs) { [weak self] status in
                     self?.stateItem.title = status
                 }
             }
@@ -140,6 +165,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         pairingController.sendTextLink(raw: input.stringValue)
+    }
+
+    @objc private func previewDiagnostics(_ sender: NSMenuItem) {
+        do {
+            let json = try diagnosticsExporter().previewJSON()
+            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+            textView.isEditable = false
+            textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            textView.string = json
+
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+            scroll.hasVerticalScroller = true
+            scroll.documentView = textView
+
+            let alert = NSAlert()
+            alert.messageText = "Diagnostics preview"
+            alert.informativeText = "Local, redacted bundle. Review before exporting."
+            alert.alertStyle = .informational
+            alert.accessoryView = scroll
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            stateItem.title = "Diagnostics previewed (\(diagnosticLogs.snapshot().count) event(s))"
+        } catch {
+            stateItem.title = "Diagnostics preview failed: \(error)"
+        }
+    }
+
+    @objc private func exportDiagnostics(_ sender: NSMenuItem) {
+        do {
+            let json = try diagnosticsExporter().exportText()
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "hyphen-diagnostics.json"
+            panel.allowedContentTypes = [.json]
+            panel.canCreateDirectories = true
+            NSApp.activate(ignoringOtherApps: true)
+            guard panel.runModal() == .OK, let url = panel.url else {
+                stateItem.title = "Diagnostics export cancelled"
+                return
+            }
+            try json.write(to: url, atomically: true, encoding: .utf8)
+            stateItem.title = "Diagnostics exported"
+        } catch {
+            stateItem.title = "Diagnostics export failed: \(error)"
+        }
+    }
+
+    @objc private func deleteDiagnostics(_ sender: NSMenuItem) {
+        let count = diagnosticLogs.snapshot().count
+        diagnosticsExporter().deleteLocalDiagnostics()
+        stateItem.title = "Diagnostics deleted (\(count) event(s))"
+    }
+
+    private func diagnosticsExporter() -> RedactedDiagnosticsExporter {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        return RedactedDiagnosticsExporter(
+            logs: diagnosticLogs,
+            appVersion: HyphenCore.version,
+            osMajor: os.majorVersion,
+            osMinor: os.minorVersion,
+            osPatch: os.patchVersion
+        )
     }
 
     @objc private func toggleAdvertising(_ sender: NSMenuItem) {

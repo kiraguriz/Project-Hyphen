@@ -130,3 +130,72 @@ public enum DiagnosticProtocolSessionCallbacks {
         )
     }
 }
+
+public final class RedactedDiagnosticsExporter {
+    private let logs: LocalStructuredLogStore
+    private let appVersion: String
+    private let osMajor: Int
+    private let osMinor: Int
+    private let osPatch: Int
+    private let clock: () -> Int64
+
+    public init(
+        logs: LocalStructuredLogStore,
+        appVersion: String,
+        osMajor: Int,
+        osMinor: Int,
+        osPatch: Int,
+        clock: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    ) {
+        self.logs = logs
+        self.appVersion = appVersion
+        self.osMajor = osMajor
+        self.osMinor = osMinor
+        self.osPatch = osPatch
+        self.clock = clock
+    }
+
+    public func previewJSON() throws -> String {
+        try encodeBundle()
+    }
+
+    public func exportText() throws -> String {
+        try previewJSON()
+    }
+
+    public func deleteLocalDiagnostics() {
+        logs.clear()
+    }
+
+    private func encodeBundle() throws -> String {
+        let events = logs.snapshot()
+        let bundle: [String: Any] = [
+            "schema": "hyphen-diagnostics-v0",
+            "generatedAtUnixMs": clock(),
+            "platform": "macos",
+            "appVersion": appVersion,
+            "os": [
+                "major": osMajor,
+                "minor": osMinor,
+                "patch": osPatch,
+            ],
+            "eventCount": events.count,
+            "events": events.map(eventDictionary),
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: bundle,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func eventDictionary(_ event: StructuredLogEvent) -> [String: Any] {
+        [
+            "timestampUnixMs": event.timestampUnixMs,
+            "level": event.level.rawValue,
+            "category": event.category,
+            "code": event.code,
+            "attributes": event.attributes,
+        ]
+    }
+}
