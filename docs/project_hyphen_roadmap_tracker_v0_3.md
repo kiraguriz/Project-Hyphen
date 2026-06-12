@@ -200,7 +200,7 @@ gantt
 | HYP-M4-009 | `[?]` | P1 | UX | Improve onboarding copy for permissions | HYP-M4-005 | Copy review/update complete; user-comprehension validation blocked by missing device matrix/beta feedback | Review/beta feedback |
 | HYP-M4-010 | `[?]` | P1 | UX | Add peer management screen | HYP-M2-006 | Revoke/reset peer works | Manual test |
 | HYP-M4-011 | `[x]` | P1 | Beta | Prepare private beta release notes | HYP-M4-001..010 | Draft notes list known issues, blockers, unsupported cases, and feedback fields | Manual review |
-| HYP-M4-012 | `[ ]` | P1 | Beta | Recruit 20–50 technical beta users | HYP-M4-011 | Feedback channel and bug template ready | Manual |
+| HYP-M4-012 | `[?]` | P1 | Beta | Recruit 20–50 technical beta users | HYP-M4-011 | Recruiting plan and bug template ready; actual cohort/channel blocked by external maintainer action | Manual |
 
 ---
 
@@ -355,7 +355,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 15 | 0 | 0 | 0 |
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
-| M4 Beta Hardening | 4 | 0 | 7 | 1 |
+| M4 Beta Hardening | 4 | 0 | 8 | 0 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
 | M6 Stabilization | 3 | 0 | 4 | 3 |
 
@@ -451,3 +451,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M6-008 `[?]` — Ran dependency/license audit and added `docs/reports/hyp-m6-008-dependency-license-audit.md`. Evidence included Android release runtime dependency report (`kotlin-stdlib` + JetBrains annotations only), unit-test runtime report (JUnit/Hamcrest test-only), build-time plugin POM license checks, macOS SwiftPM inspection (no external packages), script/tooling manifest scan, and vendored binary scan (only `apps/android/gradle/wrapper/gradle-wrapper.jar`, SHA-256 recorded). No GPL/AGPL/proprietary runtime dependency was found. **Blocker**: public-release license readiness still needs canonical root license files for MPL-2.0/Apache-2.0/CC-BY-4.0, a top-level license map, NOTICE/SPDX/header policy, and DCO/CLA decision before HYP-M6-008 can claim no blocking license issue.
 - 2026-06-12 — HYP-M4-009 `[?]` — **Copy pass complete, user-comprehension validation blocked.** Updated Android notification-listener onboarding copy to lead with the sensitive access ("titles, actions, and content"), paired-Mac/local-TLS destination, no cloud relay/history store, hidden-body fallback, SMS/Call Log exclusion, and Android Settings disable path. Added `docs/reports/hyp-m4-009-permission-onboarding-copy-review.md` inventorying the current permission/special-access surfaces and beta tester questions. **Blocker**: the row's acceptance requires review/beta feedback that users understand each permission; HYP-M4-005 has no attached Android device matrix and no beta feedback corpus exists yet.
 - 2026-06-12 — HYP-M4-011 `[x]` — Added `docs/release/private-beta-release-notes.md` for technical private beta testers. The draft lists what to test, privacy/safety defaults, known blocked matrix and reliability areas, unsupported v1 surfaces, required feedback fields, and stop conditions. Manual review complete; no runtime behavior changed. HYP-M4-012 remains the external recruiting/channel task.
+- 2026-06-12 — HYP-M4-012 `[?]` — Added `docs/release/private-beta-feedback.md` plus `.github/ISSUE_TEMPLATE/private_beta_bug.yml`. The local packet defines target cohorts, channel setup checklist, invitation copy, bug-report fields, safety checklist, and triage rules. **Blocker**: recruiting 20-50 technical beta users and configuring the actual private feedback channel require external maintainer action; no invited tester list, accepted cohort, or beta feedback corpus exists in this repo.

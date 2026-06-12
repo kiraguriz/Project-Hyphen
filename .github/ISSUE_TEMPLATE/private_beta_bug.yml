@@ -1,0 +1,129 @@
+name: Private beta bug report
+description: Report a Project Hyphen private beta issue with redacted evidence.
+title: "[Private beta] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Project Hyphen. Do not include notification text, file contents, URLs, IP addresses, passwords, tokens, private contact details, or personal device identifiers.
+
+        If this is a security issue or privacy leak, stop here and follow SECURITY.md instead of opening a normal issue.
+  - type: input
+    id: build
+    attributes:
+      label: Build or commit
+      description: Commit hash, package checksum, or local build label.
+      placeholder: e.g. 8d0c052 or Hyphen-macOS-0.0.1 SHA-256
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - macOS
+        - Cross-device
+        - Packaging / release
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android device and OS
+      description: Model, Android version, OEM skin, and install track if applicable.
+      placeholder: e.g. Pixel 8, Android 16, AOSP, debug APK
+  - type: input
+    id: macos
+    attributes:
+      label: Mac model and macOS version
+      description: Mac family/model and macOS version if applicable.
+      placeholder: e.g. MacBook Pro M3, macOS 15.5
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network case
+      options:
+        - Same-SSID home Wi-Fi
+        - Mesh Wi-Fi
+        - Phone hotspot
+        - AP/client isolation
+        - Enterprise or public Wi-Fi
+        - VPN or private DNS active
+        - Android restricted LAN mode
+        - Permission denied / fallback mode
+        - Not network-related
+    validations:
+      required: true
+  - type: dropdown
+    id: scenario
+    attributes:
+      label: Scenario
+      options:
+        - First pairing / SAS confirmation
+        - mDNS / Bonjour discovery
+        - QR or manual endpoint fallback
+        - Notification mirror / update / remove
+        - Notification dismiss
+        - Quick Reply beta
+        - Text or link send
+        - File transfer / resume / cancel
+        - Sleep/wake or network reconnect
+        - Diagnostics preview / export / delete
+        - Beta diagnostics opt-in
+        - Packaging / install / signing
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - fail
+        - blocked
+        - pass
+        - not-run
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use exact actions. Keep sensitive content out.
+      placeholder: |
+        1. Open Hyphen on Android.
+        2. Pair with Mac through QR/manual endpoint.
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      placeholder: What should Hyphen have done?
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+      placeholder: What actually happened? Include exact visible error text when safe.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Attach or reference redacted diagnostics, screenshots, or local notes. Do not paste sensitive payloads.
+      placeholder: e.g. redacted diagnostics export attached; compatibility matrix row updated.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed notification text, file contents, URLs, IP addresses, passwords, tokens, private contact details, and personal device identifiers.
+          required: true
+        - label: This is not an exploitable security/privacy report; if it is, I will use SECURITY.md instead.
+          required: true
