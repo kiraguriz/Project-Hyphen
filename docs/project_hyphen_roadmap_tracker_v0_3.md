@@ -232,7 +232,7 @@ gantt
 | HYP-M6-005 | `[x]` | P0 | Notifications | Finalize notification duplicate prevention | HYP-M4-008 | Duplicate notification rate acceptable | Test log |
 | HYP-M6-006 | `[x]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
 | HYP-M6-007 | `[x]` | P1 | Security | Run final threat-model review | HYP-M6-006 | New risks captured | Review notes |
-| HYP-M6-008 | `[ ]` | P1 | License | Run dependency/license audit | HYP-M5-004 | No blocking dependency/license issue | Audit report |
+| HYP-M6-008 | `[?]` | P1 | License | Run dependency/license audit | HYP-M5-004 | Audit complete; public-release license gate blocked by missing formal root license files/map/notice policy | Audit report |
 | HYP-M6-009 | `[ ]` | P0 | Release | Create v1.0 release candidate | HYP-M6-001..008 | RC artifacts published privately | Release checklist |
 | HYP-M6-010 | `[ ]` | P0 | Release | Tag v1.0 | HYP-M6-009 | Git tag, release notes, checksums, docs | GitHub release |
 
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 6 | 3 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
-| M6 Stabilization | 3 | 0 | 3 | 4 |
+| M6 Stabilization | 3 | 0 | 4 | 3 |
 
 Update this summary after each milestone review.
 
@@ -448,3 +448,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M6-004 `[?]` — **Final 1 GiB resume behavior blocked.** HYP-M3-015 provides the deterministic fixture generator and manual run log, but this finalization requires successful observed runs across at least three Android/macOS/network combinations. HYP-M4-005 currently has no attached Android devices, and HYP-M4-006 lacks the required additional macOS combinations plus a paired Android session. **Blocker**: three real paired-device/network test combinations are unavailable in this environment.
 - 2026-06-12 — HYP-M6-006 `[x]` — Froze `docs/protocol/hyphen-protocol-v0.md` for the current pre-alpha v0 wire behavior and synced drift found during manual review: `hello` uses `requiresAck: false` with responder `hello` as the handshake acknowledgment, `seq` is per-sender/per-connection with `hello` consuming `seq: 1`, trace IDs are exported only behind the default-off beta diagnostics opt-in, notification identity stays `StatusBarNotification.getKey()`, transfer progress is local-only UI state, and remaining feature-bitmap/heartbeat/flow-control/persistent-checkpoint questions are explicitly post-v0. Updated schema descriptions in `protocol/schema/envelope.schema.json` and `protocol/schema/transfer-manifest.schema.json` without changing validation rules. Verification: `./scripts/test-protocol.sh` and `./scripts/check.sh`.
 - 2026-06-12 — HYP-M6-007 `[x]` — Ran final local threat-model review against the frozen protocol docs, ADR-0001/0003, diagnostics behavior, and public beta checklist. Added `docs/reports/hyp-m6-007-threat-model-review.md` and updated `docs/protocol/threat-model.md` to capture new/updated risks: local dry-run artifacts mistaken for public beta artifacts, placeholder F-Droid metadata submission/mirroring, Play/F-Droid policy drift, beta diagnostics trace-ID correlation, broader physical-access action risk, and per-source listener rate limiting as an accepted post-v0 availability residual. Verification: manual review plus `./scripts/check.sh`.
+- 2026-06-12 — HYP-M6-008 `[?]` — Ran dependency/license audit and added `docs/reports/hyp-m6-008-dependency-license-audit.md`. Evidence included Android release runtime dependency report (`kotlin-stdlib` + JetBrains annotations only), unit-test runtime report (JUnit/Hamcrest test-only), build-time plugin POM license checks, macOS SwiftPM inspection (no external packages), script/tooling manifest scan, and vendored binary scan (only `apps/android/gradle/wrapper/gradle-wrapper.jar`, SHA-256 recorded). No GPL/AGPL/proprietary runtime dependency was found. **Blocker**: public-release license readiness still needs canonical root license files for MPL-2.0/Apache-2.0/CC-BY-4.0, a top-level license map, NOTICE/SPDX/header policy, and DCO/CLA decision before HYP-M6-008 can claim no blocking license issue.
