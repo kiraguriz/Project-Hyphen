@@ -195,7 +195,7 @@ gantt
 | HYP-M4-004 | `[ ]` | P1 | Diagnostics | Implement opt-in beta diagnostics toggle | HYP-M4-002,HYP-M4-003 | Off by default; clear copy; disable works | Manual test |
 | HYP-M4-005 | `[ ]` | P0 | Compatibility | Fill Android device matrix with first 5 devices | HYP-M3-001..015 | Results recorded with OS/OEM/network | Manual matrix |
 | HYP-M4-006 | `[ ]` | P0 | Compatibility | Fill macOS matrix with 3 OS/device combos | HYP-M3-001..015 | Results recorded | Manual matrix |
-| HYP-M4-007 | `[ ]` | P0 | Reliability | Test sleep/wake reconnect across 20 cycles | HYP-M2-013,HYP-M1-014 | Median reconnect <30s or clear error | Test log |
+| HYP-M4-007 | `[?]` | P0 | Reliability | Test sleep/wake reconnect across 20 cycles | HYP-M2-013,HYP-M1-014 | Median reconnect <30s or clear error | Test log |
 | HYP-M4-008 | `[ ]` | P0 | Reliability | Notification storm test | HYP-M3-004 | No duplicate flood; UI remains responsive | Manual/automated test |
 | HYP-M4-009 | `[ ]` | P1 | UX | Improve onboarding copy for permissions | HYP-M4-005 | Users understand why each permission is requested | Review/beta feedback |
 | HYP-M4-010 | `[ ]` | P1 | UX | Add peer management screen | HYP-M2-006 | Revoke/reset peer works | Manual test |
@@ -355,7 +355,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 0 | 0 | 2 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
-| M4 Beta Hardening | 2 | 0 | 1 | 9 |
+| M4 Beta Hardening | 2 | 0 | 2 | 8 |
 | M5 Distribution | 0 | 0 | 0 | 10 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
 
@@ -411,3 +411,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M4-001 `[x]` — Added local structured diagnostics logs on both platforms. Android `LocalStructuredLogStore` and macOS `HyphenDiagnostics` now keep bounded in-memory events with timestamp, level, taxonomy category, failure code, and tokenized metadata only; session callback adapters record `protocol/ack-timeout` and protocol/transport failure codes while deliberately omitting callback detail, payloads, notification text, URLs, file paths, and file contents. The debug apps wrap active `ProtocolSession` callbacks with these local stores; export/delete UI is deferred to HYP-M4-002/003. Verified: `./gradlew test assembleDebug` green; `swift test` green.
 - 2026-06-12 — HYP-M4-002 `[?]` — **Implementation complete, manual verification blocked.** Android now has `RedactedDiagnosticsExporter`, producing a local JSON bundle (`hyphen-diagnostics-v0`) with platform, app version, SDK, event count, and redacted structured events only. MainActivity exposes explicit user actions to preview the JSON, share/export it via `ACTION_SEND`, and delete local diagnostics. Tests prove callback detail containing notification text, file paths, and URLs is not present in the export and deletion clears the next bundle. Verified: `./gradlew test assembleDebug` green. **Blocker**: `adb devices` lists no Android device/emulator, so the required preview/export/delete manual UI test cannot run here.
 - 2026-06-12 — HYP-M4-003 `[x]` — Added macOS redacted diagnostics export. `HyphenDiagnostics.RedactedDiagnosticsExporter` now builds the same local `hyphen-diagnostics-v0` JSON bundle with app version, coarse macOS version, event count, and redacted structured events; AppDelegate and PairingController share one diagnostics store, and the menu bar app now exposes Preview Diagnostics, Export Diagnostics (user-selected JSON file via `NSSavePanel`), and Delete Diagnostics actions. Tests prove callback detail containing notification text, file paths, and URLs is absent from the bundle and deletion clears the next export. Verified: `swift test` green; `swift run HyphenApp` launch smoke clean.
+- 2026-06-12 — HYP-M4-007 `[?]` — **Manual reliability test blocked.** The implementation prerequisites are present (`SleepWakeObserver`, `ReconnectStateMachine`, and session reconnect all have automated tests), and the Wake/reconnect test-log template already exists in this tracker. The acceptance criterion requires 20 real Mac sleep/wake cycles with observed reconnect timing; this was not run because autonomously sleeping the user's active Mac repeatedly is unsafe and needs explicit human scheduling/observation. **Blocker**: manual 20-cycle sleep/wake session not authorized/run.
