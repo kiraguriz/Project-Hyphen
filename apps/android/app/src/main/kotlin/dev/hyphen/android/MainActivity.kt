@@ -59,6 +59,7 @@ import dev.hyphen.android.transport.ProtocolSession
 import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
+import dev.hyphen.android.trust.TrustedPeer
 import javax.net.ssl.SSLSocket
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
@@ -117,6 +118,10 @@ class MainActivity : Activity() {
                 append("associations: $ids")
                 ids.forEach(cdm::disassociate)
             }
+        }
+        val managePeersButton = Button(this).apply {
+            text = "Manage paired devices"
+            setOnClickListener { showPeerManagement() }
         }
 
         // Notification listener onboarding (HYP-M3-001): explicit user
@@ -179,6 +184,7 @@ class MainActivity : Activity() {
                 addView(connectButton)
                 addView(associateButton)
                 addView(listButton)
+                addView(managePeersButton)
                 addView(notificationStatusButton)
                 addView(notificationSettingsButton)
                 addView(notificationPrivacyButton)
@@ -213,6 +219,84 @@ class MainActivity : Activity() {
                 append("cdm: self-managed association needs API 33+ (QR-only on this device)")
         }
     }
+
+    private fun showPeerManagement() {
+        try {
+            val store = AndroidTrustStores.openDefault(applicationContext)
+            val peers = store.allPeers()
+            if (peers.isEmpty()) {
+                AlertDialog.Builder(this)
+                    .setTitle("Paired devices")
+                    .setMessage("No trusted peers are stored on this phone.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Paired devices")
+                .setItems(peers.map(::peerLabel).toTypedArray()) { _, which ->
+                    confirmForgetPeer(peers[which])
+                }
+                .setMessage("Tap a device to forget it, or reset all local trust.")
+                .setPositiveButton("Reset all") { _, _ -> confirmResetPeers(peers.size) }
+                .setNegativeButton("Close", null)
+                .show()
+        } catch (e: Exception) {
+            append("peer management failed: ${e.message}")
+        }
+    }
+
+    private fun confirmForgetPeer(peer: TrustedPeer) {
+        AlertDialog.Builder(this)
+            .setTitle("Forget ${peer.displayName.ifBlank { "peer" }}?")
+            .setMessage(
+                "This removes the pinned fingerprint ${fingerprintPrefix(peer.spkiFingerprint)}. " +
+                    "Pair again before this device can reconnect.",
+            )
+            .setPositiveButton("Forget") { _, _ ->
+                try {
+                    val removed = AndroidTrustStores.openDefault(applicationContext).remove(peer.spkiFingerprint)
+                    stopCurrentSessionAfterTrustChange()
+                    append("peer forgotten: ${peer.displayName.ifBlank { "unnamed" }} removed=$removed")
+                } catch (e: Exception) {
+                    append("peer forget failed: ${e.message}")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmResetPeers(count: Int) {
+        AlertDialog.Builder(this)
+            .setTitle("Reset paired devices?")
+            .setMessage("This removes $count trusted peer(s). Pair again before any device can reconnect.")
+            .setPositiveButton("Reset") { _, _ ->
+                try {
+                    AndroidTrustStores.openDefault(applicationContext).removeAll()
+                    stopCurrentSessionAfterTrustChange()
+                    append("paired devices reset: $count removed")
+                } catch (e: Exception) {
+                    append("peer reset failed: ${e.message}")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun stopCurrentSessionAfterTrustChange() {
+        activeSession?.stop()
+        activeSession = null
+        resumeToken = null
+        lastSessionId = null
+        lastTransferProgress = null
+        HyphenNotificationListenerRuntime.clearNotificationOutbox()
+    }
+
+    private fun peerLabel(peer: TrustedPeer): String =
+        "${peer.displayName.ifBlank { "Unnamed peer" }} (${fingerprintPrefix(peer.spkiFingerprint)})"
+
+    private fun fingerprintPrefix(fingerprint: ByteArray): String =
+        fingerprint.take(6).joinToString("") { "%02x".format(it) }
 
     private fun probeManualEndpoint(raw: String) {
         val isQr = raw.trim().startsWith("hyphen://")

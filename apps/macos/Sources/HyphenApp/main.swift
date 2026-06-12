@@ -22,6 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(beginPairing(_:)),
         keyEquivalent: "p"
     )
+    private let managePeersItem = NSMenuItem(
+        title: "Manage Paired Devices…",
+        action: #selector(managePeers(_:)),
+        keyEquivalent: ""
+    )
     private let sendTextItem = NSMenuItem(
         title: "Send Text/Link to Android…",
         action: #selector(sendTextLink(_:)),
@@ -75,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         advertiseItem.target = self
 
         pairItem.target = self
+        managePeersItem.target = self
         sendTextItem.target = self
         cancelTransferItem.target = self
         previewDiagnosticsItem.target = self
@@ -88,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(stateItem)
         menu.addItem(advertiseItem)
         menu.addItem(pairItem)
+        menu.addItem(managePeersItem)
         menu.addItem(sendTextItem)
         menu.addItem(cancelTransferItem)
         menu.addItem(.separator())
@@ -180,6 +187,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         pairingController.sendTextLink(raw: input.stringValue)
+    }
+
+    @objc private func managePeers(_ sender: NSMenuItem) {
+        do {
+            let store = KeychainTrustStore()
+            let peers = try store.allPeers().sorted { lhs, rhs in
+                lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            if peers.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "Paired devices"
+                alert.informativeText = "No trusted peers are stored on this Mac."
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+                stateItem.title = "No paired devices"
+                return
+            }
+
+            let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26), pullsDown: false)
+            peers.forEach { picker.addItem(withTitle: peerLabel($0)) }
+
+            let alert = NSAlert()
+            alert.messageText = "Paired devices"
+            alert.informativeText = "Forgetting a peer removes its pinned fingerprint and stops any active session. Pair again to reconnect."
+            alert.alertStyle = .warning
+            alert.accessoryView = picker
+            alert.addButton(withTitle: "Forget Selected")
+            alert.addButton(withTitle: "Reset All")
+            alert.addButton(withTitle: "Close")
+            NSApp.activate(ignoringOtherApps: true)
+
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                try forgetPeer(peers[picker.indexOfSelectedItem], store: store)
+            case .alertSecondButtonReturn:
+                confirmResetPeers(count: peers.count, store: store)
+            default:
+                stateItem.title = "Paired devices unchanged"
+            }
+        } catch {
+            stateItem.title = "Peer management failed: \(error)"
+        }
+    }
+
+    private func forgetPeer(_ peer: TrustedPeer, store: KeychainTrustStore) throws {
+        let removed = try store.remove(fingerprint: peer.spkiFingerprint)
+        pairingController?.endPairing()
+        stateItem.title = "Forgot \(peer.displayName.isEmpty ? "peer" : peer.displayName) (removed=\(removed))"
+    }
+
+    private func confirmResetPeers(count: Int, store: KeychainTrustStore) {
+        let alert = NSAlert()
+        alert.messageText = "Reset paired devices?"
+        alert.informativeText = "This removes \(count) trusted peer(s) and stops any active session. Pair again before any device can reconnect."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            stateItem.title = "Paired devices unchanged"
+            return
+        }
+        do {
+            try store.removeAll()
+            pairingController?.endPairing()
+            stateItem.title = "Paired devices reset (\(count) removed)"
+        } catch {
+            stateItem.title = "Peer reset failed: \(error)"
+        }
+    }
+
+    private func peerLabel(_ peer: TrustedPeer) -> String {
+        let name = peer.displayName.isEmpty ? "Unnamed peer" : peer.displayName
+        return "\(name) (\(fingerprintPrefix(peer.spkiFingerprint)))"
+    }
+
+    private func fingerprintPrefix(_ fingerprint: Data) -> String {
+        fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
     @objc private func cancelActiveTransfer(_ sender: NSMenuItem) {
