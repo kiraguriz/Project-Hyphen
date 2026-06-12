@@ -169,7 +169,8 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
   "text": "See you soon",
   "category": "msg",
   "clearable": true,
-  "ongoing": false
+  "ongoing": false,
+  "replyActions": [{ "actionIndex": 2, "label": "Reply" }]
 }
 ```
 
@@ -182,6 +183,7 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
 | `category` | string | no | Android notification category when present |
 | `clearable` | boolean | yes | Whether Android reports the notification as clearable |
 | `ongoing` | boolean | yes | Whether Android reports the notification as ongoing |
+| `replyActions` | array | no | RemoteInput-capable Android actions only. Each item has non-negative integer `actionIndex` (index in Android `Notification.actions`) and display `label`. Omitted when no compatible reply action exists. |
 
 `notification.dismiss.request` is sent from macOS to Android with:
 
@@ -196,6 +198,20 @@ Android replies with `notification.dismiss.result`:
 ```
 
 If Android cannot cancel the notification, the result MUST carry `success: false` and an error code from §8, for example `permission/notifications-denied` when notification-listener access is unavailable or `plugin/notification-key-not-found` when the key cannot be cancelled.
+
+`notification.reply.request` is sent from macOS to Android only for mirrored notifications that advertised at least one `replyActions` item:
+
+```json
+{ "sbnKey": "0|com.example.chat|7|thread-123|10101", "actionIndex": 2, "text": "On my way" }
+```
+
+Android replies with `notification.reply.result`:
+
+```json
+{ "sbnKey": "0|com.example.chat|7|thread-123|10101", "success": true }
+```
+
+If Android cannot send the RemoteInput reply, the result MUST carry `success: false` and an error code from §8, for example `permission/notifications-denied` when notification-listener access is unavailable, `plugin/notification-key-not-found` when the Android key no longer exists, or `plugin/reply-unavailable` when the action index is absent, has no RemoteInput, or its PendingIntent is no longer sendable. Quick Reply remains beta in v0 and must be advertised/tested only for compatible app families.
 
 ### 7.2 `text.send` payload
 

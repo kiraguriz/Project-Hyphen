@@ -8,12 +8,14 @@ class HyphenNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         HyphenNotificationListenerRuntime.setCanceller(AndroidNotificationCanceller(this))
+        HyphenNotificationListenerRuntime.setReplier(AndroidNotificationReplier(this))
         HyphenNotificationListenerRuntime.onConnected()
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         HyphenNotificationListenerRuntime.clearCanceller()
+        HyphenNotificationListenerRuntime.clearReplier()
         HyphenNotificationListenerRuntime.onDisconnected()
     }
 
@@ -29,6 +31,7 @@ class HyphenNotificationListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         HyphenNotificationListenerRuntime.clearCanceller()
+        HyphenNotificationListenerRuntime.clearReplier()
         HyphenNotificationListenerRuntime.onDestroyed()
         super.onDestroy()
     }

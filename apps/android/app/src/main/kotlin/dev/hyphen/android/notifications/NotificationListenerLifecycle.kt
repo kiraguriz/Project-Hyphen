@@ -43,6 +43,7 @@ object HyphenNotificationListenerRuntime {
     private var eventSender: NotificationMirrorEventSender? = null
     private var privacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL
     private var canceller: NotificationCanceller? = null
+    private var replier: NotificationReplier? = null
 
     fun state(): NotificationListenerConnectionState = synchronized(lifecycle) {
         lifecycle.state
@@ -89,9 +90,23 @@ object HyphenNotificationListenerRuntime {
         canceller = null
     }
 
+    fun setReplier(notificationReplier: NotificationReplier) = synchronized(lifecycle) {
+        replier = notificationReplier
+    }
+
+    fun clearReplier() = synchronized(lifecycle) {
+        replier = null
+    }
+
     fun notificationCanceller(): NotificationCanceller = NotificationCanceller { sbnKey ->
         val current = synchronized(lifecycle) { canceller } ?: return@NotificationCanceller false
         current.cancel(sbnKey)
+    }
+
+    fun notificationReplier(): NotificationReplier = NotificationReplier { sbnKey, actionIndex, text ->
+        val current = synchronized(lifecycle) { replier }
+            ?: return@NotificationReplier NotificationReplyAttempt.Failed("permission/notifications-denied")
+        current.reply(sbnKey, actionIndex, text)
     }
 
     fun onNotificationPosted(sbn: StatusBarNotification): String? {

@@ -100,6 +100,7 @@ final class PairingController: NSObject, NSWindowDelegate {
         activeSession = nil
         activeSessionToken = nil
         notificationPresenter.setDismissHandler(nil)
+        notificationPresenter.setReplyHandler(nil)
         provisionalConnection?.cancel()
         provisionalConnection = nil
         pendingFingerprint = nil
@@ -266,6 +267,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
                             self?.notificationPresenter.setDismissHandler(nil)
+                            self?.notificationPresenter.setReplyHandler(nil)
                         }
                         self?.onStatus("Phone session closed")
                     }
@@ -286,6 +288,9 @@ final class PairingController: NSObject, NSWindowDelegate {
                 self.activeSessionToken = sessionToken
                 self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
                     self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                }
+                self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, text in
+                    self?.sendNotificationReplyRequest(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
                 }
                 session.start(replaying: handshake.leftover)
                 DispatchQueue.main.async {
@@ -308,6 +313,21 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("notification dismiss requested: \(id)")
         } else {
             onStatus("notification dismiss rejected: blank key")
+        }
+    }
+
+    private func sendNotificationReplyRequest(sbnKey: String, actionIndex: Int, text: String) {
+        guard let session = activeSession else {
+            onStatus("notification reply: no active Android session")
+            return
+        }
+        let id = NotificationReplySender(
+            outbox: ProtocolSessionNotificationDismissOutbox(session: session)
+        ).requestReply(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
+        if let id {
+            onStatus("notification reply requested: \(id)")
+        } else {
+            onStatus("notification reply rejected")
         }
     }
 
@@ -368,6 +388,12 @@ final class PairingController: NSObject, NSWindowDelegate {
                 onStatus("Android notification dismissed")
             } else {
                 onStatus("Android notification dismiss failed: \(errorCode ?? "unknown")")
+            }
+        case .replyResult(_, let success, let errorCode):
+            if success {
+                onStatus("Android notification reply sent")
+            } else {
+                onStatus("Android notification reply failed: \(errorCode ?? "unknown")")
             }
         }
     }

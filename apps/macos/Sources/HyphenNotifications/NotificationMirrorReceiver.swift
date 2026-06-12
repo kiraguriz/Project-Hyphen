@@ -9,6 +9,8 @@ public enum NotificationMirrorProtocol {
     public static let typeRemoved = "notification.removed"
     public static let typeDismissRequest = "notification.dismiss.request"
     public static let typeDismissResult = "notification.dismiss.result"
+    public static let typeReplyRequest = "notification.reply.request"
+    public static let typeReplyResult = "notification.reply.result"
 }
 
 public enum NotificationMirrorError: Error, Equatable {
@@ -23,6 +25,7 @@ public struct NotificationPresentationRequest: Equatable {
     public let title: String
     public let body: String
     public let category: String?
+    public let replyActions: [NotificationReplyAction]
 
     public init(
         identifier: String,
@@ -30,7 +33,8 @@ public struct NotificationPresentationRequest: Equatable {
         packageName: String,
         title: String,
         body: String,
-        category: String?
+        category: String?,
+        replyActions: [NotificationReplyAction] = []
     ) {
         self.identifier = identifier
         self.sbnKey = sbnKey
@@ -38,6 +42,24 @@ public struct NotificationPresentationRequest: Equatable {
         self.title = title
         self.body = body
         self.category = category
+        self.replyActions = replyActions
+    }
+}
+
+public struct NotificationReplyAction: Equatable {
+    public let actionIndex: Int
+    public let label: String
+
+    public init(actionIndex: Int, label: String) throws {
+        guard actionIndex >= 0 else {
+            throw NotificationMirrorError.invalidPayload("reply actionIndex must be non-negative")
+        }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NotificationMirrorError.invalidPayload("reply label must be a non-empty string")
+        }
+        self.actionIndex = actionIndex
+        self.label = trimmed
     }
 }
 
@@ -100,10 +122,34 @@ public final class NotificationDismissSender {
     }
 }
 
+public final class NotificationReplySender {
+    private let outbox: NotificationDismissOutbox
+
+    public init(outbox: NotificationDismissOutbox) {
+        self.outbox = outbox
+    }
+
+    @discardableResult
+    public func requestReply(sbnKey: String, actionIndex: Int, text: String) -> String? {
+        let trimmedKey = sbnKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty, actionIndex >= 0, !trimmedText.isEmpty else {
+            return nil
+        }
+        return outbox.send(
+            type: NotificationMirrorProtocol.typeReplyRequest,
+            capability: NotificationMirrorProtocol.capability,
+            requiresAck: true,
+            payload: ["sbnKey": trimmedKey, "actionIndex": actionIndex, "text": trimmedText]
+        )
+    }
+}
+
 public enum NotificationMirrorAction: Equatable {
     case shown(identifier: String, sbnKey: String)
     case removed(identifier: String, sbnKey: String)
     case dismissResult(sbnKey: String, success: Bool, errorCode: String?)
+    case replyResult(sbnKey: String, success: Bool, errorCode: String?)
 }
 
 public struct AndroidNotificationPayload: Equatable {
@@ -112,6 +158,7 @@ public struct AndroidNotificationPayload: Equatable {
     public let title: String?
     public let text: String?
     public let category: String?
+    public let replyActions: [NotificationReplyAction]
 
     public init(payload: [String: Any]) throws {
         guard let sbnKey = payload["sbnKey"] as? String, !sbnKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -127,6 +174,7 @@ public struct AndroidNotificationPayload: Equatable {
         self.title = Self.optionalString(payload["title"])
         self.text = Self.optionalString(payload["text"])
         self.category = Self.optionalString(payload["category"])
+        self.replyActions = try Self.replyActions(payload["replyActions"])
     }
 
     public var presentationRequest: NotificationPresentationRequest {
@@ -136,7 +184,8 @@ public struct AndroidNotificationPayload: Equatable {
             packageName: packageName,
             title: title ?? packageName,
             body: text ?? "",
-            category: category
+            category: category,
+            replyActions: replyActions
         )
     }
 
@@ -148,6 +197,22 @@ public struct AndroidNotificationPayload: Equatable {
         guard let text = value as? String else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func replyActions(_ value: Any?) throws -> [NotificationReplyAction] {
+        guard let value else { return [] }
+        guard let rawActions = value as? [[String: Any]] else {
+            throw NotificationMirrorError.invalidPayload("replyActions must be an array")
+        }
+        return try rawActions.map { action in
+            guard let actionIndex = action["actionIndex"] as? Int else {
+                throw NotificationMirrorError.invalidPayload("reply actionIndex must be integer")
+            }
+            guard let label = action["label"] as? String else {
+                throw NotificationMirrorError.invalidPayload("reply label must be string")
+            }
+            return try NotificationReplyAction(actionIndex: actionIndex, label: label)
+        }
     }
 }
 
@@ -192,6 +257,19 @@ public final class NotificationMirrorReceiver {
             let errorCode = envelope.payload["errorCode"] as? String
             return .dismissResult(sbnKey: sbnKey, success: success, errorCode: errorCode)
 
+        case NotificationMirrorProtocol.typeReplyResult:
+            try requireNotificationsCapability(envelope)
+            guard let sbnKey = envelope.payload["sbnKey"] as? String,
+                  !sbnKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw NotificationMirrorError.invalidPayload("sbnKey must be a non-empty string")
+            }
+            guard let success = envelope.payload["success"] as? Bool else {
+                throw NotificationMirrorError.invalidPayload("success must be boolean")
+            }
+            let errorCode = envelope.payload["errorCode"] as? String
+            return .replyResult(sbnKey: sbnKey, success: success, errorCode: errorCode)
+
         default:
             return nil
         }
@@ -206,18 +284,40 @@ public final class NotificationMirrorReceiver {
 
 public final class UserNotificationCenterPresenter: NSObject, NotificationPresenter, UNUserNotificationCenterDelegate {
     private static let categoryIdentifier = "hyphen.notification.mirror"
+    private static let replyCategoryIdentifier = "hyphen.notification.mirror.reply"
+    private static let replyActionIdentifier = "hyphen.notification.reply"
     private let center: UNUserNotificationCenter
     private var onDismiss: ((String) -> Void)?
+    private var onReply: ((String, Int, String) -> Void)?
 
-    public init(center: UNUserNotificationCenter = .current(), onDismiss: ((String) -> Void)? = nil) {
+    public init(
+        center: UNUserNotificationCenter = .current(),
+        onDismiss: ((String) -> Void)? = nil,
+        onReply: ((String, Int, String) -> Void)? = nil
+    ) {
         self.center = center
         self.onDismiss = onDismiss
+        self.onReply = onReply
         super.init()
         center.delegate = self
         center.setNotificationCategories([
             UNNotificationCategory(
                 identifier: Self.categoryIdentifier,
                 actions: [],
+                intentIdentifiers: [],
+                options: [.customDismissAction]
+            ),
+            UNNotificationCategory(
+                identifier: Self.replyCategoryIdentifier,
+                actions: [
+                    UNTextInputNotificationAction(
+                        identifier: Self.replyActionIdentifier,
+                        title: "Reply",
+                        options: [],
+                        textInputButtonTitle: "Send",
+                        textInputPlaceholder: "Reply"
+                    ),
+                ],
                 intentIdentifiers: [],
                 options: [.customDismissAction]
             ),
@@ -228,6 +328,10 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
         onDismiss = handler
     }
 
+    public func setReplyHandler(_ handler: ((String, Int, String) -> Void)?) {
+        onReply = handler
+    }
+
     public func show(_ request: NotificationPresentationRequest) {
         ensureAuthorized { [center] in
             let content = UNMutableNotificationContent()
@@ -235,8 +339,16 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
             content.body = request.body
             content.subtitle = request.packageName
             content.threadIdentifier = request.sbnKey
-            content.categoryIdentifier = Self.categoryIdentifier
-            content.userInfo = ["sbnKey": request.sbnKey]
+            if request.replyActions.isEmpty {
+                content.categoryIdentifier = Self.categoryIdentifier
+            } else {
+                content.categoryIdentifier = Self.replyCategoryIdentifier
+            }
+            var userInfo: [String: Any] = ["sbnKey": request.sbnKey]
+            if let replyAction = request.replyActions.first {
+                userInfo["replyActionIndex"] = replyAction.actionIndex
+            }
+            content.userInfo = userInfo
             center.add(
                 UNNotificationRequest(identifier: request.identifier, content: content, trigger: nil)
             )
@@ -270,8 +382,14 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        if response.actionIdentifier == UNNotificationDismissActionIdentifier,
-           let sbnKey = response.notification.request.content.userInfo["sbnKey"] as? String {
+        let userInfo = response.notification.request.content.userInfo
+        if response.actionIdentifier == Self.replyActionIdentifier,
+           let response = response as? UNTextInputNotificationResponse,
+           let sbnKey = userInfo["sbnKey"] as? String,
+           let actionIndex = userInfo["replyActionIndex"] as? Int {
+            onReply?(sbnKey, actionIndex, response.userText)
+        } else if response.actionIdentifier == UNNotificationDismissActionIdentifier,
+                  let sbnKey = userInfo["sbnKey"] as? String {
             onDismiss?(sbnKey)
         }
         completionHandler()

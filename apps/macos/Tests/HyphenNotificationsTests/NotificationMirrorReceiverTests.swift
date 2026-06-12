@@ -97,6 +97,24 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(presenter.shown.last?.body, "hello again")
     }
 
+    func testReplyActionsAreParsedIntoPresentationRequests() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(presenter: presenter)
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "hello",
+                    replyActions: [["actionIndex": 2, "label": "Reply"]]
+                )
+            )
+        )
+
+        XCTAssertEqual(presenter.shown.count, 1)
+        XCTAssertEqual(presenter.shown[0].replyActions, [try NotificationReplyAction(actionIndex: 2, label: "Reply")])
+    }
+
     func testRemovedClosesTheMappedMacNotificationIdentifier() throws {
         let presenter = RecordingNotificationPresenter()
         let receiver = NotificationMirrorReceiver(presenter: presenter)
@@ -209,6 +227,40 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         )
     }
 
+    func testReplyResultIsParsedForStatusReporting() throws {
+        let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
+
+        let success = try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typeReplyResult,
+                payload: ["sbnKey": "0|com.chat|7|thread-123|10101", "success": true]
+            )
+        )
+        let failure = try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typeReplyResult,
+                payload: [
+                    "sbnKey": "0|com.chat|7|thread-123|10101",
+                    "success": false,
+                    "errorCode": "plugin/reply-unavailable",
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            success,
+            .replyResult(sbnKey: "0|com.chat|7|thread-123|10101", success: true, errorCode: nil)
+        )
+        XCTAssertEqual(
+            failure,
+            .replyResult(
+                sbnKey: "0|com.chat|7|thread-123|10101",
+                success: false,
+                errorCode: "plugin/reply-unavailable"
+            )
+        )
+    }
+
     func testWrongCapabilityIsRejected() {
         let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
 
@@ -244,6 +296,23 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(outbox.payload?["sbnKey"] as? String, "0|com.chat|7|thread-123|10101")
     }
 
+    func testReplySenderUsesNotificationsCapabilityAndRequiresAck() {
+        let outbox = RecordingDismissOutbox()
+        let id = NotificationReplySender(outbox: outbox).requestReply(
+            sbnKey: "0|com.chat|7|thread-123|10101",
+            actionIndex: 2,
+            text: "On my way"
+        )
+
+        XCTAssertEqual(id, "01JZ0000000000000000000001")
+        XCTAssertEqual(outbox.type, NotificationMirrorProtocol.typeReplyRequest)
+        XCTAssertEqual(outbox.capability, NotificationMirrorProtocol.capability)
+        XCTAssertEqual(outbox.requiresAck, true)
+        XCTAssertEqual(outbox.payload?["sbnKey"] as? String, "0|com.chat|7|thread-123|10101")
+        XCTAssertEqual(outbox.payload?["actionIndex"] as? Int, 2)
+        XCTAssertEqual(outbox.payload?["text"] as? String, "On my way")
+    }
+
     func testDismissSenderRejectsBlankKeys() {
         let outbox = RecordingDismissOutbox()
 
@@ -251,8 +320,20 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertNil(outbox.type)
     }
 
-    private func payload(sbnKey: String, text: String) -> [String: Any] {
-        [
+    func testReplySenderRejectsBlankTextAndBadActionIndex() {
+        let outbox = RecordingDismissOutbox()
+
+        XCTAssertNil(NotificationReplySender(outbox: outbox).requestReply(sbnKey: "key", actionIndex: 0, text: " "))
+        XCTAssertNil(NotificationReplySender(outbox: outbox).requestReply(sbnKey: "key", actionIndex: -1, text: "hi"))
+        XCTAssertNil(outbox.type)
+    }
+
+    private func payload(
+        sbnKey: String,
+        text: String,
+        replyActions: [[String: Any]] = []
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
             "sbnKey": sbnKey,
             "packageName": "com.chat",
             "title": "Alice",
@@ -261,5 +342,9 @@ final class NotificationMirrorReceiverTests: XCTestCase {
             "clearable": true,
             "ongoing": false,
         ]
+        if !replyActions.isEmpty {
+            payload["replyActions"] = replyActions
+        }
+        return payload
     }
 }

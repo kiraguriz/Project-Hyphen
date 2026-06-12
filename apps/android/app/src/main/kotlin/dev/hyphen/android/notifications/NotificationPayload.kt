@@ -11,6 +11,24 @@ object NotificationProtocol {
     const val TYPE_REMOVED = "notification.removed"
     const val TYPE_DISMISS_REQUEST = "notification.dismiss.request"
     const val TYPE_DISMISS_RESULT = "notification.dismiss.result"
+    const val TYPE_REPLY_REQUEST = "notification.reply.request"
+    const val TYPE_REPLY_RESULT = "notification.reply.result"
+}
+
+data class NotificationReplyAction(
+    val actionIndex: Int,
+    val label: String,
+) {
+    init {
+        require(actionIndex >= 0) { "actionIndex must be non-negative" }
+        require(label.isNotBlank()) { "label must not be blank" }
+    }
+
+    fun toJson(): Json.Obj =
+        Json.obj(
+            "actionIndex" to Json.Num(actionIndex.toString()),
+            "label" to Json.Str(label),
+        )
 }
 
 /**
@@ -26,6 +44,7 @@ data class NotificationPayloadSource(
     val isClearable: Boolean = false,
     val isOngoing: Boolean = false,
     val postTimeUnixMs: Long? = null,
+    val replyActions: List<NotificationReplyAction> = emptyList(),
 )
 
 data class NormalizedNotificationPayload(
@@ -36,6 +55,7 @@ data class NormalizedNotificationPayload(
     val category: String? = null,
     val isClearable: Boolean = false,
     val isOngoing: Boolean = false,
+    val replyActions: List<NotificationReplyAction> = emptyList(),
 ) {
     init {
         require(sbnKey.isNotBlank()) { "sbnKey must not be blank" }
@@ -52,6 +72,9 @@ data class NormalizedNotificationPayload(
         title?.let { entries["title"] = Json.Str(it) }
         text?.let { entries["text"] = Json.Str(it) }
         category?.let { entries["category"] = Json.Str(it) }
+        if (replyActions.isNotEmpty()) {
+            entries["replyActions"] = Json.Arr(replyActions.map { it.toJson() })
+        }
         return Json.Obj(entries)
     }
 
@@ -65,6 +88,7 @@ data class NormalizedNotificationPayload(
                 category = normalizeText(source.category),
                 isClearable = source.isClearable,
                 isOngoing = source.isOngoing,
+                replyActions = source.replyActions,
             )
 
         fun fromStatusBarNotification(sbn: StatusBarNotification): NormalizedNotificationPayload {
@@ -80,11 +104,24 @@ data class NormalizedNotificationPayload(
                     isClearable = sbn.isClearable,
                     isOngoing = sbn.isOngoing,
                     postTimeUnixMs = sbn.postTime,
+                    replyActions = replyActions(notification),
                 ),
             )
         }
 
         private fun normalizeText(value: String?): String? =
             value?.trim()?.takeIf { it.isNotEmpty() }
+
+        private fun replyActions(notification: Notification): List<NotificationReplyAction> =
+            notification.actions
+                ?.mapIndexedNotNull { index, action ->
+                    val remoteInputs = action.remoteInputs ?: return@mapIndexedNotNull null
+                    if (remoteInputs.isEmpty() || action.actionIntent == null) return@mapIndexedNotNull null
+                    NotificationReplyAction(
+                        actionIndex = index,
+                        label = normalizeText(action.title?.toString()) ?: "Reply",
+                    )
+                }
+                ?: emptyList()
     }
 }

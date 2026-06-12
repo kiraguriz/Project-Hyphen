@@ -31,6 +31,7 @@ import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationAccessController
 import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
+import dev.hyphen.android.notifications.NotificationReplyRequestHandler
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.EndpointConnectProbe
 import dev.hyphen.android.pairing.EndpointParser
@@ -346,6 +347,14 @@ class MainActivity : Activity() {
                 ).handle(envelope)
                 if (dismissResultId != null) {
                     runOnUiThread { append("notification dismiss result sent: $dismissResultId") }
+                    return
+                }
+                val replyResultId = NotificationReplyRequestHandler(
+                    replier = HyphenNotificationListenerRuntime.notificationReplier(),
+                    outbox = ProtocolSessionNotificationOutbox(session),
+                ).handle(envelope)
+                if (replyResultId != null) {
+                    runOnUiThread { append("notification reply result sent: $replyResultId") }
                     return
                 }
             }

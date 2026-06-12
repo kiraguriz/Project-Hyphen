@@ -63,6 +63,22 @@ class NotificationPayloadTest {
     }
 
     @Test
+    fun `payload json includes only advertised remote input reply actions`() {
+        val payload = NormalizedNotificationPayload.from(
+            NotificationPayloadSource(
+                sbnKey = "0|com.chat|7|thread-123|10101",
+                packageName = "com.chat",
+                replyActions = listOf(NotificationReplyAction(actionIndex = 2, label = "Reply")),
+            ),
+        ).toJson()
+
+        val replyActions = payload["replyActions"] as Json.Arr
+        val action = replyActions.items.single() as Json.Obj
+        assertEquals(Json.Num("2"), action["actionIndex"])
+        assertEquals(Json.Str("Reply"), action["label"])
+    }
+
+    @Test
     fun `blank optional text fields are omitted`() {
         val payload = NormalizedNotificationPayload.from(
             NotificationPayloadSource(
