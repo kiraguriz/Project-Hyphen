@@ -208,7 +208,7 @@ gantt
 
 | ID | Status | Priority | Area | Task | Dependencies | Acceptance criteria | Verification |
 |---|---|---|---|---|---|---|---|
-| HYP-M5-001 | `[ ]` | P0 | macOS Dist | Implement macOS signing script | HYP-M1-010 | Local signing dry run documented | Script/manual |
+| HYP-M5-001 | `[x]` | P0 | macOS Dist | Implement macOS signing script | HYP-M1-010 | Local signing dry run documented | Script/manual |
 | HYP-M5-002 | `[ ]` | P0 | macOS Dist | Implement notarization dry run | HYP-M5-001 | Notarization succeeds or blocker documented | Script/manual |
 | HYP-M5-003 | `[ ]` | P1 | macOS Dist | Create DMG/ZIP packaging script | HYP-M5-002 | Install path tested | Manual test |
 | HYP-M5-004 | `[ ]` | P0 | Android Dist | Implement reproducible-ish Android release build | HYP-M1-001 | APK/AAB signed with release key process documented | Build script |
@@ -356,7 +356,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M2 Core Transport | 13 | 0 | 0 | 2 |
 | M3 Feature MVP | 4 | 0 | 3 | 8 |
 | M4 Beta Hardening | 2 | 0 | 2 | 8 |
-| M5 Distribution | 0 | 0 | 0 | 10 |
+| M5 Distribution | 1 | 0 | 0 | 9 |
 | M6 Stabilization | 0 | 0 | 0 | 10 |
 
 Update this summary after each milestone review.
@@ -412,3 +412,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M4-002 `[?]` — **Implementation complete, manual verification blocked.** Android now has `RedactedDiagnosticsExporter`, producing a local JSON bundle (`hyphen-diagnostics-v0`) with platform, app version, SDK, event count, and redacted structured events only. MainActivity exposes explicit user actions to preview the JSON, share/export it via `ACTION_SEND`, and delete local diagnostics. Tests prove callback detail containing notification text, file paths, and URLs is not present in the export and deletion clears the next bundle. Verified: `./gradlew test assembleDebug` green. **Blocker**: `adb devices` lists no Android device/emulator, so the required preview/export/delete manual UI test cannot run here.
 - 2026-06-12 — HYP-M4-003 `[x]` — Added macOS redacted diagnostics export. `HyphenDiagnostics.RedactedDiagnosticsExporter` now builds the same local `hyphen-diagnostics-v0` JSON bundle with app version, coarse macOS version, event count, and redacted structured events; AppDelegate and PairingController share one diagnostics store, and the menu bar app now exposes Preview Diagnostics, Export Diagnostics (user-selected JSON file via `NSSavePanel`), and Delete Diagnostics actions. Tests prove callback detail containing notification text, file paths, and URLs is absent from the bundle and deletion clears the next export. Verified: `swift test` green; `swift run HyphenApp` launch smoke clean.
 - 2026-06-12 — HYP-M4-007 `[?]` — **Manual reliability test blocked.** The implementation prerequisites are present (`SleepWakeObserver`, `ReconnectStateMachine`, and session reconnect all have automated tests), and the Wake/reconnect test-log template already exists in this tracker. The acceptance criterion requires 20 real Mac sleep/wake cycles with observed reconnect timing; this was not run because autonomously sleeping the user's active Mac repeatedly is unsafe and needs explicit human scheduling/observation. **Blocker**: manual 20-cycle sleep/wake session not authorized/run.
+- 2026-06-12 — HYP-M5-001 `[x]` — Added `packaging/macos/sign-local.sh` and `packaging/macos/README.md`. The script builds SwiftPM `HyphenApp` in release mode, signs the executable, and verifies it with `codesign --verify --strict`; default mode uses ad-hoc signing (`SIGN_IDENTITY=-`) so no Apple Developer account or repo secret is required, while an installed Developer ID identity can be supplied later via `SIGN_IDENTITY` to enable hardened runtime and timestamping. README documents the local dry-run scope and explicitly defers notarization credentials/submission to HYP-M5-002. Verified: `./packaging/macos/sign-local.sh` signed and verified the release binary.
