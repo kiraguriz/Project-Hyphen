@@ -1,6 +1,8 @@
 package dev.hyphen.android
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ActivityNotFoundException
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
@@ -16,7 +18,8 @@ import dev.hyphen.android.discovery.DiscoveryEvent
 import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
-import android.app.AlertDialog
+import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
+import dev.hyphen.android.notifications.NotificationAccessController
 import dev.hyphen.android.pairing.EndpointConnectProbe
 import dev.hyphen.android.pairing.EndpointParser
 import dev.hyphen.android.pairing.PairingTranscript
@@ -75,6 +78,17 @@ class MainActivity : Activity() {
             }
         }
 
+        // Notification listener onboarding (HYP-M3-001): explicit user
+        // action, rationale before system settings, no payload forwarding yet.
+        val notificationStatusButton = Button(this).apply {
+            text = "Check notification listener"
+            setOnClickListener { append(notificationAccessLine()) }
+        }
+        val notificationSettingsButton = Button(this).apply {
+            text = "Enable notification mirror"
+            setOnClickListener { showNotificationAccessOnboarding() }
+        }
+
         setContentView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -84,9 +98,16 @@ class MainActivity : Activity() {
                 addView(connectButton)
                 addView(associateButton)
                 addView(listButton)
+                addView(notificationStatusButton)
+                addView(notificationSettingsButton)
                 addView(ScrollView(this@MainActivity).apply { addView(log) })
             }
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::log.isInitialized) append(notificationAccessLine())
     }
 
     private fun renderCdm(event: AssociationEvent) {
@@ -188,6 +209,42 @@ class MainActivity : Activity() {
             }
             .setCancelable(false)
             .show()
+    }
+
+    private fun showNotificationAccessOnboarding() {
+        val status = NotificationAccessController.forContext(this).status()
+        if (status.enabled) {
+            append("notification access: already enabled (${status.componentName})")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Enable notification mirror")
+            .setMessage(
+                "Hyphen can mirror Android notifications to a paired Mac over local TLS. " +
+                    "It does not request SMS or Call Log access, does not store notification " +
+                    "history, and does not use a cloud relay.",
+            )
+            .setPositiveButton("Open settings") { _, _ -> openNotificationSettings() }
+            .setNegativeButton("Not now") { _, _ ->
+                append("notification access: settings not opened")
+            }
+            .show()
+    }
+
+    private fun openNotificationSettings() {
+        try {
+            startActivity(NotificationAccessController.settingsIntent())
+            append("notification access: opened system settings")
+        } catch (e: ActivityNotFoundException) {
+            append("notification access: settings unavailable (${e.message})")
+        }
+    }
+
+    private fun notificationAccessLine(): String {
+        val status = NotificationAccessController.forContext(this).status()
+        return "notification access: ${if (status.enabled) "enabled" else "disabled"}; " +
+            "listener=${HyphenNotificationListenerRuntime.state()}; " +
+            "component=${status.componentName}"
     }
 
     private fun startWindow() {

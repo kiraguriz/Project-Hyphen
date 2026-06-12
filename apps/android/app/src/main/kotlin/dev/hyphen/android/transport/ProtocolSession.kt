@@ -55,7 +55,9 @@ class ProtocolSession(
     )
     private val ackTracker = AckTracker(config.ackTimeoutMs, listener::onAckTimeout)
 
+    @Synchronized
     fun start() {
+        if (closed.get()) return
         // Read deadline at 2x the degraded threshold: with live heartbeats
         // it never trips; on a truly dead link the reader wakes itself up.
         // It also bounds a JSSE hazard — SSLSocket.close() from another
@@ -151,6 +153,7 @@ class ProtocolSession(
         close()
     }
 
+    @Synchronized
     private fun close() {
         if (closed.getAndSet(true)) return
         if (::scheduler.isInitialized) scheduler.shutdownNow()
