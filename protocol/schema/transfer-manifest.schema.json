@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hyphen.dev/protocol/v0/transfer-manifest.schema.json",
   "title": "Hyphen protocol v0 transfer.manifest payload",
-  "description": "Validates envelope.payload when type=transfer.manifest (docs/protocol/hyphen-protocol-v0.md §7.2). The manifest is sent before chunks and carries only metadata needed to allocate, display, resume, and verify a local transfer.",
+  "description": "Validates envelope.payload when type=transfer.manifest (docs/protocol/hyphen-protocol-v0.md §7.3). The manifest is sent before chunks and carries only metadata needed to allocate, display, resume, and verify a local transfer.",
   "type": "object",
   "required": ["fileId", "filename", "sizeBytes", "mimeType", "sha256", "chunkSizeBytes", "chunkCount"],
   "additionalProperties": false,

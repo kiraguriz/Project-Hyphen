@@ -1,8 +1,8 @@
-# Hyphen Protocol v0 (draft)
+# Hyphen Protocol v0
 
-- **Status**: Draft — normative for M2 implementation; expect revisions until Gate B. Changes that alter wire behavior require an ADR and a version note here.
+- **Status**: Frozen for the current pre-alpha v0 wire behavior (HYP-M6-006). Changes that alter wire behavior require an ADR and a version note here.
 - **Protocol identifier**: `hyphen/0.3` (the `protocol` field below)
-- **Tracker**: HYP-M0-007 · **Sources**: plan v0.3 §6.1, §7.7, §9; ADR-0001
+- **Tracker**: HYP-M0-007, HYP-M2-015, HYP-M6-006 · **Sources**: plan v0.3 §6.1, §7.7, §9; ADR-0001
 - **Security analysis**: `threat-model.md` (HYP-M0-008)
 
 The words **MUST**, **SHOULD**, and **MAY** are used as in RFC 2119.
@@ -57,7 +57,7 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 | `sessionId` | string | yes after hello | Identifies the logical session (§4). `null` only in `hello`. |
 | `type` | string | yes | Message type, namespaced `feature.event` (§7). The session layer handles only core `ack`/`heartbeat`; other types are delivered to the negotiated feature/plugin layer, which is responsible for `protocol/unknown-type` or `plugin/unsupported-capability` errors. |
 | `capability` | string | for plugin msgs | Capability that governs this message, e.g. `notifications.v1`. Core types (`hello`, `ack`, `error`, `heartbeat`) omit it. |
-| `seq` | integer | yes | Per-sender, per-session, monotonically increasing from 1. Receivers MAY use gaps for loss diagnostics; ordering authority stays with TCP. |
+| `seq` | integer | yes | Per-sender, per-connection, monotonically increasing from 1. The `hello` frame uses `seq: 1`; the session continues at 2 on that connection. Reconnect starts a new connection and resets the sequence. Receivers MAY use gaps for loss diagnostics; ordering authority stays with TCP. |
 | `ackOf` | string\|null | no | `messageId` being acknowledged (only in `ack`). |
 | `sentAtUnixMs` | integer | yes | Sender wall clock; diagnostics only, never identity (see notification key rule). |
 | `requiresAck` | boolean | yes | If true, receiver MUST send `ack` within 10 s or sender treats it as `protocol/ack-timeout`. |
@@ -66,8 +66,8 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 
 ## 4. Session lifecycle
 
-1. **TLS established** → initiator sends `hello` with device info and offered capabilities (§6).
-2. Responder answers `hello` with its own info and the **intersected/limited** capability set, plus a fresh `sessionId`.
+1. **TLS established** → initiator sends `hello` with device info and offered capabilities (§6), `seq: 1`, `sessionId: null`, and `requiresAck: false`.
+2. Responder answers `hello` with its own info and the **intersected/limited** capability set, plus a fresh or resumed `sessionId`; this response is the handshake acknowledgment, so no separate `ack` frame is sent for `hello`.
 3. Steady state: any plugin messages permitted by negotiated capabilities; `heartbeat` every **10 s** each way (`requiresAck: false`).
 4. **Degraded**: two consecutive missed heartbeats (>20 s silence). The UI may show "reconnecting"; senders SHOULD queue idempotent messages.
 5. **Reconnect**: backoff at 1 s / 5 s / 15 s / 30 s (then every 30 s). A reconnect is a new TLS connection followed by `hello` carrying `resumeToken` from the previous session. The responder MAY resume (same `sessionId`, transfer checkpoints valid) or reject (fresh session; transfers restart from last durable checkpoint).
@@ -139,7 +139,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 
 | Type | Dir | Ack | Purpose |
 |---|---|---|---|
-| `hello` | both | yes | Session open / resume, capability negotiation |
+| `hello` | both | no | Session open / resume, capability negotiation; responder `hello` is the handshake acknowledgment |
 | `heartbeat` | both | no | Liveness (§4) |
 | `ack` | both | no | Acknowledges `messageId` in `ackOf` |
 | `error` | both | no | Carries an error code (§8), optionally `regarding: messageId` |
@@ -179,7 +179,7 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
 | `sbnKey` | string | yes | Exact Android notification key from `StatusBarNotification.getKey()` |
 | `packageName` | string | yes | Android package name that posted the notification |
 | `title` | string | no | Trimmed display title; omitted when blank |
-| `text` | string | no | Trimmed display summary/body; omitted when blank; privacy filters may replace this later |
+| `text` | string | no | Trimmed display summary/body; omitted when blank; privacy filters may omit or replace this field without changing `sbnKey` identity |
 | `category` | string | no | Android notification category when present |
 | `clearable` | boolean | yes | Whether Android reports the notification as clearable |
 | `ongoing` | boolean | yes | Whether Android reports the notification as ongoing |
@@ -259,7 +259,7 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 | `chunkSizeBytes` | integer | yes | Effective chunk size after capability negotiation; 1024..2097152 |
 | `chunkCount` | integer | yes | Number of `transfer.chunk` payloads expected; empty files use 0 |
 
-Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when HYP-M3-011 creates chunk state.
+Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when creating chunk state.
 
 ### 7.4 `transfer.chunk` payload
 
@@ -281,7 +281,7 @@ Schema validation intentionally does not encode cross-field arithmetic such as `
 | `dataBase64` | string | yes | Base64 chunk bytes; decoded byte count must be <= manifest `chunkSizeBytes` |
 | `chunkSha256` | string | yes | SHA-256 of decoded chunk bytes, lowercase hex |
 
-Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 hardens corruption coverage around that path.
+Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, or chunk-hash mismatch. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 covers corrupted whole-file and corrupted-chunk rejection on both platforms.
 
 ### 7.5 `transfer.resume.request` / `transfer.resume.info` payloads
 
@@ -341,9 +341,9 @@ Rules: error `message` strings MUST NOT contain notification bodies, file conten
 
 The normative registry is the `code` enum in `protocol/schema/error.schema.json` (linted by `scripts/lint_error_registry.py`); this table is the human-readable index. Messages are capped at 256 characters by schema.
 
-## 9. M2 implementation decisions
+## 9. v0 implementation decisions
 
-These decisions document the Android and macOS behavior implemented through HYP-M2-015.
+These decisions document the Android and macOS behavior frozen for the current v0 implementation.
 
 ### 9.1 Strict envelope and hello validation
 
@@ -357,7 +357,7 @@ These decisions document the Android and macOS behavior implemented through HYP-
 
 - Heartbeat interval defaults to 10 s; two missed intervals move the liveness monitor to degraded.
 - `requiresAck` envelopes use a 10 s ack timeout; each timeout fires once.
-- Session `seq` is per sender and starts after the hello frame; reconnecting starts a new connection and preserves the logical `sessionId` only when resume succeeds.
+- Session `seq` is per sender and per connection. The handshake `hello` consumes `seq: 1`; `ProtocolSession` starts subsequent traffic at `seq: 2`; reconnecting starts a new connection at `seq: 1` and preserves the logical `sessionId` only when resume succeeds.
 - Resume tokens are responder-side random 32-byte handles, base64url encoded without padding, bound to one session and one peer SPKI fingerprint.
 - Resume tokens are single-use, consumed on failed redemption, expire after 10 minutes, are invalidated on peer trust revocation, and are in-memory only.
 
@@ -371,10 +371,21 @@ These decisions document the Android and macOS behavior implemented through HYP-
 
 - Structured diagnostics log taxonomy codes, components, operations, and optional local trace ids only.
 - Redacted diagnostics exports omit trace ids by default on both platforms.
-- Trace ids are included in an export only when the exporter is constructed with explicit trace inclusion; no UI path enables that yet. The user-facing opt-in toggle is HYP-M4-004.
+- Trace ids are included in an export only when the user explicitly enables the default-off beta diagnostics opt-in (HYP-M4-004). Disabling the toggle returns exports to the default trace-free shape.
 
-## 10. Deferred protocol questions
+### 9.5 Plugin behavior frozen in v0
+
+- Notification identity is `StatusBarNotification.getKey()` only. `postTime` is not a wire identity field.
+- Mac-side dismiss and Quick Reply use request/result pairs under `notifications.v1`; result payloads return explicit v0 error codes when Android cannot act.
+- `text.send` is bidirectional under `text.v1` and requires receiver-side user confirmation before copy/open.
+- Transfer resume checkpoints are in-memory in v0; persistent checkpoints across app restarts are post-v0 hardening.
+- Transfer progress is local UI state, not a wire message.
+
+## 10. Post-v0 protocol questions
+
+These questions are explicitly outside the frozen v0 wire behavior:
 
 1. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
-2. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force ≥15 s).
+2. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force >=15 s).
 3. Max in-flight unacked messages and flow control. Current v0 code tracks pending ack ids but does not enforce a 64-message cap yet.
+4. Persistent transfer checkpoints across app restarts.

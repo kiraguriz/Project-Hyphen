@@ -230,7 +230,7 @@ gantt
 | HYP-M6-003 | `[?]` | P0 | Reliability | Finalize wake/network reconnect behavior | HYP-M4-007 | Median <30s or explicit degraded state | Test log |
 | HYP-M6-004 | `[?]` | P0 | Transfer | Finalize 1GB resume behavior | HYP-M3-015 | Passes on at least 3 Android/macOS/network combos | Test log |
 | HYP-M6-005 | `[x]` | P0 | Notifications | Finalize notification duplicate prevention | HYP-M4-008 | Duplicate notification rate acceptable | Test log |
-| HYP-M6-006 | `[ ]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
+| HYP-M6-006 | `[x]` | P1 | Docs | Freeze protocol v0 docs | HYP-M2-015 | Docs match release behavior | Manual review |
 | HYP-M6-007 | `[ ]` | P1 | Security | Run final threat-model review | HYP-M6-006 | New risks captured | Review notes |
 | HYP-M6-008 | `[ ]` | P1 | License | Run dependency/license audit | HYP-M5-004 | No blocking dependency/license issue | Audit report |
 | HYP-M6-009 | `[ ]` | P0 | Release | Create v1.0 release candidate | HYP-M6-001..008 | RC artifacts published privately | Release checklist |
@@ -357,7 +357,7 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 | M3 Feature MVP | 6 | 0 | 9 | 0 |
 | M4 Beta Hardening | 3 | 0 | 6 | 3 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
-| M6 Stabilization | 1 | 0 | 3 | 6 |
+| M6 Stabilization | 2 | 0 | 3 | 5 |
 
 Update this summary after each milestone review.
 
@@ -446,3 +446,4 @@ Update this summary after each milestone review.
 - 2026-06-12 — HYP-M6-002 `[?]` — **Crash-free beta-session metric blocked / not measurable.** Added `docs/test-plans/hyp-m6-002-crash-free-beta-sessions.md` defining the eventual crash-free-session denominator, numerator, allowed evidence sources, and minimum review packet. Repository search found no beta session logs, crash ledger, issue export, or user-submitted diagnostics corpus; HYP-M4-012 beta user recruitment is still unchecked; HYP-M4-011 beta release notes/feedback channel are still unchecked; and there is no crash-reporting SDK, analytics SDK, telemetry endpoint, account system, or cloud service. `adb devices -l` also lists no Android targets, so no paired-device beta session can be generated here. **Blocker**: collect real beta-session diagnostics or manual logs before claiming >=99% crash-free sessions.
 - 2026-06-12 — HYP-M6-003 `[?]` — **Final wake/network reconnect behavior blocked.** Implementation prerequisites exist (`SleepWakeObserver`, `ReconnectStateMachine`, `SessionReconnectTests`, and HYP-M4-007's prior blocker note), but this finalization requires the same real 20-cycle Mac sleep/wake timing log and/or network-transition evidence. Autonomously sleeping the user's active Mac repeatedly is unsafe, and no scheduled manual reliability log is available in this environment. **Blocker**: human-run sleep/wake or network-transition session with observed reconnect timing is required.
 - 2026-06-12 — HYP-M6-004 `[?]` — **Final 1 GiB resume behavior blocked.** HYP-M3-015 provides the deterministic fixture generator and manual run log, but this finalization requires successful observed runs across at least three Android/macOS/network combinations. HYP-M4-005 currently has no attached Android devices, and HYP-M4-006 lacks the required additional macOS combinations plus a paired Android session. **Blocker**: three real paired-device/network test combinations are unavailable in this environment.
+- 2026-06-12 — HYP-M6-006 `[x]` — Froze `docs/protocol/hyphen-protocol-v0.md` for the current pre-alpha v0 wire behavior and synced drift found during manual review: `hello` uses `requiresAck: false` with responder `hello` as the handshake acknowledgment, `seq` is per-sender/per-connection with `hello` consuming `seq: 1`, trace IDs are exported only behind the default-off beta diagnostics opt-in, notification identity stays `StatusBarNotification.getKey()`, transfer progress is local-only UI state, and remaining feature-bitmap/heartbeat/flow-control/persistent-checkpoint questions are explicitly post-v0. Updated schema descriptions in `protocol/schema/envelope.schema.json` and `protocol/schema/transfer-manifest.schema.json` without changing validation rules. Verification: `./scripts/test-protocol.sh` and `./scripts/check.sh`.

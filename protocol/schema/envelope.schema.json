@@ -44,7 +44,7 @@
     "seq": {
       "type": "integer",
       "minimum": 1,
-      "description": "Per-sender, per-session, monotonically increasing from 1"
+      "description": "Per-sender, per-connection, monotonically increasing from 1; hello consumes seq 1"
     },
     "ackOf": {
       "type": ["string", "null"],
@@ -70,7 +70,7 @@
       "properties": {
         "localOnly": {
           "const": true,
-          "description": "Trace ids must not leave the device unless the user opted in (HYP-M2-014)"
+          "description": "Trace ids must not leave the device unless the user explicitly opted in (HYP-M2-014/HYP-M4-004)"
         },
         "spanId": {
           "type": "string",
