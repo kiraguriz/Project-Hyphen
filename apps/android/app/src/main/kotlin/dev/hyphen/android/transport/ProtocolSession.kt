@@ -37,6 +37,8 @@ class ProtocolSession(
         /** Plugin/feature envelopes; core types (heartbeat/ack) stay internal. */
         fun onEnvelope(envelope: Envelope) {}
         fun onLiveness(state: HeartbeatMonitor.State) {}
+        /** A tracked requiresAck envelope was acknowledged by the peer. */
+        fun onAck(messageId: String) {}
         fun onAckTimeout(messageId: String) {}
         fun onProtocolError(code: String, detail: String) {}
         fun onClosed() {}
@@ -45,6 +47,7 @@ class ProtocolSession(
     private val seq = AtomicLong(config.startingSeq)
     private val closed = AtomicBoolean(false)
     private val writeLock = Any()
+    private var nextInboundSeq = config.startingSeq + 1
     private lateinit var scheduler: ScheduledExecutorService
 
     private val monitor = HeartbeatMonitor(
@@ -108,13 +111,14 @@ class ProtocolSession(
             payload = payload,
         )
         val bytes = envelope.encode()
+        if (requiresAck) ackTracker.registerSent(envelope.messageId, now)
         try {
             synchronized(writeLock) { FrameIO.write(socket.outputStream, bytes) }
         } catch (e: IOException) {
+            if (requiresAck) ackTracker.unregisterSent(envelope.messageId)
             close()
             throw e
         }
-        if (requiresAck) ackTracker.registerSent(envelope.messageId, now)
         return envelope.messageId
     }
 
@@ -138,9 +142,10 @@ class ProtocolSession(
                 listener.onProtocolError("protocol/invalid-envelope", e.message ?: "")
                 continue
             }
+            if (!validateSessionAndSeq(envelope)) continue
             monitor.envelopeReceived(System.currentTimeMillis())
             when (envelope.type) {
-                Envelope.TYPE_ACK -> envelope.ackOf?.let(ackTracker::ackReceived)
+                Envelope.TYPE_ACK -> envelope.ackOf?.let { if (ackTracker.ackReceived(it)) listener.onAck(it) }
                 Envelope.TYPE_HEARTBEAT -> Unit // liveness already recorded
                 else -> {
                     if (envelope.requiresAck && config.autoAck) {
@@ -151,6 +156,22 @@ class ProtocolSession(
             }
         }
         close()
+    }
+
+    private fun validateSessionAndSeq(envelope: Envelope): Boolean {
+        if (envelope.type != Envelope.TYPE_HELLO && envelope.sessionId != sessionId) {
+            listener.onProtocolError("protocol/invalid-envelope", "sessionId does not match active session")
+            return false
+        }
+        if (envelope.seq != nextInboundSeq) {
+            listener.onProtocolError(
+                "protocol/invalid-envelope",
+                "expected seq $nextInboundSeq, got ${envelope.seq}",
+            )
+            return false
+        }
+        nextInboundSeq += 1
+        return true
     }
 
     @Synchronized

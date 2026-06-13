@@ -69,8 +69,12 @@ public struct TextLinkConfirmationRequest: Equatable {
 
 public final class TextLinkReceiver {
     public private(set) var pending: [TextLinkConfirmationRequest] = []
+    private let maxPending: Int
 
-    public init() {}
+    public init(maxPending: Int = 64) {
+        precondition(maxPending > 0, "maxPending must be positive")
+        self.maxPending = maxPending
+    }
 
     public func handle(_ envelope: Envelope) throws -> TextLinkConfirmationRequest? {
         guard envelope.type == TextLinkMessage.typeSend else { return nil }
@@ -81,8 +85,18 @@ public final class TextLinkReceiver {
             messageId: envelope.messageId,
             message: try TextLinkMessage(payload: envelope.payload)
         )
+        if pending.count >= maxPending {
+            pending.removeFirst()
+        }
         pending.append(request)
         return request
+    }
+
+    @discardableResult
+    public func resolve(messageId: String) -> Bool {
+        let before = pending.count
+        pending.removeAll { $0.messageId == messageId }
+        return pending.count != before
     }
 }
 

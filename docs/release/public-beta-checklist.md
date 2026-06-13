@@ -43,13 +43,13 @@ From the repository root:
 
 ```bash
 git status --short
-./scripts/check.sh
+./scripts/check.sh --strict
 ```
 
 Expected result:
 
 - Working tree contains only intentional release-prep changes.
-- `./scripts/check.sh` passes markdown links, secret scan, Android tests, macOS
+- `./scripts/check.sh --strict` passes markdown links, secret scan, Android tests, macOS
   tests, and protocol fixtures.
 
 Also review:
@@ -84,9 +84,6 @@ Local dry-run output is ad-hoc signed by default. It is not public-beta ready.
 Run only after the external Apple gates are available:
 
 ```bash
-SIGN_IDENTITY="Developer ID Application: Example Team (TEAMID1234)" \
-./packaging/macos/package-local.sh
-
 SIGN_IDENTITY="Developer ID Application: Example Team (TEAMID1234)" \
 NOTARY_PROFILE="hyphen-notary" \
 ./packaging/macos/notarize-dry-run.sh

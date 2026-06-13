@@ -35,6 +35,16 @@ HYPHEN_ANDROID_KEY_PASSWORD="..." \
 
 If any signing variable is set, all four must be set; the Gradle build fails closed on partial signing configuration.
 
+## Gradle Wrapper Integrity
+
+`apps/android/gradle/wrapper/gradle-wrapper.properties` pins the Gradle
+distribution checksum with `distributionSha256Sum`. Refresh it only when
+upgrading Gradle, using the matching official checksum endpoint:
+
+```bash
+curl -sL https://services.gradle.org/distributions/gradle-8.14.3-bin.zip.sha256
+```
+
 ## Play Policy Drafts
 
 - [Foreground service declaration draft](fgs-declaration-draft.md)

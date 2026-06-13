@@ -86,6 +86,17 @@ def validate(instance, schema, path="$"):
                 validate(instance[key], sub, f"{path}.{key}")
 
 
+def check_schema_keywords(schema, path="$"):
+    unsupported = set(schema) - ANNOTATIONS - SUPPORTED
+    if unsupported:
+        raise RuntimeError(f"schema uses unsupported keywords {unsupported} at {path}")
+
+    for key, sub in schema.get("properties", {}).items():
+        check_schema_keywords(sub, f"{path}.properties.{key}")
+    if "propertyNames" in schema:
+        check_schema_keywords(schema["propertyNames"], f"{path}.propertyNames")
+
+
 def main():
     schemas = sorted((ROOT / "protocol" / "schema").glob("*.schema.json"))
     if not schemas:
@@ -96,6 +107,12 @@ def main():
     for schema_path in schemas:
         name = schema_path.name.replace(".schema.json", "")
         schema = json.loads(schema_path.read_text())
+        try:
+            check_schema_keywords(schema)
+        except RuntimeError as e:
+            print(f"  FAIL {name}: {e}")
+            failures += 1
+            continue
         vectors = ROOT / "protocol" / "test-vectors" / name
 
         for fixture in sorted((vectors / "valid").glob("*.json")):

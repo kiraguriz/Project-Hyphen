@@ -38,6 +38,7 @@ object HyphenTls {
 class TlsServer(
     private val identity: TlsIdentity,
     private val isTrusted: (ByteArray) -> Boolean,
+    private val handshakeTimeoutMillis: Int = 5_000,
 ) {
     private var serverSocket: SSLServerSocket? = null
 
@@ -58,13 +59,17 @@ class TlsServer(
                 } catch (_: IOException) {
                     return@thread // closed by stop()
                 }
-                try {
-                    socket.startHandshake()
-                    onConnection(socket)
-                } catch (_: IOException) {
-                    // Handshake rejection (e.g. unpinned client) closes
-                    // this socket only; the server keeps accepting.
-                    runCatching { socket.close() }
+                thread(isDaemon = true, name = "hyphen-tls-handshake") {
+                    try {
+                        socket.soTimeout = handshakeTimeoutMillis
+                        socket.startHandshake()
+                        socket.soTimeout = 0
+                        onConnection(socket)
+                    } catch (_: IOException) {
+                        // Handshake rejection (e.g. unpinned client) closes
+                        // this socket only; the server keeps accepting.
+                        runCatching { socket.close() }
+                    }
                 }
             }
         }

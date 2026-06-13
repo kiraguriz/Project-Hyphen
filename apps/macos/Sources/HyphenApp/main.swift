@@ -32,6 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(sendTextLink(_:)),
         keyEquivalent: "t"
     )
+    private let sendFileItem = NSMenuItem(
+        title: "Send File to Android…",
+        action: #selector(sendFile(_:)),
+        keyEquivalent: "f"
+    )
     private let cancelTransferItem = NSMenuItem(
         title: "Cancel Active Transfer",
         action: #selector(cancelActiveTransfer(_:)),
@@ -82,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pairItem.target = self
         managePeersItem.target = self
         sendTextItem.target = self
+        sendFileItem.target = self
         cancelTransferItem.target = self
         previewDiagnosticsItem.target = self
         exportDiagnosticsItem.target = self
@@ -96,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(pairItem)
         menu.addItem(managePeersItem)
         menu.addItem(sendTextItem)
+        menu.addItem(sendFileItem)
         menu.addItem(cancelTransferItem)
         menu.addItem(.separator())
         menu.addItem(betaDiagnosticsItem)
@@ -187,6 +194,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         pairingController.sendTextLink(raw: input.stringValue)
+    }
+
+    @objc private func sendFile(_ sender: NSMenuItem) {
+        guard let pairingController else {
+            stateItem.title = "transfer/send: no active Android session"
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            stateItem.title = "transfer/send cancelled"
+            return
+        }
+        pairingController.sendFile(url: url)
     }
 
     @objc private func managePeers(_ sender: NSMenuItem) {

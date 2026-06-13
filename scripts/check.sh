@@ -6,6 +6,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
+strict=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --strict) strict=1 ;;
+    *)
+      echo "usage: $0 [--strict]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+skip_check() {
+  echo "  SKIP: $*"
+  if [ "$strict" -eq 1 ]; then
+    fail=1
+  fi
+}
 
 # --- [1/5] markdown relative links -----------------------------------------
 echo "[1/5] markdown relative links"
@@ -48,7 +66,7 @@ echo "[3/5] android unit tests"
 if [ -x apps/android/gradlew ]; then
   (cd apps/android && ./gradlew --quiet test) || fail=1
 else
-  echo "  SKIP: no Gradle project yet (pending HYP-M1-001)"
+  skip_check "no Gradle project yet (pending HYP-M1-001)"
 fi
 
 # --- [4/5] macos ------------------------------------------------------------
@@ -61,10 +79,10 @@ if compgen -G 'apps/macos/*.xcodeproj' >/dev/null || [ -f apps/macos/Package.swi
       (cd apps/macos && xcodebuild build -quiet) || fail=1
     fi
   else
-    echo "  SKIP: Xcode toolchain not available on this machine"
+    skip_check "Xcode toolchain not available on this machine"
   fi
 else
-  echo "  SKIP: no macOS project yet (pending HYP-M1-010)"
+  skip_check "no macOS project yet (pending HYP-M1-010)"
 fi
 
 # --- [5/5] protocol schemas ---------------------------------------------------
@@ -72,12 +90,16 @@ echo "[5/5] protocol schemas and test vectors"
 if [ -x scripts/test-protocol.sh ]; then
   ./scripts/test-protocol.sh || fail=1
 else
-  echo "  SKIP: scripts/test-protocol.sh missing (pending HYP-M2-001)"
+  skip_check "scripts/test-protocol.sh missing (pending HYP-M2-001)"
 fi
 
 # --- summary -----------------------------------------------------------------
 if [ "$fail" -eq 0 ]; then
-  echo "check.sh: all available checks passed (platform checks above may be SKIPped until M1/M2 land)"
+  if [ "$strict" -eq 1 ]; then
+    echo "check.sh: strict checks passed"
+  else
+    echo "check.sh: all available checks passed (platform checks above may be SKIPped until M1/M2 land)"
+  fi
 else
   echo "check.sh: FAILURES above" >&2
 fi

@@ -1,5 +1,6 @@
 package dev.hyphen.android.transport
 
+import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
@@ -131,6 +132,35 @@ class TlsPinningTest {
             isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
         ).use {
             assertEquals('k'.code, it.inputStream.read())
+        }
+    }
+
+    @Test
+    fun `half open TLS client does not block the accept loop`() {
+        val tlsServer = TlsServer(
+            serverIdentity,
+            isTrusted = { it.contentEquals(clientIdentity.spkiFingerprint) },
+            handshakeTimeoutMillis = 200,
+        )
+        server = tlsServer
+        val port = tlsServer.start { socket ->
+            socket.outputStream.write('k'.code)
+            socket.outputStream.flush()
+        }
+
+        val stalled = Socket("127.0.0.1", port)
+        try {
+            Thread.sleep(50)
+            TlsClient.connect(
+                host = "127.0.0.1",
+                port = port,
+                identity = clientIdentity,
+                isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+            ).use {
+                assertEquals('k'.code, it.inputStream.read())
+            }
+        } finally {
+            runCatching { stalled.close() }
         }
     }
 

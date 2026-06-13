@@ -110,19 +110,6 @@ interface TransferByteSource {
 
     fun sha256Hex(): String =
         openStream().use { sha256Hex(it) }
-
-    fun readChunk(offset: Long, maxBytes: Int): ByteArray =
-        openStream().use { input ->
-            skipFully(input, offset)
-            val buffer = ByteArray(maxBytes)
-            var total = 0
-            while (total < maxBytes) {
-                val read = input.read(buffer, total, maxBytes - total)
-                if (read == -1) break
-                total += read
-            }
-            buffer.copyOf(total)
-        }
 }
 
 class FileTransferByteSource(private val file: File) : TransferByteSource {
@@ -130,6 +117,18 @@ class FileTransferByteSource(private val file: File) : TransferByteSource {
         get() = file.length()
 
     override fun openStream(): InputStream = FileInputStream(file)
+}
+
+/**
+ * Stream-backed source for inputs that are not plain files (e.g. content://
+ * URIs resolved through a ContentResolver). [open] must return a fresh stream
+ * on every call, since the sender re-opens for hashing, sending, and resume.
+ */
+class StreamTransferByteSource(
+    override val sizeBytes: Long,
+    private val open: () -> InputStream,
+) : TransferByteSource {
+    override fun openStream(): InputStream = open()
 }
 
 interface TransferStorage {
@@ -203,6 +202,7 @@ data class TransferResumeRequest(val fileId: String) {
 data class TransferResumeInfo(
     val fileId: String,
     val nextChunkIndex: Int,
+    val needsManifest: Boolean = false,
 ) {
     init {
         require(FILE_ID.matches(fileId)) { "invalid fileId" }
@@ -213,13 +213,16 @@ data class TransferResumeInfo(
         Json.obj(
             "fileId" to Json.Str(fileId),
             "nextChunkIndex" to Json.Num(nextChunkIndex.toString()),
-        )
+        ).let { obj ->
+            if (needsManifest) Json.Obj(obj.entries + ("needsManifest" to Json.Bool(true))) else obj
+        }
 
     companion object {
         fun fromJson(payload: Json.Obj): TransferResumeInfo =
             TransferResumeInfo(
                 fileId = string(payload, "fileId"),
                 nextChunkIndex = int(payload, "nextChunkIndex"),
+                needsManifest = optionalBool(payload, "needsManifest") ?: false,
             )
     }
 }
@@ -296,18 +299,46 @@ class ProtocolSessionTransferOutbox(private val session: ProtocolSession) : Tran
         session.send(type = type, capability = capability, requiresAck = requiresAck, payload = payload)
 }
 
+/**
+ * Streams an outbound file under a bounded in-flight window: at most
+ * [outstandingWindow] chunks may be unacked at once; [handleAck] releases a slot
+ * and pumps the next. Mirrors the macOS `TransferSender`. macOS serializes all
+ * calls onto its main queue; on Android `handleAck`/`handleResumeInfo` arrive on
+ * the session read thread while `sendSource` runs on a sender thread, so the
+ * mutating entry points are `@Synchronized` on the instance monitor.
+ */
 class TransferSender(
     private val outbox: TransferOutbox,
     private val negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities? = null,
+    private val outstandingWindow: Int = 8,
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
+    init {
+        require(outstandingWindow > 0) { "outstandingWindow must be positive" }
+    }
+
     private data class RegisteredTransfer(
         val manifest: TransferManifest,
         val source: TransferByteSource,
     )
 
-    private val registered = mutableMapOf<String, RegisteredTransfer>()
+    private class ActiveSend(
+        val manifest: TransferManifest,
+        var stream: InputStream?,
+        var nextIndex: Int,
+    ) {
+        val outstanding = mutableMapOf<String, Int>()
 
+        fun closeStream() {
+            stream?.close()
+            stream = null
+        }
+    }
+
+    private val registered = mutableMapOf<String, RegisteredTransfer>()
+    private val activeSends = mutableMapOf<String, ActiveSend>()
+
+    @Synchronized
     fun sendSource(
         filename: String,
         mimeType: String,
@@ -330,24 +361,69 @@ class TransferSender(
         return manifest
     }
 
+    @Synchronized
     fun sendRemaining(fileId: String, fromChunkIndex: Int) {
         val transfer = registered[fileId] ?: throw IllegalArgumentException("unknown outbound fileId")
         val manifest = transfer.manifest
         val source = transfer.source
         require(fromChunkIndex in 0..manifest.chunkCount) { "fromChunkIndex out of range" }
         require(source.sizeBytes == manifest.sizeBytes) { "size mismatch" }
-        require(source.sha256Hex() == manifest.sha256) { "file sha256 mismatch" }
-        for (index in fromChunkIndex until manifest.chunkCount) {
-            val start = index.toLong() * manifest.chunkSizeBytes.toLong()
-            val expected = manifest.expectedChunkBytes(index)
-            val chunk = TransferChunk(manifest.fileId, index, source.readChunk(start, expected))
-            outbox.send(TransferProtocol.TYPE_CHUNK, TransferProtocol.CAPABILITY, true, chunk.toJson())
-            onProgress(TransferProgress.from(manifest, completedChunks = index + 1))
+        activeSends.remove(fileId)?.closeStream()
+        if (fromChunkIndex == manifest.chunkCount) {
+            onProgress(TransferProgress.from(manifest, completedChunks = manifest.chunkCount))
+            return
         }
+        val stream = source.openStream()
+        skipFully(stream, fromChunkIndex.toLong() * manifest.chunkSizeBytes.toLong())
+        activeSends[fileId] = ActiveSend(manifest, stream, fromChunkIndex)
+        pumpChunks(fileId)
     }
 
+    @Synchronized
     fun handleResumeInfo(info: TransferResumeInfo) {
+        if (info.needsManifest) {
+            val transfer = registered[info.fileId] ?: throw IllegalArgumentException("unknown outbound fileId")
+            outbox.send(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, transfer.manifest.toJson())
+            onProgress(TransferProgress.from(transfer.manifest, completedChunks = 0))
+        }
         sendRemaining(info.fileId, info.nextChunkIndex)
+    }
+
+    @Synchronized
+    fun handleAck(messageId: String) {
+        val fileId = activeSends.entries
+            .firstOrNull { it.value.outstanding.containsKey(messageId) }?.key ?: return
+        val active = activeSends[fileId] ?: return
+        active.outstanding.remove(messageId)
+        pumpChunks(fileId)
+    }
+
+    private fun pumpChunks(fileId: String) {
+        val active = activeSends[fileId] ?: return
+        while (active.outstanding.size < outstandingWindow && active.nextIndex < active.manifest.chunkCount) {
+            val stream = active.stream ?: break
+            val index = active.nextIndex
+            val chunk = TransferChunk(
+                active.manifest.fileId,
+                index,
+                readNextChunk(stream, active.manifest.expectedChunkBytes(index)),
+            )
+            val messageId = outbox.send(
+                TransferProtocol.TYPE_CHUNK,
+                TransferProtocol.CAPABILITY,
+                true,
+                chunk.toJson(),
+            )
+            active.outstanding[messageId] = index
+            active.nextIndex += 1
+            onProgress(TransferProgress.from(active.manifest, completedChunks = index + 1))
+        }
+        if (active.nextIndex == active.manifest.chunkCount) {
+            active.closeStream()
+            if (active.outstanding.isEmpty()) {
+                activeSends.remove(fileId)
+            }
+        }
     }
 
     fun requestResume(fileId: String): String =
@@ -395,15 +471,26 @@ class TransferReceiver(
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
     private val states = mutableMapOf<String, TransferState>()
+    private val completed = mutableMapOf<String, TransferCompleted>()
 
     fun checkpoint(fileId: String): TransferResumeInfo? =
-        states[fileId]?.checkpoint()
+        states[fileId]?.checkpoint() ?: completed[fileId]?.checkpoint()
 
     fun handle(envelope: Envelope): TransferEvent {
         if (envelope.capability != TransferProtocol.CAPABILITY) return TransferEvent.Ignored
         return when (envelope.type) {
             TransferProtocol.TYPE_MANIFEST -> {
                 val manifest = TransferManifest.fromJson(envelope.payload)
+                states[manifest.fileId]?.let { existing ->
+                    require(existing.manifest == manifest) { "manifest does not match active transfer" }
+                    onProgress(existing.progress())
+                    completeIfReady(existing)?.let { return TransferEvent.Completed(it) }
+                    return TransferEvent.Ignored
+                }
+                completed[manifest.fileId]?.let { existing ->
+                    require(existing.manifest == manifest) { "manifest does not match completed transfer" }
+                    return TransferEvent.Ignored
+                }
                 val state = TransferState(manifest, storage.prepare(manifest))
                 states[manifest.fileId] = state
                 onProgress(TransferProgress.from(manifest, completedChunks = 0))
@@ -419,13 +506,15 @@ class TransferReceiver(
             TransferProtocol.TYPE_RESUME_REQUEST -> {
                 val request = TransferResumeRequest.fromJson(envelope.payload)
                 TransferEvent.ResumeRequested(
-                    states[request.fileId]?.checkpoint() ?: TransferResumeInfo(request.fileId, nextChunkIndex = 0),
+                    states[request.fileId]?.checkpoint()
+                        ?: completed[request.fileId]?.checkpoint()
+                        ?: TransferResumeInfo(request.fileId, nextChunkIndex = 0, needsManifest = true),
                 )
             }
             TransferProtocol.TYPE_CANCEL -> {
                 val cancel = TransferCancel.fromJson(envelope.payload)
                 if (cancel.discard) {
-                    states.remove(cancel.fileId)
+                    states.remove(cancel.fileId)?.close()
                     storage.discard(cancel.fileId)
                 }
                 TransferEvent.Cancelled(cancel)
@@ -436,12 +525,18 @@ class TransferReceiver(
 
     private fun completeIfReady(state: TransferState): TransferCompleted? {
         val file = state.fileIfComplete() ?: return null
+        state.close()
         require(file.length() == state.manifest.sizeBytes) { "size mismatch" }
         val digest = file.inputStream().use { sha256Hex(it) }
         require(digest == state.manifest.sha256) { "file sha256 mismatch" }
         states.remove(state.manifest.fileId)
-        return TransferCompleted(state.manifest, file, digest)
+        val done = TransferCompleted(state.manifest, file, digest)
+        completed[state.manifest.fileId] = done
+        return done
     }
+
+    private fun TransferCompleted.checkpoint(): TransferResumeInfo =
+        TransferResumeInfo(manifest.fileId, manifest.chunkCount)
 }
 
 private class TransferState(
@@ -449,15 +544,21 @@ private class TransferState(
     private val file: File,
 ) {
     private val received = BooleanArray(manifest.chunkCount)
+    private var handle: RandomAccessFile? = null
 
     fun accept(chunk: TransferChunk) {
         require(chunk.chunkIndex < received.size) { "chunkIndex out of range" }
         require(chunk.data.size == manifest.expectedChunkBytes(chunk.chunkIndex)) { "chunk size mismatch" }
-        RandomAccessFile(file, "rw").use {
-            it.seek(chunk.chunkIndex.toLong() * manifest.chunkSizeBytes.toLong())
-            it.write(chunk.data)
-        }
+        val raf = handle ?: RandomAccessFile(file, "rw").also { handle = it }
+        raf.seek(chunk.chunkIndex.toLong() * manifest.chunkSizeBytes.toLong())
+        raf.write(chunk.data)
         received[chunk.chunkIndex] = true
+    }
+
+    /** Releases the long-lived write handle so the file can be read back and the descriptor is not leaked. */
+    fun close() {
+        handle?.let { runCatching { it.close() } }
+        handle = null
     }
 
     fun fileIfComplete(): File? {
@@ -500,6 +601,13 @@ private fun int(payload: Json.Obj, field: String): Int =
 private fun bool(payload: Json.Obj, field: String): Boolean =
     (payload[field] as? Json.Bool)?.value ?: throw IllegalArgumentException("$field must be boolean")
 
+private fun optionalBool(payload: Json.Obj, field: String): Boolean? =
+    when (val value = payload[field]) {
+        null -> null
+        is Json.Bool -> value.value
+        else -> throw IllegalArgumentException("$field must be boolean")
+    }
+
 private fun sha256Hex(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256")
         .digest(bytes)
@@ -528,4 +636,16 @@ private fun skipFully(input: InputStream, bytes: Long) {
             remaining--
         }
     }
+}
+
+/** Reads up to [maxBytes] sequentially from an already-positioned stream. */
+private fun readNextChunk(input: InputStream, maxBytes: Int): ByteArray {
+    val buffer = ByteArray(maxBytes)
+    var total = 0
+    while (total < maxBytes) {
+        val read = input.read(buffer, total, maxBytes - total)
+        if (read == -1) break
+        total += read
+    }
+    return if (total == maxBytes) buffer else buffer.copyOf(total)
 }

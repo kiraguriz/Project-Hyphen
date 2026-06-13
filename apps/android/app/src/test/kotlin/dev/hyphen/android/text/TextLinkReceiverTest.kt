@@ -82,4 +82,30 @@ class TextLinkReceiverTest {
 
         assertTrue(error is IllegalArgumentException)
     }
+
+    @Test
+    fun resolvedConfirmationIsRemovedFromPending() {
+        val receiver = TextLinkReceiver()
+        val request = receiver.handle(
+            envelope(payload = Json.obj("kind" to Json.Str("text"), "value" to Json.Str("hello"))),
+        )!!
+
+        assertTrue(receiver.resolve(request.messageId))
+        assertTrue(receiver.pending.isEmpty())
+    }
+
+    @Test
+    fun pendingConfirmationsAreBounded() {
+        val receiver = TextLinkReceiver(maxPending = 2)
+        repeat(3) { index ->
+            receiver.handle(
+                envelope(
+                    payload = Json.obj("kind" to Json.Str("text"), "value" to Json.Str("hello-$index")),
+                ),
+            )
+        }
+
+        assertEquals(2, receiver.pending.size)
+        assertEquals("hello-1", receiver.pending.first().message.value)
+    }
 }

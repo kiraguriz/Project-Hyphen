@@ -80,6 +80,35 @@ class ProtocolSessionTest {
 
     private var serverPort = 0
 
+    private fun startServerSession(
+        listener: RecordingListener,
+        config: ProtocolSession.Config = fast.copy(heartbeatIntervalMs = 60_000),
+    ): Int {
+        val tlsServer = TlsServer(serverIdentity, isTrusted = { it.contentEquals(clientIdentity.spkiFingerprint) })
+        server = tlsServer
+        return tlsServer.start { socket ->
+            val session = ProtocolSession(socket, "s_test1", config, listener)
+            synchronized(sessions) { sessions += session }
+            session.start()
+        }
+    }
+
+    private fun rawEnvelope(
+        sessionId: String? = "s_test1",
+        seq: Long = 1,
+        type: String = "text.send",
+    ): Envelope =
+        Envelope(
+            messageId = Ulid.generate(),
+            sessionId = sessionId,
+            type = type,
+            capability = "text.v1",
+            seq = seq,
+            sentAtUnixMs = System.currentTimeMillis(),
+            requiresAck = false,
+            payload = Json.obj("kind" to Json.Str("text")),
+        )
+
     /** Builds a connected session pair; configs per side. */
     private fun connectedPair(
         serverConfig: ProtocolSession.Config,
@@ -199,5 +228,67 @@ class ProtocolSessionTest {
         )
         assertEquals("transport/frame-too-large", serverListener.protocolError.get())
         runCatching { socket.close() }
+    }
+
+    @Test
+    fun `wrong session id is rejected before delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        socket.use {
+            FrameIO.write(it.outputStream, rawEnvelope(sessionId = "s_other").encode())
+        }
+
+        assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+        assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+        assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `missing session id is rejected before delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        socket.use {
+            FrameIO.write(it.outputStream, rawEnvelope(sessionId = null).encode())
+        }
+
+        assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+        assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+        assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `duplicate inbound sequence is rejected`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        socket.use {
+            FrameIO.write(it.outputStream, rawEnvelope(seq = 1).encode())
+            FrameIO.write(it.outputStream, rawEnvelope(seq = 1).encode())
+        }
+
+        assertTrue(serverListener.envelopeLatch.await(3, TimeUnit.SECONDS))
+        assertEquals(1, synchronized(serverListener.envelopes) { serverListener.envelopes.size })
+        assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+        assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
     }
 }

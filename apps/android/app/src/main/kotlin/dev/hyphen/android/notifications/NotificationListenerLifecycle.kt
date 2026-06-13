@@ -1,6 +1,10 @@
 package dev.hyphen.android.notifications
 
 import android.service.notification.StatusBarNotification
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class NotificationListenerConnectionState {
     DISCONNECTED,
@@ -41,6 +45,7 @@ class NotificationListenerLifecycle {
 object HyphenNotificationListenerRuntime {
     private val lifecycle = NotificationListenerLifecycle()
     private var eventSender: NotificationMirrorEventSender? = null
+    private var dispatcher: NotificationDispatchQueue? = null
     private var privacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL
     private var canceller: NotificationCanceller? = null
     private var replier: NotificationReplier? = null
@@ -67,10 +72,14 @@ object HyphenNotificationListenerRuntime {
 
     fun bindNotificationOutbox(outbox: NotificationOutbox) = synchronized(lifecycle) {
         eventSender = NotificationMirrorEventSender(outbox, privacyMode)
+        dispatcher?.shutdown()
+        dispatcher = NotificationDispatchQueue()
     }
 
     fun clearNotificationOutbox() = synchronized(lifecycle) {
         eventSender = null
+        dispatcher?.shutdown()
+        dispatcher = null
     }
 
     fun notificationPrivacyMode(): NotificationPrivacyMode = synchronized(lifecycle) {
@@ -109,14 +118,53 @@ object HyphenNotificationListenerRuntime {
         current.reply(sbnKey, actionIndex, text)
     }
 
-    fun onNotificationPosted(sbn: StatusBarNotification): String? {
-        val sender = synchronized(lifecycle) { eventSender } ?: return null
+    fun onNotificationPosted(sbn: StatusBarNotification): Boolean {
+        val (sender, queue) = synchronized(lifecycle) {
+            val sender = eventSender ?: return false
+            val queue = dispatcher ?: return false
+            sender to queue
+        }
         val payload = NormalizedNotificationPayload.fromStatusBarNotification(sbn)
-        return runCatching { sender.sendPostedOrUpdated(payload) }.getOrNull()
+        return queue.submit { runCatching { sender.sendPostedOrUpdated(payload) } }
     }
 
-    fun onNotificationRemoved(sbn: StatusBarNotification): String? {
-        val sender = synchronized(lifecycle) { eventSender } ?: return null
-        return runCatching { sender.sendRemoved(sbn.key) }.getOrNull()
+    fun onNotificationRemoved(sbn: StatusBarNotification): Boolean {
+        val (sender, queue) = synchronized(lifecycle) {
+            val sender = eventSender ?: return false
+            val queue = dispatcher ?: return false
+            sender to queue
+        }
+        val key = sbn.key
+        return queue.submit { runCatching { sender.sendRemoved(key) } }
+    }
+}
+
+class NotificationDispatchQueue(
+    capacity: Int = 128,
+    private val dropped: AtomicInteger = AtomicInteger(0),
+) {
+    private val executor = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(capacity),
+        { runnable -> Thread(runnable, "hyphen-notification-dispatch").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+
+    fun submit(task: () -> Unit): Boolean =
+        try {
+            executor.execute(task)
+            true
+        } catch (_: RuntimeException) {
+            dropped.incrementAndGet()
+            false
+        }
+
+    fun droppedCount(): Int = dropped.get()
+
+    fun shutdown() {
+        executor.shutdownNow()
     }
 }

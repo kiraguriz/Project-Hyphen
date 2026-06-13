@@ -10,6 +10,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -51,9 +52,11 @@ import dev.hyphen.android.transfer.TransferCancel
 import dev.hyphen.android.transfer.TransferCompleted
 import dev.hyphen.android.transfer.TransferEvent
 import dev.hyphen.android.transfer.FileTransferStorage
+import dev.hyphen.android.transfer.StreamTransferByteSource
 import dev.hyphen.android.transfer.TransferProgress
 import dev.hyphen.android.transfer.TransferProtocol
 import dev.hyphen.android.transfer.TransferReceiver
+import dev.hyphen.android.transfer.TransferResumeInfo
 import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
 import dev.hyphen.android.transport.Envelope
@@ -65,6 +68,7 @@ import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
 import dev.hyphen.android.trust.TrustedPeer
 import java.io.File
+import java.io.InputStream
 import javax.net.ssl.SSLSocket
 
 // Plain-view debug surface for the M1 PoCs; Compose arrives with the first
@@ -77,6 +81,7 @@ class MainActivity : Activity() {
     private lateinit var betaDiagnosticsButton: Button
     private var activeSession: ProtocolSession? = null
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
+    private var activeTransferSender: TransferSender? = null
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
     private val textReceiver = TextLinkReceiver()
@@ -162,6 +167,10 @@ class MainActivity : Activity() {
             text = "Send text/link to Mac"
             setOnClickListener { sendTextLink(textInput.text.toString()) }
         }
+        val sendFileButton = Button(this).apply {
+            text = "Send file to Mac"
+            setOnClickListener { pickFileToSend() }
+        }
         val cancelTransferButton = Button(this).apply {
             text = "Cancel active transfer"
             setOnClickListener { cancelActiveTransfer() }
@@ -198,6 +207,7 @@ class MainActivity : Activity() {
                 addView(notificationPrivacyButton)
                 addView(textInput)
                 addView(sendTextButton)
+                addView(sendFileButton)
                 addView(cancelTransferButton)
                 addView(betaDiagnosticsButton)
                 addView(previewDiagnosticsButton)
@@ -422,10 +432,16 @@ class MainActivity : Activity() {
                         handleSessionEnvelope(envelope)
                     }
 
+                    override fun onAck(messageId: String) {
+                        // Advances the outbound transfer window (chunk acks).
+                        runCatching { activeTransferSender?.handleAck(messageId) }
+                    }
+
 	                    override fun onClosed() {
 	                        if (activeSession === session) {
                             activeSession = null
 	                            activeCapabilities = null
+                            activeTransferSender = null
                             lastTransferProgress = null
 	                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
 	                        }
@@ -441,6 +457,14 @@ class MainActivity : Activity() {
                 activeSession?.stop()
                 activeSession = session
                 activeCapabilities = handshake.negotiatedCapabilities
+                activeTransferSender = TransferSender(
+                    ProtocolSessionTransferOutbox(session),
+                    handshake.negotiatedCapabilities,
+                    onProgress = { progress ->
+                        lastTransferProgress = progress
+                        runOnUiThread { append(transferProgressLine(progress)) }
+                    },
+                )
                 HyphenNotificationListenerRuntime.bindNotificationOutbox(
                     ProtocolSessionNotificationOutbox(session),
                 )
@@ -502,10 +526,24 @@ class MainActivity : Activity() {
                 }
             }
             if (envelope.capability == TransferProtocol.CAPABILITY) {
+                if (envelope.type == TransferProtocol.TYPE_RESUME_INFO) {
+                    val info = TransferResumeInfo.fromJson(envelope.payload)
+                    try {
+                        activeTransferSender?.handleResumeInfo(info)
+                        runOnUiThread { append("transfer resume continued: ${info.fileId}") }
+                    } catch (e: Exception) {
+                        runOnUiThread { append("transfer resume info ignored: ${e.message}") }
+                    }
+                    return
+                }
                 when (val event = transferReceiver.handle(envelope)) {
                     is TransferEvent.Completed -> {
                         lastTransferProgress = null
-                        runOnUiThread { append(transferCompletedLine(event.completed)) }
+                        // Debug surface keeps no copy; drop the temp file so completed
+                        // transfers do not accumulate in the storage directory.
+                        val line = transferCompletedLine(event.completed)
+                        event.completed.file.delete()
+                        runOnUiThread { append(line) }
                     }
                     is TransferEvent.ResumeRequested -> {
                         if (session != null) {
@@ -596,6 +634,95 @@ class MainActivity : Activity() {
         return "peer error: $code regarding $regarding"
     }
 
+    private fun pickFileToSend() {
+        if (activeTransferSender == null) {
+            append("transfer/send: no active Mac session")
+            return
+        }
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        try {
+            startActivityForResult(Intent.createChooser(intent, "Send file to Mac"), REQUEST_PICK_FILE)
+        } catch (e: ActivityNotFoundException) {
+            append("transfer/send: no file picker available")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_PICK_FILE) return
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            append("transfer/send cancelled")
+            return
+        }
+        sendFile(uri)
+    }
+
+    /**
+     * Outbound file send entry: feeds a content:// selection into the persistent
+     * [activeTransferSender], populating its outbound registry so a later
+     * resume.info/ack from the peer routes to a real transfer.
+     */
+    private fun sendFile(uri: Uri) {
+        val sender = activeTransferSender
+        if (sender == null) {
+            append("transfer/send: no active Mac session")
+            return
+        }
+        if (activeCapabilities?.contains(TransferProtocol.CAPABILITY) != true) {
+            append("transfer/send: peer did not negotiate transfer.v1")
+            return
+        }
+        val meta = queryContentMetadata(uri)
+        if (meta == null) {
+            append("transfer/send: could not read selected file size")
+            return
+        }
+        val source = StreamTransferByteSource(meta.sizeBytes) {
+            contentResolver.openInputStream(uri) ?: throw java.io.IOException("could not open $uri")
+        }
+        Thread {
+            try {
+                val manifest = sender.sendSource(
+                    filename = meta.filename,
+                    mimeType = meta.mimeType,
+                    source = source,
+                    chunkSizeBytes = DEFAULT_TRANSFER_CHUNK_BYTES,
+                )
+                runOnUiThread {
+                    append("transfer/send started: ${manifest.filename} (${manifest.sizeBytes} bytes)")
+                }
+            } catch (e: Exception) {
+                runOnUiThread { append("transfer/send failed: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private data class ContentMetadata(
+        val filename: String,
+        val mimeType: String,
+        val sizeBytes: Long,
+    )
+
+    private fun queryContentMetadata(uri: Uri): ContentMetadata? {
+        var name = uri.lastPathSegment ?: "file.bin"
+        var size = -1L
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) name = cursor.getString(nameIndex)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+            }
+        }
+        if (size < 0) return null
+        val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+        return ContentMetadata(name, mime, size)
+    }
+
     private fun cancelActiveTransfer() {
         val progress = lastTransferProgress
         if (progress == null || progress.isComplete) {
@@ -627,6 +754,7 @@ class MainActivity : Activity() {
             .setTitle(if (isUrl) "Open link from Mac?" else "Copy text from Mac?")
             .setMessage(request.message.value)
             .setPositiveButton(if (isUrl) "Open" else "Copy") { _, _ ->
+                textReceiver.resolve(request.messageId)
                 if (isUrl) {
                     openConfirmedLink(request.message.value)
                 } else {
@@ -634,6 +762,7 @@ class MainActivity : Activity() {
                 }
             }
             .setNegativeButton("Cancel") { _, _ ->
+                textReceiver.resolve(request.messageId)
                 append("text/link declined")
             }
             .show()
@@ -658,6 +787,10 @@ class MainActivity : Activity() {
         val session = activeSession
         if (session == null) {
             append("text/link: no active Mac session")
+            return
+        }
+        if (activeCapabilities?.contains(SessionHandshake.CAPABILITY_TEXT) != true) {
+            append("text/link: peer did not negotiate text.v1")
             return
         }
         val trimmed = raw.trim()
@@ -864,5 +997,7 @@ class MainActivity : Activity() {
     private companion object {
         const val DIAGNOSTICS_PREFS = "dev.hyphen.android.diagnostics"
         const val PREF_BETA_DIAGNOSTICS_ENABLED = "beta_diagnostics_enabled"
+        const val REQUEST_PICK_FILE = 4201
+        const val DEFAULT_TRANSFER_CHUNK_BYTES = 256 * 1024
     }
 }

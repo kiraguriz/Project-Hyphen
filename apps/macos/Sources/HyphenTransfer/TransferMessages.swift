@@ -126,26 +126,6 @@ public extension TransferByteSource {
     func sha256Hex() throws -> String {
         try sha256HexFromStream(try openStream())
     }
-
-    func readChunk(offset: Int64, maxBytes: Int) throws -> Data {
-        let stream = try openStream()
-        stream.open()
-        defer { stream.close() }
-        try skipFully(stream, bytes: offset)
-        var data = Data()
-        var remaining = maxBytes
-        var buffer = [UInt8](repeating: 0, count: min(8192, max(1, maxBytes)))
-        while remaining > 0 {
-            let read = stream.read(&buffer, maxLength: min(buffer.count, remaining))
-            if read < 0 {
-                throw TransferError.io(stream.streamError?.localizedDescription ?? "read failed")
-            }
-            if read == 0 { break }
-            data.append(buffer, count: read)
-            remaining -= read
-        }
-        return data
-    }
 }
 
 public final class FileTransferByteSource: TransferByteSource {
@@ -256,26 +236,33 @@ public struct TransferResumeRequest: Equatable {
 public struct TransferResumeInfo: Equatable {
     public let fileId: String
     public let nextChunkIndex: Int
+    public let needsManifest: Bool
 
-    public init(fileId: String, nextChunkIndex: Int) throws {
+    public init(fileId: String, nextChunkIndex: Int, needsManifest: Bool = false) throws {
         guard isValidFileId(fileId) else { throw TransferError.invalidPayload("invalid fileId") }
         guard nextChunkIndex >= 0 else { throw TransferError.invalidPayload("nextChunkIndex must be >= 0") }
         self.fileId = fileId
         self.nextChunkIndex = nextChunkIndex
+        self.needsManifest = needsManifest
     }
 
     public init(payload: [String: Any]) throws {
         try self.init(
             fileId: try string(payload, "fileId"),
-            nextChunkIndex: Int(try int64(payload, "nextChunkIndex"))
+            nextChunkIndex: Int(try int64(payload, "nextChunkIndex")),
+            needsManifest: try optionalBool(payload, "needsManifest") ?? false
         )
     }
 
     public var payload: [String: Any] {
-        [
+        var values: [String: Any] = [
             "fileId": fileId,
             "nextChunkIndex": nextChunkIndex,
         ]
+        if needsManifest {
+            values["needsManifest"] = true
+        }
+        return values
     }
 }
 
@@ -364,20 +351,48 @@ public final class TransferSender {
     private let outbox: TransferOutbox
     private let negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities?
     private let onProgress: (TransferProgress) -> Void
+    private let outstandingWindow: Int
     private struct RegisteredTransfer {
         let manifest: TransferManifest
         let source: TransferByteSource
     }
+    private final class ActiveSend {
+        let manifest: TransferManifest
+        let source: TransferByteSource
+        var stream: InputStream?
+        var nextIndex: Int
+        var outstanding: [String: Int] = [:]
+
+        init(manifest: TransferManifest, source: TransferByteSource, stream: InputStream, nextIndex: Int) {
+            self.manifest = manifest
+            self.source = source
+            self.stream = stream
+            self.nextIndex = nextIndex
+        }
+
+        func closeStream() {
+            stream?.close()
+            stream = nil
+        }
+    }
     private var registered: [String: RegisteredTransfer] = [:]
+    private var activeSends: [String: ActiveSend] = [:]
 
     public init(
         outbox: TransferOutbox,
         negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities? = nil,
+        outstandingWindow: Int = 8,
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) {
+        precondition(outstandingWindow > 0, "outstandingWindow must be positive")
         self.outbox = outbox
         self.negotiatedCapabilities = negotiatedCapabilities
+        self.outstandingWindow = outstandingWindow
         self.onProgress = onProgress
+    }
+
+    deinit {
+        activeSends.values.forEach { $0.closeStream() }
     }
 
     @discardableResult
@@ -436,28 +451,48 @@ public final class TransferSender {
         guard source.sizeBytes == manifest.sizeBytes else {
             throw TransferError.invalidPayload("size mismatch")
         }
-        guard try source.sha256Hex() == manifest.sha256 else {
-            throw TransferError.invalidPayload("file sha256 mismatch")
+        activeSends[fileId]?.closeStream()
+        if fromChunkIndex == manifest.chunkCount {
+            activeSends.removeValue(forKey: fileId)
+            onProgress(try TransferProgress(manifest: manifest, completedChunks: manifest.chunkCount))
+            return
         }
-        for index in fromChunkIndex..<manifest.chunkCount {
-            let start = Int64(index) * Int64(manifest.chunkSizeBytes)
-            let chunk = try TransferChunk(
-                fileId: manifest.fileId,
-                chunkIndex: index,
-                data: try source.readChunk(offset: start, maxBytes: manifest.expectedChunkBytes(index))
-            )
-            outbox.send(
-                type: TransferProtocol.typeChunk,
-                capability: TransferProtocol.capability,
-                requiresAck: true,
-                payload: chunk.payload
-            )
-            onProgress(try TransferProgress(manifest: manifest, completedChunks: index + 1))
-        }
+        let stream = try source.openStream()
+        stream.open()
+        try skipFully(stream, bytes: Int64(fromChunkIndex) * Int64(manifest.chunkSizeBytes))
+        activeSends[fileId] = ActiveSend(
+            manifest: manifest,
+            source: source,
+            stream: stream,
+            nextIndex: fromChunkIndex
+        )
+        try pumpChunks(fileId: fileId)
     }
 
     public func handleResumeInfo(_ info: TransferResumeInfo) throws {
+        if info.needsManifest {
+            guard let transfer = registered[info.fileId] else {
+                throw TransferError.invalidPayload("unknown outbound fileId")
+            }
+            outbox.send(
+                type: TransferProtocol.typeManifest,
+                capability: TransferProtocol.capability,
+                requiresAck: true,
+                payload: transfer.manifest.payload
+            )
+            onProgress(try TransferProgress(manifest: transfer.manifest, completedChunks: 0))
+        }
         try sendRemaining(fileId: info.fileId, fromChunkIndex: info.nextChunkIndex)
+    }
+
+    public func handleAck(_ messageId: String) throws {
+        guard let fileId = activeSends.first(where: { $0.value.outstanding[messageId] != nil })?.key,
+              let active = activeSends[fileId]
+        else {
+            return
+        }
+        active.outstanding.removeValue(forKey: messageId)
+        try pumpChunks(fileId: fileId)
     }
 
     @discardableResult
@@ -489,6 +524,36 @@ public final class TransferSender {
             payload: cancel.payload
         )
     }
+
+    private func pumpChunks(fileId: String) throws {
+        guard let active = activeSends[fileId] else { return }
+        while active.outstanding.count < outstandingWindow && active.nextIndex < active.manifest.chunkCount {
+            guard let stream = active.stream else { break }
+            let index = active.nextIndex
+            let chunk = try TransferChunk(
+                fileId: active.manifest.fileId,
+                chunkIndex: index,
+                data: try readNextChunk(stream, maxBytes: active.manifest.expectedChunkBytes(index))
+            )
+            let messageId = outbox.send(
+                type: TransferProtocol.typeChunk,
+                capability: TransferProtocol.capability,
+                requiresAck: true,
+                payload: chunk.payload
+            )
+            if let messageId {
+                active.outstanding[messageId] = index
+            }
+            active.nextIndex += 1
+            onProgress(try TransferProgress(manifest: active.manifest, completedChunks: index + 1))
+        }
+        if active.nextIndex == active.manifest.chunkCount {
+            active.closeStream()
+            if active.outstanding.isEmpty {
+                activeSends.removeValue(forKey: fileId)
+            }
+        }
+    }
 }
 
 public struct TransferCompleted: Equatable {
@@ -506,6 +571,7 @@ public enum TransferEvent: Equatable {
 
 public final class TransferReceiver {
     private var states: [String: TransferState] = [:]
+    private var completed: [String: TransferCompleted] = [:]
     private let storage: TransferStorage
     private let onProgress: (TransferProgress) -> Void
 
@@ -518,7 +584,10 @@ public final class TransferReceiver {
     }
 
     public func checkpoint(fileId: String) -> TransferResumeInfo? {
-        try? states[fileId]?.checkpoint()
+        if let state = states[fileId] {
+            return try? state.checkpoint()
+        }
+        return completedCheckpoint(fileId: fileId)
     }
 
     public func handle(_ envelope: Envelope) throws -> TransferEvent {
@@ -526,6 +595,20 @@ public final class TransferReceiver {
         switch envelope.type {
         case TransferProtocol.typeManifest:
             let manifest = try TransferManifest(payload: envelope.payload)
+            if let existing = states[manifest.fileId] {
+                guard existing.manifest == manifest else {
+                    throw TransferError.invalidPayload("manifest does not match active transfer")
+                }
+                onProgress(try existing.progress())
+                if let completed = try completeIfReady(existing) { return .completed(completed) }
+                return .ignored
+            }
+            if let existing = completed[manifest.fileId] {
+                guard existing.manifest == manifest else {
+                    throw TransferError.invalidPayload("manifest does not match completed transfer")
+                }
+                return .ignored
+            }
             let state = try TransferState(manifest: manifest, fileURL: storage.prepare(manifest: manifest))
             states[manifest.fileId] = state
             onProgress(try TransferProgress(manifest: manifest, completedChunks: 0))
@@ -542,11 +625,15 @@ public final class TransferReceiver {
             return .ignored
         case TransferProtocol.typeResumeRequest:
             let request = try TransferResumeRequest(payload: envelope.payload)
-            return .resumeRequested(try states[request.fileId]?.checkpoint() ?? TransferResumeInfo(fileId: request.fileId, nextChunkIndex: 0))
+            return .resumeRequested(
+                try states[request.fileId]?.checkpoint()
+                    ?? completedCheckpoint(fileId: request.fileId)
+                    ?? TransferResumeInfo(fileId: request.fileId, nextChunkIndex: 0, needsManifest: true)
+            )
         case TransferProtocol.typeCancel:
             let cancel = try TransferCancel(payload: envelope.payload)
             if cancel.discard {
-                states.removeValue(forKey: cancel.fileId)
+                states.removeValue(forKey: cancel.fileId)?.close()
                 storage.discard(fileId: cancel.fileId)
             }
             return .cancelled(cancel)
@@ -557,6 +644,7 @@ public final class TransferReceiver {
 
     private func completeIfReady(_ state: TransferState) throws -> TransferCompleted? {
         guard let fileURL = state.fileIfComplete() else { return nil }
+        state.close()
         let size = ((try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value) ?? -1
         guard size == state.manifest.sizeBytes else {
             throw TransferError.invalidPayload("size mismatch")
@@ -566,7 +654,14 @@ public final class TransferReceiver {
             throw TransferError.invalidPayload("file sha256 mismatch")
         }
         states.removeValue(forKey: state.manifest.fileId)
-        return TransferCompleted(manifest: state.manifest, fileURL: fileURL, sha256: digest)
+        let done = TransferCompleted(manifest: state.manifest, fileURL: fileURL, sha256: digest)
+        completed[state.manifest.fileId] = done
+        return done
+    }
+
+    private func completedCheckpoint(fileId: String) -> TransferResumeInfo? {
+        guard let completed = completed[fileId] else { return nil }
+        return try? TransferResumeInfo(fileId: fileId, nextChunkIndex: completed.manifest.chunkCount)
     }
 }
 
@@ -574,11 +669,16 @@ private final class TransferState {
     let manifest: TransferManifest
     private let fileURL: URL
     private var received: [Bool]
+    private var handle: FileHandle?
 
     init(manifest: TransferManifest, fileURL: URL) throws {
         self.manifest = manifest
         self.fileURL = fileURL
         self.received = Array(repeating: false, count: manifest.chunkCount)
+    }
+
+    deinit {
+        close()
     }
 
     func accept(_ chunk: TransferChunk) throws {
@@ -588,11 +688,24 @@ private final class TransferState {
         guard chunk.data.count == manifest.expectedChunkBytes(chunk.chunkIndex) else {
             throw TransferError.invalidPayload("chunk size mismatch")
         }
-        let handle = try FileHandle(forWritingTo: fileURL)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: UInt64(Int64(chunk.chunkIndex) * Int64(manifest.chunkSizeBytes)))
-        try handle.write(contentsOf: chunk.data)
+        let writer = try openHandle()
+        try writer.seek(toOffset: UInt64(Int64(chunk.chunkIndex) * Int64(manifest.chunkSizeBytes)))
+        try writer.write(contentsOf: chunk.data)
         received[chunk.chunkIndex] = true
+    }
+
+    /// Releases the long-lived write handle so the file can be read back (final
+    /// whole-file SHA-256) and the descriptor is not leaked.
+    func close() {
+        try? handle?.close()
+        handle = nil
+    }
+
+    private func openHandle() throws -> FileHandle {
+        if let handle { return handle }
+        let opened = try FileHandle(forWritingTo: fileURL)
+        handle = opened
+        return opened
     }
 
     func fileIfComplete() -> URL? {
@@ -644,12 +757,42 @@ private func int64(_ payload: [String: Any], _ field: String) throws -> Int64 {
     }
     if let int = value as? Int { return Int64(int) }
     if let int64 = value as? Int64 { return int64 }
-    if let number = value as? NSNumber { return number.int64Value }
+    if let number = value as? NSNumber { return try exactInt64(number, field: field) }
     throw TransferError.invalidPayload("\(field) must be integer")
+}
+
+private func optionalBool(_ payload: [String: Any], _ field: String) throws -> Bool? {
+    guard let value = payload[field] else { return nil }
+    guard let bool = value as? Bool else {
+        throw TransferError.invalidPayload("\(field) must be boolean")
+    }
+    return bool
 }
 
 private func isBoolean(_ value: Any) -> Bool {
     CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+}
+
+private func exactInt64(_ number: NSNumber, field: String) throws -> Int64 {
+    let type = String(cString: number.objCType)
+    if ["c", "s", "i", "l", "q"].contains(type) {
+        return number.int64Value
+    }
+    if ["C", "S", "I", "L", "Q"].contains(type) {
+        guard number.uint64Value <= UInt64(Int64.max) else {
+            throw TransferError.invalidPayload("\(field) must be integer")
+        }
+        return number.int64Value
+    }
+    let value = number.doubleValue
+    guard value.isFinite,
+          value.rounded(.towardZero) == value,
+          value >= Double(Int64.min),
+          value <= Double(Int64.max)
+    else {
+        throw TransferError.invalidPayload("\(field) must be integer")
+    }
+    return number.int64Value
 }
 
 private func sha256Hex(_ data: Data) -> String {
@@ -693,4 +836,20 @@ private func skipFully(_ stream: InputStream, bytes: Int64) throws {
         }
         remaining -= Int64(read)
     }
+}
+
+private func readNextChunk(_ stream: InputStream, maxBytes: Int) throws -> Data {
+    var data = Data()
+    var remaining = maxBytes
+    var buffer = [UInt8](repeating: 0, count: min(8192, max(1, maxBytes)))
+    while remaining > 0 {
+        let read = stream.read(&buffer, maxLength: min(buffer.count, remaining))
+        if read < 0 {
+            throw TransferError.io(stream.streamError?.localizedDescription ?? "read failed")
+        }
+        if read == 0 { break }
+        data.append(buffer, count: read)
+        remaining -= read
+    }
+    return data
 }

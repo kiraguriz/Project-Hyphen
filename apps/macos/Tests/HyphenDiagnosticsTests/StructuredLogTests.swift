@@ -48,6 +48,19 @@ final class StructuredLogTests: XCTestCase {
         XCTAssertEqual(forwardedMessageId, "01JZ0000000000000000000000")
     }
 
+    func testAckCallbackIsForwardedWithoutDiagnosticEvent() {
+        let store = LocalStructuredLogStore(clock: { 42 })
+        var forwardedMessageId: String?
+        var callbacks = ProtocolSession.Callbacks()
+        callbacks.onAck = { forwardedMessageId = $0 }
+        let wrapped = DiagnosticProtocolSessionCallbacks.wrap(store: store, forwarding: callbacks)
+
+        wrapped.onAck("01JZ0000000000000000000000")
+
+        XCTAssertEqual(forwardedMessageId, "01JZ0000000000000000000000")
+        XCTAssertTrue(store.snapshot().isEmpty)
+    }
+
     func testStoreKeepsBoundedLocalHistory() throws {
         let store = LocalStructuredLogStore(maxEntries: 2, clock: { 1 })
 

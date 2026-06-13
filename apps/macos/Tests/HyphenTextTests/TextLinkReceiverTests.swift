@@ -104,4 +104,24 @@ final class TextLinkReceiverTests: XCTestCase {
         XCTAssertEqual(outbox.payload?["kind"] as? String, "text")
         XCTAssertEqual(outbox.payload?["value"] as? String, "from Mac")
     }
+
+    func testResolvedConfirmationIsRemovedFromPending() throws {
+        let receiver = TextLinkReceiver()
+        let request = try XCTUnwrap(
+            try receiver.handle(envelope(payload: ["kind": "text", "value": "hello"]))
+        )
+
+        XCTAssertTrue(receiver.resolve(messageId: request.messageId))
+        XCTAssertTrue(receiver.pending.isEmpty)
+    }
+
+    func testPendingConfirmationsAreBounded() throws {
+        let receiver = TextLinkReceiver(maxPending: 2)
+        for index in 0..<3 {
+            _ = try receiver.handle(envelope(payload: ["kind": "text", "value": "hello-\(index)"]))
+        }
+
+        XCTAssertEqual(receiver.pending.count, 2)
+        XCTAssertEqual(receiver.pending.first?.message.value, "hello-1")
+    }
 }

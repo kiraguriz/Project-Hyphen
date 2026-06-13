@@ -25,6 +25,7 @@ public final class ProtocolSession {
         /// Plugin/feature envelopes; core types (heartbeat/ack) stay internal.
         public var onEnvelope: (Envelope) -> Void = { _ in }
         public var onLiveness: (HeartbeatMonitor.State) -> Void = { _ in }
+        public var onAck: (String) -> Void = { _ in }
         public var onAckTimeout: (String) -> Void = { _ in }
         public var onProtocolError: (String, String) -> Void = { _, _ in }
         public var onClosed: () -> Void = {}
@@ -155,6 +156,7 @@ public final class ProtocolSession {
         )
         do {
             let frame = try FrameCodec.encode(try envelope.encode())
+            if requiresAck { ackTracker.registerSent(messageId: envelope.messageId, nowMs: now) }
             connection.send(content: frame, completion: .contentProcessed { [weak self] error in
                 guard error != nil else { return }
                 self?.queue.async { [weak self] in
@@ -165,7 +167,6 @@ public final class ProtocolSession {
             callbacks.onProtocolError("protocol/invalid-envelope", "encode failed: \(error)")
             return nil
         }
-        if requiresAck { ackTracker.registerSent(messageId: envelope.messageId, nowMs: now) }
         return envelope.messageId
     }
 
@@ -206,7 +207,9 @@ public final class ProtocolSession {
         monitor.envelopeReceived(nowMs: Self.nowMs())
         switch envelope.type {
         case Envelope.typeAck:
-            if let ackOf = envelope.ackOf { ackTracker.ackReceived(ackOf) }
+            if let ackOf = envelope.ackOf, ackTracker.ackReceived(ackOf) {
+                callbacks.onAck(ackOf)
+            }
         case Envelope.typeHeartbeat:
             break // liveness already recorded
         default:

@@ -7,7 +7,9 @@ data class TextLinkConfirmationRequest(
     val message: TextLinkMessage,
 )
 
-class TextLinkReceiver {
+class TextLinkReceiver(
+    private val maxPending: Int = 64,
+) {
     val pending: List<TextLinkConfirmationRequest>
         get() = pendingRequests.toList()
 
@@ -22,7 +24,13 @@ class TextLinkReceiver {
             messageId = envelope.messageId,
             message = TextLinkMessage.fromJson(envelope.payload),
         )
+        if (pendingRequests.size >= maxPending) {
+            pendingRequests.removeAt(0)
+        }
         pendingRequests += request
         return request
     }
+
+    fun resolve(messageId: String): Boolean =
+        pendingRequests.removeAll { it.messageId == messageId }
 }

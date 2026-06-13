@@ -1,7 +1,10 @@
 # Hyphen Protocol v0
 
 - **Status**: Frozen for the current pre-alpha v0 wire behavior (HYP-M6-006). Changes that alter wire behavior require an ADR and a version note here.
-- **Protocol identifier**: `hyphen/0.3` (the `protocol` field below)
+- **Protocol identifier emitted by this build**: `hyphen/0.3` (the `protocol` field below)
+- **v0 minor-version policy**: v0 receivers intentionally accept `hyphen/0.x`
+  identifiers. Incompatible behavior must use a new major or a new negotiated
+  capability, not an incompatible same-major minor. See ADR-0006.
 - **Tracker**: HYP-M0-007, HYP-M2-015, HYP-M6-006 · **Sources**: plan v0.3 §6.1, §7.7, §9; ADR-0001
 - **Security analysis**: `threat-model.md` (HYP-M0-008)
 
@@ -295,7 +298,8 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 ```json
 {
   "fileId": "f_01JZ0000000000000000000000",
-  "nextChunkIndex": 2
+  "nextChunkIndex": 2,
+  "needsManifest": false
 }
 ```
 
@@ -303,10 +307,11 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 |---|---|---:|---|
 | `fileId` | string | yes | Existing manifest id |
 | `nextChunkIndex` | integer | `resume.info` only | Highest contiguous verified chunk index plus one |
+| `needsManifest` | boolean | no | `resume.info` only; omitted or `false` means the receiver has active/completed manifest state, `true` means the sender must retransmit the original `transfer.manifest` before sending chunks |
 
-If the receiver has no checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. In v0, chunk bytes are written to receiver-owned temporary files and the checkpoint is in memory; persistent checkpoints across app restarts are outside HYP-M3-012's MVP and belong to later hardening.
+If the receiver has no active or completed checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` with `needsManifest: true`, or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. The sender MUST retransmit the original `transfer.manifest` before chunk 0 when `needsManifest` is true; it MUST NOT send bare chunks for an unknown receiver state. If the receiver already completed the transfer, it SHOULD report `nextChunkIndex == chunkCount` and `needsManifest` omitted/false so the sender sends no more chunks. In v0, chunk bytes are written to receiver-owned temporary files and the checkpoint is in memory; persistent partial checkpoints across app restarts are outside HYP-M3-012's MVP and belong to later hardening.
 
-The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data.
+The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex,needsManifest?)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data.
 
 ### 7.6 `transfer.cancel` payload and local progress
 

@@ -116,6 +116,7 @@ public enum DiagnosticProtocolSessionCallbacks {
         var wrapped = ProtocolSession.Callbacks()
         wrapped.onEnvelope = callbacks.onEnvelope
         wrapped.onLiveness = callbacks.onLiveness
+        wrapped.onAck = callbacks.onAck
         wrapped.onClosed = callbacks.onClosed
         wrapped.onAckTimeout = { messageId in
             record(store: store, code: "protocol/ack-timeout", operation: "ack-timeout")

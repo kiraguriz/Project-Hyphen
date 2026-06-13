@@ -99,6 +99,8 @@ class DiagnosticProtocolSessionListener(
 
     override fun onLiveness(state: HeartbeatMonitor.State) = delegate.onLiveness(state)
 
+    override fun onAck(messageId: String) = delegate.onAck(messageId)
+
     override fun onAckTimeout(messageId: String) {
         record("protocol/ack-timeout", "ack-timeout")
         delegate.onAckTimeout(messageId)

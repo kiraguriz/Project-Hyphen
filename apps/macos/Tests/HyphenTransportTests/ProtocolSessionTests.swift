@@ -47,9 +47,11 @@ final class ProtocolSessionTests: XCTestCase {
         let degraded = XCTestExpectation(description: "degraded")
         let recovered = XCTestExpectation(description: "recovered")
         let envelopeReceived = XCTestExpectation(description: "envelope")
+        let ackReceived = XCTestExpectation(description: "ack")
         let ackTimedOut = XCTestExpectation(description: "ack timeout")
         let protocolErrored = XCTestExpectation(description: "protocol error")
         var envelopes: [Envelope] = []
+        var ackId: String?
         var ackTimeoutId: String?
         var protocolErrorCode: String?
         private let lock = NSLock()
@@ -69,6 +71,10 @@ final class ProtocolSessionTests: XCTestCase {
             callbacks.onAckTimeout = { [self] id in
                 lock.lock(); ackTimeoutId = id; lock.unlock()
                 ackTimedOut.fulfill()
+            }
+            callbacks.onAck = { [self] id in
+                lock.lock(); ackId = id; lock.unlock()
+                ackReceived.fulfill()
             }
             callbacks.onProtocolError = { [self] code, _ in
                 lock.lock(); protocolErrorCode = code; lock.unlock()
@@ -186,9 +192,11 @@ final class ProtocolSessionTests: XCTestCase {
             serverConfig: fast, clientConfig: fast,
             serverRecorder: serverRecorder, clientRecorder: clientRecorder
         )
-        pair.client.send(type: "text.send", payload: ["kind": "text"], requiresAck: true, capability: "text.v1")
+        let messageId = pair.client.send(type: "text.send", payload: ["kind": "text"], requiresAck: true, capability: "text.v1")
         wait(for: [serverRecorder.envelopeReceived], timeout: 3)
         XCTAssertEqual(serverRecorder.envelopes.first?.type, "text.send")
+        wait(for: [clientRecorder.ackReceived], timeout: 3)
+        XCTAssertEqual(clientRecorder.ackId, messageId)
         // No timeout within 2x the ack window — the ack arrived.
         wait(for: [clientRecorder.ackTimedOut], timeout: 0.6)
     }

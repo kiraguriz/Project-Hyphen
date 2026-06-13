@@ -6,6 +6,7 @@ import HyphenText
 import HyphenTransport
 import HyphenTransfer
 import Network
+import UniformTypeIdentifiers
 
 /// Mac side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
 /// shows the QR (HYP-M2-009), accepts ONE provisional TLS connection —
@@ -26,6 +27,7 @@ final class PairingController: NSObject, NSWindowDelegate {
     private var activeSession: ProtocolSession?
     private var activeSessionToken: UUID?
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
+    private var activeTransferSender: TransferSender?
     private let tokenStore = ResumeTokenStore()
     private let textReceiver = TextLinkReceiver()
     private var lastTransferProgress: TransferProgress?
@@ -269,7 +271,15 @@ final class PairingController: NSObject, NSWindowDelegate {
                 let sessionToken = UUID()
                 var callbacks = ProtocolSession.Callbacks()
                 callbacks.onEnvelope = { [weak self] envelope in
-                    self?.handleSessionEnvelope(envelope)
+                    DispatchQueue.main.async {
+                        self?.handleSessionEnvelope(envelope)
+                    }
+                }
+                callbacks.onAck = { [weak self] messageId in
+                    DispatchQueue.main.async {
+                        // Advances the outbound transfer window (chunk acks).
+                        try? self?.activeTransferSender?.handleAck(messageId)
+                    }
                 }
                 callbacks.onClosed = { [weak self] in
                     DispatchQueue.main.async {
@@ -277,6 +287,7 @@ final class PairingController: NSObject, NSWindowDelegate {
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
                             self?.activeCapabilities = nil
+                            self?.activeTransferSender = nil
                             self?.lastTransferProgress = nil
                             self?.notificationPresenter.setDismissHandler(nil)
                             self?.notificationPresenter.setReplyHandler(nil)
@@ -295,18 +306,28 @@ final class PairingController: NSObject, NSWindowDelegate {
                         forwarding: callbacks
                     )
                 )
-                self.activeSession?.stop()
-                self.activeSession = session
-                self.activeSessionToken = sessionToken
-                self.activeCapabilities = handshake.negotiatedCapabilities
-                self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
-                    self?.sendNotificationDismissRequest(sbnKey: sbnKey)
-                }
-                self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, text in
-                    self?.sendNotificationReplyRequest(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
-                }
-                session.start(replaying: handshake.leftover)
                 DispatchQueue.main.async {
+                    self.activeSession?.stop()
+                    self.activeSession = session
+                    self.activeSessionToken = sessionToken
+                    self.activeCapabilities = handshake.negotiatedCapabilities
+                    self.activeTransferSender = TransferSender(
+                        outbox: ProtocolSessionTransferOutbox(session: session),
+                        negotiatedCapabilities: handshake.negotiatedCapabilities,
+                        onProgress: { [weak self] progress in
+                            DispatchQueue.main.async {
+                                self?.lastTransferProgress = progress
+                                self?.onStatus(Self.transferProgressLine(progress))
+                            }
+                        }
+                    )
+                    self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
+                        self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                    }
+                    self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, text in
+                        self?.sendNotificationReplyRequest(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
+                    }
+                    session.start(replaying: handshake.leftover)
                     let name = handshake.peerDeviceName ?? "Android device"
                     self.onStatus("Connected to \(name)")
                 }
@@ -349,6 +370,10 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("text/link: no active Android session")
             return
         }
+        guard activeCapabilities?.contains(SessionHandshake.capabilityText) == true else {
+            onStatus("text/link: peer did not negotiate text.v1")
+            return
+        }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let kind: TextLinkKind = Self.isHTTPURL(trimmed) ? .url : .text
@@ -363,6 +388,36 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("text/link rejected: \(error)")
         }
     }
+
+    /// Outbound file send entry: feeds a local file into the persistent
+    /// `activeTransferSender`, populating its outbound registry so a later
+    /// `resume.info`/ack from the peer routes to a real transfer.
+    func sendFile(url: URL) {
+        guard let sender = activeTransferSender else {
+            onStatus("transfer/send: no active Android session")
+            return
+        }
+        guard activeCapabilities?.contains(TransferProtocol.capability) == true else {
+            onStatus("transfer/send: peer did not negotiate transfer.v1")
+            return
+        }
+        do {
+            let source = FileTransferByteSource(fileURL: url)
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+                ?? "application/octet-stream"
+            let manifest = try sender.sendSource(
+                filename: url.lastPathComponent,
+                mimeType: mimeType,
+                source: source,
+                chunkSizeBytes: Self.defaultTransferChunkBytes
+            )
+            onStatus("transfer/send started: \(manifest.filename) (\(manifest.sizeBytes) bytes)")
+        } catch {
+            onStatus("transfer/send rejected: \(error)")
+        }
+    }
+
+    private static let defaultTransferChunkBytes = 256 * 1024
 
     private static func isHTTPURL(_ value: String) -> Bool {
         guard let scheme = URLComponents(string: value)?.scheme?.lowercased() else {
@@ -412,8 +467,23 @@ final class PairingController: NSObject, NSWindowDelegate {
                 return
             }
             if envelope.capability == TransferProtocol.capability {
+                if envelope.type == TransferProtocol.typeResumeInfo {
+                    let info = try TransferResumeInfo(payload: envelope.payload)
+                    DispatchQueue.main.async { [weak self] in
+                        do {
+                            try self?.activeTransferSender?.handleResumeInfo(info)
+                            self?.onStatus("transfer resume continued: \(info.fileId)")
+                        } catch {
+                            self?.onStatus("transfer resume info ignored: \(error)")
+                        }
+                    }
+                    return
+                }
                 switch try transferReceiver.handle(envelope) {
                 case .completed(let completed):
+                    // Debug surface keeps no copy; drop the temp file so completed
+                    // transfers do not accumulate in the storage directory.
+                    try? FileManager.default.removeItem(at: completed.fileURL)
                     DispatchQueue.main.async { [weak self] in
                         self?.lastTransferProgress = nil
                         self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes)")
@@ -588,9 +658,11 @@ final class PairingController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         guard alert.runModal() == .alertFirstButtonReturn else {
+            textReceiver.resolve(messageId: request.messageId)
             onStatus("Text/link declined")
             return
         }
+        textReceiver.resolve(messageId: request.messageId)
         switch request.message.kind {
         case .text:
             NSPasteboard.general.clearContents()

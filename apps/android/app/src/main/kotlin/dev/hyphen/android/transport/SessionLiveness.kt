@@ -55,6 +55,11 @@ class AckTracker(
     }
 
     @Synchronized
+    fun unregisterSent(messageId: String) {
+        pending.remove(messageId)
+    }
+
+    @Synchronized
     fun ackReceived(ackOf: String): Boolean = pending.remove(ackOf) != null
 
     fun tick(nowMs: Long) {

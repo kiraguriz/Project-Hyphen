@@ -18,6 +18,7 @@ public final class SessionReconnector {
         /// Forwarded from the active session.
         public var onEnvelope: (Envelope) -> Void = { _ in }
         public var onLiveness: (HeartbeatMonitor.State) -> Void = { _ in }
+        public var onAck: (String) -> Void = { _ in }
         public init() {}
     }
 
@@ -131,6 +132,7 @@ public final class SessionReconnector {
         var sessionCallbacks = ProtocolSession.Callbacks()
         sessionCallbacks.onEnvelope = callbacks.onEnvelope
         sessionCallbacks.onLiveness = callbacks.onLiveness
+        sessionCallbacks.onAck = callbacks.onAck
         sessionCallbacks.onClosed = { [weak self] in
             guard let self else { return }
             self.queue.async {

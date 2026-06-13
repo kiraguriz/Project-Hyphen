@@ -6,8 +6,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PACKAGE_DIR="$ROOT/apps/macos"
 PRODUCT="${PRODUCT:-HyphenApp}"
+APP_NAME="${APP_NAME:-Hyphen}"
+VERSION="${VERSION:-0.0.1}"
 CONFIGURATION="${CONFIGURATION:-release}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
@@ -35,20 +36,17 @@ fi
 
 SIGN_IDENTITY="$SIGN_IDENTITY" \
   PRODUCT="$PRODUCT" \
+  APP_NAME="$APP_NAME" \
+  VERSION="$VERSION" \
   CONFIGURATION="$CONFIGURATION" \
-  "$ROOT/packaging/macos/sign-local.sh"
+  "$ROOT/packaging/macos/package-local.sh"
 
-BIN_DIR="$(swift build \
-  --package-path "$PACKAGE_DIR" \
-  -c "$CONFIGURATION" \
-  --show-bin-path)"
-TARGET="$BIN_DIR/$PRODUCT"
 ARCHIVE_DIR="$ROOT/packaging/macos/build"
-ARCHIVE="$ARCHIVE_DIR/$PRODUCT-notary-dry-run.zip"
+ARCHIVE="$ARCHIVE_DIR/$APP_NAME-macOS-$VERSION.zip"
 
-mkdir -p "$ARCHIVE_DIR"
-rm -f "$ARCHIVE"
-ditto -c -k --keepParent "$TARGET" "$ARCHIVE"
+if [ ! -f "$ARCHIVE" ]; then
+  blocker "expected packaged app ZIP missing after package-local.sh: $ARCHIVE"
+fi
 
 if [ -n "$NOTARY_PROFILE" ]; then
   xcrun notarytool submit "$ARCHIVE" --wait --keychain-profile "$NOTARY_PROFILE"

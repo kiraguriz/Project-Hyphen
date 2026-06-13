@@ -57,6 +57,7 @@ class SessionReconnector(
         /** Forwarded from the active session. */
         fun onEnvelope(envelope: Envelope) {}
         fun onLiveness(state: HeartbeatMonitor.State) {}
+        fun onAck(messageId: String) {}
         fun onAckTimeout(messageId: String) {}
         fun onProtocolError(code: String, detail: String) {}
     }
@@ -120,6 +121,7 @@ class SessionReconnector(
             listener = object : ProtocolSession.Listener {
                 override fun onEnvelope(envelope: Envelope) = listener.onEnvelope(envelope)
                 override fun onLiveness(state: HeartbeatMonitor.State) = listener.onLiveness(state)
+                override fun onAck(messageId: String) = listener.onAck(messageId)
                 override fun onAckTimeout(messageId: String) = listener.onAckTimeout(messageId)
                 override fun onProtocolError(code: String, detail: String) =
                     listener.onProtocolError(code, detail)
