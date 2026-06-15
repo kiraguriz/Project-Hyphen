@@ -50,6 +50,12 @@ object SessionHandshake {
     ) {
         fun contains(name: String): Boolean = entries.containsKey(name)
 
+        fun notificationReplyEnabled(): Boolean =
+            entries[CAPABILITY_NOTIFICATIONS]?.string("reply", "off")?.let { it != "off" } == true
+
+        fun notificationDismissEnabled(): Boolean =
+            entries[CAPABILITY_NOTIFICATIONS]?.bool("dismiss", false) == true
+
         fun transferMaxChunkBytes(): Int? =
             ((entries[CAPABILITY_TRANSFER]?.get("maxChunkBytes") as? Json.Num)?.asLong())?.toInt()
 

@@ -1,14 +1,22 @@
 package dev.hyphen.android.notifications
 
+import dev.hyphen.android.transport.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class NotificationListenerLifecycleTest {
+
+    @Before
+    fun resetRuntime() {
+        HyphenNotificationListenerRuntime.resetForTests()
+    }
 
     @Test
     fun `listener starts disconnected`() {
@@ -73,9 +81,11 @@ class NotificationListenerLifecycleTest {
     }
 
     @Test
-    fun `dispatch queue drops when bounded backlog is full`() {
+    fun `dispatch queue drops oldest best-effort backlog without blocking caller`() {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
+        val firstQueuedRan = CountDownLatch(1)
+        val secondQueuedRan = CountDownLatch(1)
         val queue = NotificationDispatchQueue(capacity = 1)
 
         assertTrue(queue.submit {
@@ -83,11 +93,342 @@ class NotificationListenerLifecycleTest {
             release.await(3, TimeUnit.SECONDS)
         })
         assertTrue(started.await(1, TimeUnit.SECONDS))
-        assertTrue(queue.submit { })
-        assertFalse(queue.submit { })
+        assertTrue(queue.submit { firstQueuedRan.countDown() })
 
-        assertEquals(1, queue.droppedCount())
+        val submitter = Executors.newSingleThreadExecutor()
+        val submitted = submitter.submit<Boolean> {
+            queue.submit { secondQueuedRan.countDown() }
+        }
+        assertTrue(submitted.get(100, TimeUnit.MILLISECONDS))
+        assertFalse(firstQueuedRan.await(100, TimeUnit.MILLISECONDS))
+
         release.countDown()
+        assertTrue(secondQueuedRan.await(1, TimeUnit.SECONDS))
+        assertFalse(firstQueuedRan.await(100, TimeUnit.MILLISECONDS))
+        assertEquals(1, queue.droppedCount())
         queue.shutdown()
+        submitter.shutdownNow()
+    }
+
+    @Test
+    fun `dispatch queue preserves critical removal when best-effort backlog is full`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val bestEffortRan = CountDownLatch(1)
+        val criticalRan = CountDownLatch(1)
+        val queue = NotificationDispatchQueue(capacity = 1)
+
+        assertTrue(queue.submit {
+            started.countDown()
+            release.await(3, TimeUnit.SECONDS)
+        })
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+        assertTrue(queue.submit { bestEffortRan.countDown() })
+        assertTrue(queue.submitCritical { criticalRan.countDown() })
+
+        release.countDown()
+
+        assertTrue(criticalRan.await(1, TimeUnit.SECONDS))
+        assertFalse(bestEffortRan.await(100, TimeUnit.MILLISECONDS))
+        assertEquals(1, queue.droppedCount())
+        queue.shutdown()
+    }
+
+    @Test
+    fun `dispatch queue drains already accepted task after shutdown`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val queuedRan = CountDownLatch(1)
+        val queue = NotificationDispatchQueue(capacity = 2)
+
+        assertTrue(queue.submit {
+            started.countDown()
+            while (release.count > 0) {
+                try {
+                    release.await(3, TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                }
+            }
+        })
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+        assertTrue(queue.submit { queuedRan.countDown() })
+
+        queue.shutdown()
+        assertFalse(queuedRan.await(50, TimeUnit.MILLISECONDS))
+        release.countDown()
+
+        assertTrue(queuedRan.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `dispatch queue rejects submit after shutdown`() {
+        val shouldNotRun = CountDownLatch(1)
+        val queue = NotificationDispatchQueue(capacity = 1)
+
+        queue.shutdown()
+
+        assertFalse(queue.submit { shouldNotRun.countDown() })
+        assertFalse(shouldNotRun.await(100, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `runtime notification callbacks return promptly while dispatch is blocked`() {
+        val sendStarted = CountDownLatch(1)
+        val releaseSend = CountDownLatch(1)
+        val outbox = BlockingAllOutbox(sendStarted, releaseSend)
+        HyphenNotificationListenerRuntime.onConnected()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(outbox)
+
+        assertTrue(HyphenNotificationListenerRuntime.onNotificationPosted(payload("0|com.chat|1|thread-123|10101", "first")))
+        assertTrue(sendStarted.await(1, TimeUnit.SECONDS))
+
+        val submitter = Executors.newSingleThreadExecutor()
+        val posted = submitter.submit<Boolean> {
+            HyphenNotificationListenerRuntime.onNotificationPosted(payload("0|com.chat|2|thread-123|10101", "second"))
+        }
+        val removed = submitter.submit<Boolean> {
+            HyphenNotificationListenerRuntime.onNotificationRemoved("0|com.chat|2|thread-123|10101")
+        }
+
+        assertTrue(posted.get(100, TimeUnit.MILLISECONDS))
+        assertTrue(removed.get(100, TimeUnit.MILLISECONDS))
+        releaseSend.countDown()
+        submitter.shutdownNow()
+    }
+
+    @Test
+    fun `connected runtime snapshots active payloads when outbox binds`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active before bind")),
+        )
+        val outbox = RecordingNotificationOutbox()
+
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(outbox)
+
+        assertTrue(waitForEnvelopeCount(outbox, 1))
+        val sent = outbox.envelopes.single()
+        assertEquals(NotificationProtocol.TYPE_POSTED, sent.type)
+        assertEquals(Json.Str("0|com.chat|7|thread-123|10101"), sent.payload["sbnKey"])
+        assertEquals(Json.Str("active before bind"), sent.payload["text"])
+        assertTrue(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+    }
+
+    @Test
+    fun `hidden body mode strips runtime active snapshot when outbox binds and rebinds`() {
+        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(NotificationPrivacyMode.HIDE_BODY)
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        val firstOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(firstOutbox)
+        assertTrue(waitForEnvelopeCount(firstOutbox, 1))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(secondOutbox)
+
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        listOf(firstOutbox.envelopes.single(), secondOutbox.envelopes.single()).forEach { sent ->
+            assertEquals(NotificationProtocol.TYPE_POSTED, sent.type)
+            assertEquals(Json.Str("Example"), sent.payload["title"])
+            assertFalse(sent.payload.entries.containsKey("text"))
+            assertFalse(sent.payload.encode().contains("secret active body"))
+        }
+    }
+
+    @Test
+    fun `rebind preserves active state and removed event goes to new outbox`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        val firstOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(firstOutbox)
+        assertTrue(waitForEnvelopeCount(firstOutbox, 1))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(secondOutbox)
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        HyphenNotificationListenerRuntime.onNotificationRemoved("0|com.chat|7|thread-123|10101")
+
+        assertTrue(waitForEnvelopeCount(secondOutbox, 2))
+        assertEquals(NotificationProtocol.TYPE_POSTED, secondOutbox.envelopes[0].type)
+        assertEquals(NotificationProtocol.TYPE_REMOVED, secondOutbox.envelopes[1].type)
+        assertEquals(Json.Str("0|com.chat|7|thread-123|10101"), secondOutbox.envelopes[1].payload["sbnKey"])
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+    }
+
+    @Test
+    fun `pending removed notification is replayed as removal during rebind`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        val removedStarted = CountDownLatch(1)
+        val releaseRemoved = CountDownLatch(1)
+        val firstOutbox = BlockingRemovedOutbox(removedStarted, releaseRemoved)
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(firstOutbox)
+        assertTrue(waitForBlockingEnvelopeCount(firstOutbox, 1))
+
+        assertTrue(HyphenNotificationListenerRuntime.onNotificationRemoved("0|com.chat|7|thread-123|10101"))
+        assertTrue(removedStarted.await(1, TimeUnit.SECONDS))
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(secondOutbox)
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        releaseRemoved.countDown()
+
+        assertTrue(waitForBlockingEnvelopeCount(firstOutbox, 2))
+        assertEquals(NotificationProtocol.TYPE_REMOVED, firstOutbox.envelopes[1].type)
+        assertEquals(NotificationProtocol.TYPE_REMOVED, secondOutbox.envelopes.single().type)
+        assertEquals(Json.Str("0|com.chat|7|thread-123|10101"), secondOutbox.envelopes.single().payload["sbnKey"])
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+    }
+
+    @Test
+    fun `failed removed send remains pending and flushes to rebound outbox`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        val removedAttempted = CountDownLatch(1)
+        val firstOutbox = FailingRemovedOutbox(removedAttempted)
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(firstOutbox)
+        assertTrue(waitForFailingEnvelopeCount(firstOutbox, 1))
+
+        assertTrue(HyphenNotificationListenerRuntime.onNotificationRemoved("0|com.chat|7|thread-123|10101"))
+        assertTrue(removedAttempted.await(1, TimeUnit.SECONDS))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(secondOutbox)
+
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        assertEquals(NotificationProtocol.TYPE_REMOVED, secondOutbox.envelopes.single().type)
+        assertEquals(Json.Str("0|com.chat|7|thread-123|10101"), secondOutbox.envelopes.single().payload["sbnKey"])
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+    }
+
+    @Test
+    fun `removed notification updates local active state when no outbox can accept send`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        val firstOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(firstOutbox)
+        assertTrue(waitForEnvelopeCount(firstOutbox, 1))
+        HyphenNotificationListenerRuntime.clearNotificationOutbox()
+
+        assertFalse(HyphenNotificationListenerRuntime.onNotificationRemoved("0|com.chat|7|thread-123|10101"))
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(secondOutbox)
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        assertEquals(NotificationProtocol.TYPE_REMOVED, secondOutbox.envelopes.single().type)
+    }
+
+    @Test
+    fun `disconnect and destroy clear active notification keys`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        assertTrue(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+
+        HyphenNotificationListenerRuntime.onDisconnected()
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "active")),
+        )
+        HyphenNotificationListenerRuntime.onDestroyed()
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive("0|com.chat|7|thread-123|10101"))
+    }
+
+    private fun waitForEnvelopeCount(outbox: RecordingNotificationOutbox, expected: Int): Boolean {
+        repeat(20) {
+            if (outbox.envelopes.size >= expected) return true
+            Thread.sleep(25)
+        }
+        return outbox.envelopes.size >= expected
+    }
+
+    private fun waitForBlockingEnvelopeCount(outbox: BlockingRemovedOutbox, expected: Int): Boolean {
+        repeat(20) {
+            if (outbox.envelopes.size >= expected) return true
+            Thread.sleep(25)
+        }
+        return outbox.envelopes.size >= expected
+    }
+
+    private fun waitForFailingEnvelopeCount(outbox: FailingRemovedOutbox, expected: Int): Boolean {
+        repeat(20) {
+            if (outbox.envelopes.size >= expected) return true
+            Thread.sleep(25)
+        }
+        return outbox.envelopes.size >= expected
+    }
+
+    private fun payload(sbnKey: String, text: String): NormalizedNotificationPayload =
+        NormalizedNotificationPayload(
+            sbnKey = sbnKey,
+            packageName = "com.example",
+            title = "Example",
+            text = text,
+            category = "msg",
+            isClearable = true,
+        )
+
+    private class BlockingRemovedOutbox(
+        private val removedStarted: CountDownLatch,
+        private val releaseRemoved: CountDownLatch,
+    ) : NotificationOutbox {
+        val envelopes = java.util.Collections.synchronizedList(mutableListOf<SentNotificationEnvelope>())
+
+        override fun send(
+            type: String,
+            capability: String,
+            requiresAck: Boolean,
+            payload: Json.Obj,
+        ): String {
+            if (type == NotificationProtocol.TYPE_REMOVED) {
+                removedStarted.countDown()
+                releaseRemoved.await(3, TimeUnit.SECONDS)
+            }
+            envelopes += SentNotificationEnvelope(type, capability, requiresAck, payload)
+            return "01JZ0000000000000000000000"
+        }
+    }
+
+    private class BlockingAllOutbox(
+        private val sendStarted: CountDownLatch,
+        private val releaseSend: CountDownLatch,
+    ) : NotificationOutbox {
+        override fun send(
+            type: String,
+            capability: String,
+            requiresAck: Boolean,
+            payload: Json.Obj,
+        ): String {
+            sendStarted.countDown()
+            releaseSend.await(3, TimeUnit.SECONDS)
+            return "01JZ0000000000000000000000"
+        }
+    }
+
+    private class FailingRemovedOutbox(
+        private val removedAttempted: CountDownLatch,
+    ) : NotificationOutbox {
+        val envelopes = java.util.Collections.synchronizedList(mutableListOf<SentNotificationEnvelope>())
+
+        override fun send(
+            type: String,
+            capability: String,
+            requiresAck: Boolean,
+            payload: Json.Obj,
+        ): String {
+            if (type == NotificationProtocol.TYPE_REMOVED) {
+                removedAttempted.countDown()
+                throw IllegalStateException("closed outbox")
+            }
+            envelopes += SentNotificationEnvelope(type, capability, requiresAck, payload)
+            return "01JZ0000000000000000000000"
+        }
     }
 }

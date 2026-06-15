@@ -14,16 +14,34 @@ sealed class NotificationReplyAttempt {
 }
 
 fun interface NotificationReplier {
-    fun reply(sbnKey: String, actionIndex: Int, text: String): NotificationReplyAttempt
+    fun reply(sbnKey: String, actionIndex: Int, actionId: String?, text: String): NotificationReplyAttempt
 }
 
 class AndroidNotificationReplier(
     private val service: NotificationListenerService,
 ) : NotificationReplier {
-    override fun reply(sbnKey: String, actionIndex: Int, text: String): NotificationReplyAttempt {
+    override fun reply(sbnKey: String, actionIndex: Int, actionId: String?, text: String): NotificationReplyAttempt {
         val sbn = service.activeNotifications?.firstOrNull { it.key == sbnKey }
             ?: return NotificationReplyAttempt.Failed("plugin/notification-key-not-found")
-        val action = sbn.notification.actions?.getOrNull(actionIndex)
+        val actions = sbn.notification.actions ?: return NotificationReplyAttempt.Failed("plugin/reply-unavailable")
+        val resolvedIndex = NotificationReplyActions.resolveActionIndex(
+            actions = actions.mapIndexed { index, action ->
+                NotificationReplyActionMetadata(
+                    actionIndex = index,
+                    semanticAction = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                        action.semanticAction
+                    } else {
+                        0
+                    },
+                    title = action.title?.toString(),
+                    resultKeys = action.remoteInputs?.map { it.resultKey } ?: emptyList(),
+                    hasActionIntent = action.actionIntent != null,
+                )
+            },
+            requestedActionIndex = actionIndex,
+            requestedActionId = actionId,
+        ) ?: return NotificationReplyAttempt.Failed("plugin/reply-unavailable")
+        val action = actions.getOrNull(resolvedIndex)
             ?: return NotificationReplyAttempt.Failed("plugin/reply-unavailable")
         val actionIntent = action.actionIntent
             ?: return NotificationReplyAttempt.Failed("plugin/reply-unavailable")
@@ -56,9 +74,10 @@ class NotificationReplyRequestHandler(
         }
         val sbnKey = string(envelope.payload, "sbnKey")
         val actionIndex = actionIndex(envelope.payload)
+        val actionId = optionalString(envelope.payload, "actionId")
         val text = string(envelope.payload, "text")
 
-        val payload = when (val attempt = replier.reply(sbnKey, actionIndex, text)) {
+        val payload = when (val attempt = replier.reply(sbnKey, actionIndex, actionId, text)) {
             NotificationReplyAttempt.Sent -> Json.obj(
                 "sbnKey" to Json.Str(sbnKey),
                 "success" to Json.Bool(true),
@@ -92,5 +111,13 @@ class NotificationReplyRequestHandler(
             ?: throw IllegalArgumentException("$field must be string")
         require(value.isNotBlank()) { "$field must not be blank" }
         return value
+    }
+
+    private fun optionalString(payload: Json.Obj, field: String): String? {
+        val value = payload[field] ?: return null
+        val text = (value as? Json.Str)?.value
+            ?: throw IllegalArgumentException("$field must be string")
+        require(text.isNotBlank()) { "$field must not be blank" }
+        return text
     }
 }

@@ -19,6 +19,7 @@ class AndroidNotificationCanceller(
 
 class NotificationDismissRequestHandler(
     private val canceller: NotificationCanceller,
+    private val isActiveNotification: (String) -> Boolean,
     private val outbox: NotificationOutbox,
 ) {
     fun handle(envelope: Envelope): String? {
@@ -28,7 +29,10 @@ class NotificationDismissRequestHandler(
         }
         val sbnKey = string(envelope.payload, "sbnKey")
         val payload = try {
-            if (canceller.cancel(sbnKey)) {
+            if (!isActiveNotification(sbnKey)) {
+                resultError(sbnKey, "plugin/notification-key-not-found")
+            } else if (canceller.cancel(sbnKey)) {
+                // Success means Android accepted the cancel request, not that the peer observed delivery.
                 Json.obj(
                     "sbnKey" to Json.Str(sbnKey),
                     "success" to Json.Bool(true),

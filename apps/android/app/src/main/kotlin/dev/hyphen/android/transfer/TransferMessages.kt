@@ -21,6 +21,8 @@ object TransferProtocol {
     const val TYPE_CANCEL = "transfer.cancel"
     const val MIN_CHUNK_SIZE_BYTES = 1024
     const val MAX_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
+    const val MAX_V0_TRANSFER_SIZE_BYTES = 1_073_741_824L
+    const val MAX_V0_TRANSFER_CHUNK_COUNT = 1_048_576
 }
 
 private val FILE_ID = Regex("^f_[A-Za-z0-9_-]{8,128}$")
@@ -39,12 +41,16 @@ data class TransferManifest(
         require(filename.isNotBlank() && filename.length <= 255) { "invalid filename" }
         require(!filename.contains('/') && !filename.contains('\\')) { "filename must not contain a path" }
         require(sizeBytes >= 0) { "sizeBytes must be >= 0" }
+        require(sizeBytes <= TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES) { "sizeBytes exceeds v0 transfer limit" }
         require(MIME_TYPE.matches(mimeType)) { "invalid mimeType" }
         require(SHA256_HEX.matches(sha256)) { "invalid sha256" }
         require(chunkSizeBytes in TransferProtocol.MIN_CHUNK_SIZE_BYTES..TransferProtocol.MAX_CHUNK_SIZE_BYTES) {
             "invalid chunkSizeBytes"
         }
         require(chunkCount >= 0) { "chunkCount must be >= 0" }
+        require(chunkCount <= TransferProtocol.MAX_V0_TRANSFER_CHUNK_COUNT) {
+            "chunkCount exceeds v0 transfer limit"
+        }
         val expectedChunks = if (sizeBytes == 0L) {
             0L
         } else {
@@ -76,8 +82,11 @@ data class TransferManifest(
             source: TransferByteSource,
             chunkSizeBytes: Int,
             fileId: String = "f_${Ulid.generate()}",
-        ): TransferManifest =
-            TransferManifest(
+        ): TransferManifest {
+            require(source.sizeBytes <= TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES) {
+                "sizeBytes exceeds v0 transfer limit"
+            }
+            return TransferManifest(
                 fileId = fileId,
                 filename = filename,
                 sizeBytes = source.sizeBytes,
@@ -90,6 +99,7 @@ data class TransferManifest(
                     ((source.sizeBytes + chunkSizeBytes - 1L) / chunkSizeBytes).toInt()
                 },
             )
+        }
 
         fun fromJson(payload: Json.Obj): TransferManifest =
             TransferManifest(

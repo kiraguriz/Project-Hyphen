@@ -1,0 +1,9 @@
+{
+  "fileId": "f_01JZ0000000000000000000000",
+  "filename": "large.bin",
+  "sizeBytes": 1073741825,
+  "mimeType": "application/octet-stream",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "chunkSizeBytes": 1024,
+  "chunkCount": 1048577
+}

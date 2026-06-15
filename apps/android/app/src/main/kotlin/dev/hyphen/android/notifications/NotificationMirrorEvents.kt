@@ -30,8 +30,10 @@ class ProtocolSessionNotificationOutbox(private val session: ProtocolSession) : 
 class NotificationMirrorEventSender(
     private val outbox: NotificationOutbox,
     initialPrivacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL,
+    initialActiveKeys: Set<String> = emptySet(),
+    private val allowReplyActions: Boolean = true,
 ) {
-    private val activeKeys = linkedSetOf<String>()
+    private val activeKeys = initialActiveKeys.toCollection(linkedSetOf())
     @Volatile
     private var privacyFilter = NotificationPrivacyFilter(initialPrivacyMode)
 
@@ -41,7 +43,7 @@ class NotificationMirrorEventSender(
 
     @Synchronized
     fun sendPostedOrUpdated(payload: NormalizedNotificationPayload): String {
-        val filteredPayload = privacyFilter.apply(payload)
+        val filteredPayload = outboundPayload(payload)
         val type = if (activeKeys.add(payload.sbnKey)) {
             NotificationProtocol.TYPE_POSTED
         } else {
@@ -52,6 +54,17 @@ class NotificationMirrorEventSender(
             capability = NotificationProtocol.CAPABILITY,
             requiresAck = true,
             payload = filteredPayload.toJson(),
+        )
+    }
+
+    @Synchronized
+    fun sendSnapshot(payload: NormalizedNotificationPayload): String {
+        activeKeys += payload.sbnKey
+        return outbox.send(
+            type = NotificationProtocol.TYPE_POSTED,
+            capability = NotificationProtocol.CAPABILITY,
+            requiresAck = true,
+            payload = outboundPayload(payload).toJson(),
         )
     }
 
@@ -69,4 +82,9 @@ class NotificationMirrorEventSender(
 
     @Synchronized
     fun activeKeys(): Set<String> = activeKeys.toSet()
+
+    private fun outboundPayload(payload: NormalizedNotificationPayload): NormalizedNotificationPayload {
+        val filteredPayload = privacyFilter.apply(payload)
+        return if (allowReplyActions) filteredPayload else filteredPayload.copy(replyActions = emptyList())
+    }
 }

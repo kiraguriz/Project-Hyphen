@@ -106,13 +106,37 @@ final class NotificationMirrorReceiverTests: XCTestCase {
                 payload: payload(
                     sbnKey: "0|com.chat|7|thread-123|10101",
                     text: "hello",
-                    replyActions: [["actionIndex": 2, "label": "Reply"]]
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
                 )
             )
         )
 
         XCTAssertEqual(presenter.shown.count, 1)
-        XCTAssertEqual(presenter.shown[0].replyActions, [try NotificationReplyAction(actionIndex: 2, label: "Reply")])
+        XCTAssertEqual(
+            presenter.shown[0].replyActions,
+            [try NotificationReplyAction(actionIndex: 2, label: "Reply", actionId: "reply:1:reply:android.reply")]
+        )
+    }
+
+    func testReplyActionsAreHiddenWhenNegotiatedReplyIsDisabled() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            replyActionsEnabled: { false }
+        )
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "hello",
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
+                )
+            )
+        )
+
+        XCTAssertEqual(presenter.shown.count, 1)
+        XCTAssertEqual(presenter.shown[0].replyActions, [])
     }
 
     func testRemovedClosesTheMappedMacNotificationIdentifier() throws {
@@ -301,6 +325,7 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         let id = NotificationReplySender(outbox: outbox).requestReply(
             sbnKey: "0|com.chat|7|thread-123|10101",
             actionIndex: 2,
+            actionId: "reply:1:reply:android.reply",
             text: "On my way"
         )
 
@@ -310,7 +335,55 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(outbox.requiresAck, true)
         XCTAssertEqual(outbox.payload?["sbnKey"] as? String, "0|com.chat|7|thread-123|10101")
         XCTAssertEqual(outbox.payload?["actionIndex"] as? Int, 2)
+        XCTAssertEqual(outbox.payload?["actionId"] as? String, "reply:1:reply:android.reply")
         XCTAssertEqual(outbox.payload?["text"] as? String, "On my way")
+    }
+
+    func testReplySenderKeepsLegacyIndexPayloadWhenActionIdIsBlank() {
+        let outbox = RecordingDismissOutbox()
+
+        _ = NotificationReplySender(outbox: outbox).requestReply(
+            sbnKey: "0|com.chat|7|thread-123|10101",
+            actionIndex: 2,
+            actionId: " ",
+            text: "On my way"
+        )
+
+        XCTAssertEqual(outbox.payload?["actionIndex"] as? Int, 2)
+        XCTAssertNil(outbox.payload?["actionId"])
+    }
+
+    func testReplyRoutingKeepsMultipleActionsDistinct() throws {
+        let actions = [
+            try NotificationReplyAction(actionIndex: 2, label: "Reply", actionId: "reply:1:reply:android.reply"),
+            try NotificationReplyAction(actionIndex: 4, label: "Reply privately", actionId: "reply:1:reply-privately:android.reply"),
+        ]
+        let routes = NotificationReplyRouting.routes(for: actions)
+        let userInfo = NotificationReplyRouting.userInfo(sbnKey: "0|com.chat|7|thread-123|10101", routes: routes)
+
+        XCTAssertEqual(routes.map(\.actionIdentifier), ["hyphen.notification.reply.0", "hyphen.notification.reply.1"])
+        XCTAssertEqual(routes.map(\.actionIndex), [2, 4])
+        XCTAssertEqual(
+            NotificationReplyRouting.route(actionIdentifier: routes[0].actionIdentifier, userInfo: userInfo)?.actionId,
+            "reply:1:reply:android.reply"
+        )
+        XCTAssertEqual(
+            NotificationReplyRouting.route(actionIdentifier: routes[1].actionIdentifier, userInfo: userInfo)?.actionIndex,
+            4
+        )
+    }
+
+    func testReplyRoutingOmitsMultiActionLegacyChoicesWithoutActionId() throws {
+        let actions = [
+            try NotificationReplyAction(actionIndex: 2, label: "Reply"),
+            try NotificationReplyAction(actionIndex: 4, label: "Reply privately"),
+        ]
+
+        XCTAssertEqual(NotificationReplyRouting.routes(for: actions), [])
+        XCTAssertEqual(
+            NotificationReplyRouting.routes(for: [actions[0]]),
+            [NotificationReplyRoute(actionIdentifier: "hyphen.notification.reply.0", actionIndex: 2, actionId: nil, label: "Reply")]
+        )
     }
 
     func testDismissSenderRejectsBlankKeys() {

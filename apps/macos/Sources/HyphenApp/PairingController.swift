@@ -39,7 +39,10 @@ final class PairingController: NSObject, NSWindowDelegate {
     }
     private let notificationPresenter = UserNotificationCenterPresenter()
     private lazy var notificationReceiver = NotificationMirrorReceiver(
-        presenter: notificationPresenter
+        presenter: notificationPresenter,
+        replyActionsEnabled: { [weak self] in
+            NotificationCapabilityGate.canPresentReplyActions(self?.activeCapabilities)
+        }
     )
     private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
@@ -321,11 +324,24 @@ final class PairingController: NSObject, NSWindowDelegate {
                             }
                         }
                     )
-                    self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
-                        self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                    if NotificationCapabilityGate.canSendDismiss(handshake.negotiatedCapabilities) {
+                        self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
+                            self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                        }
+                    } else {
+                        self.notificationPresenter.setDismissHandler(nil)
                     }
-                    self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, text in
-                        self?.sendNotificationReplyRequest(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
+                    if NotificationCapabilityGate.canSendReply(handshake.negotiatedCapabilities) {
+                        self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, actionId, text in
+                            self?.sendNotificationReplyRequest(
+                                sbnKey: sbnKey,
+                                actionIndex: actionIndex,
+                                actionId: actionId,
+                                text: text
+                            )
+                        }
+                    } else {
+                        self.notificationPresenter.setReplyHandler(nil)
                     }
                     session.start(replaying: handshake.leftover)
                     let name = handshake.peerDeviceName ?? "Android device"
@@ -340,6 +356,10 @@ final class PairingController: NSObject, NSWindowDelegate {
             onStatus("notification dismiss: no active Android session")
             return
         }
+        guard NotificationCapabilityGate.canSendDismiss(activeCapabilities) else {
+            onStatus("notification dismiss: not negotiated")
+            return
+        }
         let id = NotificationDismissSender(
             outbox: ProtocolSessionNotificationDismissOutbox(session: session)
         ).requestDismiss(sbnKey: sbnKey)
@@ -350,14 +370,18 @@ final class PairingController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func sendNotificationReplyRequest(sbnKey: String, actionIndex: Int, text: String) {
+    private func sendNotificationReplyRequest(sbnKey: String, actionIndex: Int, actionId: String?, text: String) {
         guard let session = activeSession else {
             onStatus("notification reply: no active Android session")
             return
         }
+        guard NotificationCapabilityGate.canSendReply(activeCapabilities) else {
+            onStatus("notification reply: not negotiated")
+            return
+        }
         let id = NotificationReplySender(
             outbox: ProtocolSessionNotificationDismissOutbox(session: session)
-        ).requestReply(sbnKey: sbnKey, actionIndex: actionIndex, text: text)
+        ).requestReply(sbnKey: sbnKey, actionIndex: actionIndex, actionId: actionId, text: text)
         if let id {
             onStatus("notification reply requested: \(id)")
         } else {
@@ -460,6 +484,37 @@ final class PairingController: NSObject, NSWindowDelegate {
                 }
                 return
             }
+            if let session = activeSession, !isNegotiatedNotificationOption(envelope.type) {
+                let id = sendProtocolError(
+                    session: session,
+                    regarding: envelope,
+                    code: "plugin/unsupported-capability",
+                    message: "Notification action is not negotiated for this session."
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus("unsupported notification option reported: \(id ?? "session closed")")
+                }
+                return
+            }
+            if NotificationCapabilityGate.isNotificationEnvelope(type: envelope.type) {
+                guard let session = activeSession,
+                      NotificationCapabilityGate.allowsInboundEnvelope(type: envelope.type, capabilities: activeCapabilities)
+                else {
+                    return
+                }
+                if envelope.capability != NotificationMirrorProtocol.capability {
+                    let id = sendProtocolError(
+                        session: session,
+                        regarding: envelope,
+                        code: "plugin/unsupported-capability",
+                        message: "Message type was sent under the wrong capability."
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
+                    }
+                    return
+                }
+            }
             if let action = try notificationReceiver.handle(envelope) {
                 DispatchQueue.main.async { [weak self] in
                     self?.renderNotificationAction(action)
@@ -543,6 +598,10 @@ final class PairingController: NSObject, NSWindowDelegate {
     private func isNegotiatedCapability(_ capability: String?) -> Bool {
         guard let capability else { return true }
         return activeCapabilities?.contains(capability) != false
+    }
+
+    private func isNegotiatedNotificationOption(_ type: String) -> Bool {
+        NotificationCapabilityGate.allowsInboundResult(type: type, capabilities: activeCapabilities)
     }
 
     private static func isPluginEnvelope(_ envelope: Envelope) -> Bool {

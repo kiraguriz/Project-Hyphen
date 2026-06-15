@@ -57,10 +57,10 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 |---|---|---|---|
 | `protocol` | string | yes | Protocol id + version. Receivers MUST reply `protocol/version-unsupported` and close if they cannot speak it. |
 | `messageId` | string (ULID) | yes | Unique per message; used for dedupe and ack correlation. |
-| `sessionId` | string | yes after hello | Identifies the logical session (§4). `null` only in `hello`. |
+| `sessionId` | string | yes after hello | Identifies the logical session (§4). `null` only in handshake `hello`; steady-state frames MUST carry the active session id. |
 | `type` | string | yes | Message type, namespaced `feature.event` (§7). The session layer handles only core `ack`/`heartbeat`; other types are delivered to the negotiated feature/plugin layer, which is responsible for `protocol/unknown-type` or `plugin/unsupported-capability` errors. |
 | `capability` | string | for plugin msgs | Capability that governs this message, e.g. `notifications.v1`. Core types (`hello`, `ack`, `error`, `heartbeat`) omit it. |
-| `seq` | integer | yes | Per-sender, per-connection, monotonically increasing from 1. The `hello` frame uses `seq: 1`; the session continues at 2 on that connection. Reconnect starts a new connection and resets the sequence. Receivers MAY use gaps for loss diagnostics; ordering authority stays with TCP. |
+| `seq` | integer | yes | Per-sender, per-connection, monotonically increasing from 1. The handshake `hello` frame uses `seq: 1`; the session continues at 2 on that connection. Reconnect starts a new connection and resets the sequence. Receivers MUST close the session on duplicate sequence numbers or forward gaps. |
 | `ackOf` | string\|null | no | `messageId` being acknowledged (only in `ack`). |
 | `sentAtUnixMs` | integer | yes | Sender wall clock; diagnostics only, never identity (see notification key rule). |
 | `requiresAck` | boolean | yes | If true, receiver MUST send `ack` within 10 s or sender treats it as `protocol/ack-timeout`. |
@@ -71,7 +71,7 @@ frame := length(4 bytes, big-endian uint32) || payload(UTF-8 JSON, `length` byte
 
 1. **TLS established** → initiator sends `hello` with device info and offered capabilities (§6), `seq: 1`, `sessionId: null`, and `requiresAck: false`.
 2. Responder answers `hello` with its own info and the **intersected/limited** capability set, plus a fresh or resumed `sessionId`; this response is the handshake acknowledgment, so no separate `ack` frame is sent for `hello`.
-3. Steady state: any plugin messages permitted by negotiated capabilities; `heartbeat` every **10 s** each way (`requiresAck: false`).
+3. Steady state: any plugin messages permitted by negotiated capabilities; `heartbeat` every **10 s** each way (`requiresAck: false`). `hello` is not valid after the handshake.
 4. **Degraded**: two consecutive missed heartbeats (>20 s silence). The UI may show "reconnecting"; senders SHOULD queue idempotent messages.
 5. **Reconnect**: backoff at 1 s / 5 s / 15 s / 30 s (then every 30 s). A reconnect is a new TLS connection followed by `hello` carrying `resumeToken` from the previous session. The responder MAY resume (same `sessionId`, transfer checkpoints valid) or reject (fresh session; transfers restart from last durable checkpoint).
 6. Resume tokens are single-peer, single-use, expire after 10 minutes, and MUST be invalidated on trust revocation. They are session continuity hints, never authentication: the TLS pin check always runs first.
@@ -172,7 +172,7 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
   "category": "msg",
   "clearable": true,
   "ongoing": false,
-  "replyActions": [{ "actionIndex": 2, "label": "Reply" }]
+  "replyActions": [{ "actionIndex": 2, "actionId": "reply:1:reply:android.reply", "label": "Reply" }]
 }
 ```
 
@@ -185,7 +185,12 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
 | `category` | string | no | Android notification category when present |
 | `clearable` | boolean | yes | Whether Android reports the notification as clearable |
 | `ongoing` | boolean | yes | Whether Android reports the notification as ongoing |
-| `replyActions` | array | no | RemoteInput-capable Android actions only. Each item has non-negative integer `actionIndex` (index in Android `Notification.actions`) and display `label`. Omitted when no compatible reply action exists. |
+| `replyActions` | array | no | RemoteInput-capable Android actions only. Each item has non-negative integer `actionIndex` (index in Android `Notification.actions`), display `label`, and SHOULD include stable opaque `actionId` when the sender can derive one from current action metadata. Omitted when no compatible reply action exists. If multiple compatible actions cannot be distinguished by stable metadata, senders SHOULD omit `actionId` for those actions and receivers SHOULD avoid presenting multi-action index-only reply choices. |
+
+If negotiated `notifications.v1.reply` is `off`, Android MUST omit
+`replyActions` and macOS MUST NOT present or send Quick Reply actions. If
+negotiated `notifications.v1.dismiss` is `false`, macOS MUST NOT send
+`notification.dismiss.request`.
 
 `notification.dismiss.request` is sent from macOS to Android with:
 
@@ -204,8 +209,10 @@ If Android cannot cancel the notification, the result MUST carry `success: false
 `notification.reply.request` is sent from macOS to Android only for mirrored notifications that advertised at least one `replyActions` item:
 
 ```json
-{ "sbnKey": "0|com.example.chat|7|thread-123|10101", "actionIndex": 2, "text": "On my way" }
+{ "sbnKey": "0|com.example.chat|7|thread-123|10101", "actionIndex": 2, "actionId": "reply:1:reply:android.reply", "text": "On my way" }
 ```
+
+New peers SHOULD send `actionId` and Android MUST prefer it over `actionIndex` when resolving the current RemoteInput action. Receivers MUST treat `actionId` as opaque. Legacy peers MAY send only `actionIndex`; Android falls back to `actionIndex` only when `actionId` is absent.
 
 Android replies with `notification.reply.result`:
 
@@ -213,7 +220,7 @@ Android replies with `notification.reply.result`:
 { "sbnKey": "0|com.example.chat|7|thread-123|10101", "success": true }
 ```
 
-If Android cannot send the RemoteInput reply, the result MUST carry `success: false` and an error code from §8, for example `permission/notifications-denied` when notification-listener access is unavailable, `plugin/notification-key-not-found` when the Android key no longer exists, or `plugin/reply-unavailable` when the action index is absent, has no RemoteInput, or its PendingIntent is no longer sendable. Quick Reply remains beta in v0 and must be advertised/tested only for compatible app families.
+If Android cannot send the RemoteInput reply, the result MUST carry `success: false` and an error code from §8, for example `permission/notifications-denied` when notification-listener access is unavailable, `plugin/notification-key-not-found` when the Android key no longer exists, or `plugin/reply-unavailable` when the selected action is absent, the supplied `actionId` no longer matches a current action, the action has no RemoteInput, or its PendingIntent is no longer sendable. Quick Reply remains beta in v0 and must be advertised/tested only for compatible app families.
 
 ### 7.2 `text.send` payload
 
@@ -255,13 +262,13 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 |---|---|---:|---|
 | `fileId` | string | yes | Sender-generated opaque id matching `^f_[A-Za-z0-9_-]{8,128}$`; stable across resume attempts |
 | `filename` | string | yes | Display filename only, max 255 chars, no `/` or `\`; receivers choose the destination path |
-| `sizeBytes` | integer | yes | Whole-file size in bytes; minimum 0 |
+| `sizeBytes` | integer | yes | Whole-file size in bytes; 0..1073741824 (v0 default max transfer size is exactly 1 GiB) |
 | `mimeType` | string | yes | Lowercase normalized media type; use `application/octet-stream` if unknown |
 | `sha256` | string | yes | Whole-file SHA-256, lowercase hex |
 | `chunkSizeBytes` | integer | yes | Effective chunk size after capability negotiation; 1024..2097152 |
-| `chunkCount` | integer | yes | Number of `transfer.chunk` payloads expected; empty files use 0 |
+| `chunkCount` | integer | yes | Number of `transfer.chunk` payloads expected; empty files use 0; maximum 1048576 |
 
-Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when creating chunk state.
+Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when creating chunk state. Receivers MUST reject manifests that exceed the v0 transfer-size or chunk-count bounds before allocating per-chunk receive state.
 
 ### 7.4 `transfer.chunk` payload
 
@@ -356,7 +363,7 @@ These decisions document the Android and macOS behavior frozen for the current v
 - Envelope JSON is strict on both platforms: unknown envelope fields are rejected as `protocol/invalid-envelope`.
 - `trace` is strict: only `localOnly` and `spanId` are allowed; `localOnly` must be `true`; `spanId`, when present, must be a ULID.
 - `hello` payloads are strict: only `device`, `resumeToken`, and `capabilities` are accepted; `device.kind` must be `android` or `macos`; `device.appVersion` must match the semantic-version pattern in `capability.schema.json`; capability names must match `feature.vN`; `transfer.v1.maxChunkBytes` must be 1024..2097152; `resumeToken` must be a string or `null`; `capabilities` must be an object.
-- Malformed envelopes are surfaced to diagnostics and skipped; the connection stays open unless the frame layer or transport fails.
+- Malformed envelopes, invalid active `sessionId`, missing/null steady-state `sessionId`, post-handshake `hello`, duplicate sequence numbers, and forward sequence gaps are surfaced as `protocol/invalid-envelope` and close the current session.
 - The session layer treats `ack` and `heartbeat` as core. All other valid envelope types are delivered to the feature/plugin layer, which gates them with the negotiated capabilities from the handshake result. Unsupported capabilities return `plugin/unsupported-capability`; decoded but unhandled plugin types are acked if requested by the session layer and then answered with `protocol/unknown-type`.
 
 ### 9.2 Session and resume behavior

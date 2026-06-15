@@ -547,6 +547,58 @@ final class TransferMessagesTests: XCTestCase {
         XCTAssertThrowsError(try receiver.handle(toEnvelope(chunk(fileId: manifest.fileId, chunkIndex: 2, bytes: Data(repeating: 0, count: 500)), index: 3)))
     }
 
+    func testReceiverRejectsOversizedManifestsBeforeStateAllocation() throws {
+        let receiver = TransferReceiver(storage: RejectingTransferStorage())
+
+        XCTAssertThrowsError(
+            try receiver.handle(
+                toEnvelope(
+                    SentTransferEnvelope(
+                        type: TransferProtocol.typeManifest,
+                        capability: TransferProtocol.capability,
+                        requiresAck: true,
+                        payload: manifestPayload(
+                            fileId: "f_oversized_manifest",
+                            sizeBytes: TransferProtocol.maxV0TransferSizeBytes + 1,
+                            chunkSizeBytes: 1024,
+                            chunkCount: TransferProtocol.maxV0TransferChunkCount + 1
+                        )
+                    ),
+                    index: 0
+                )
+            )
+        )
+    }
+
+    func testManifestAcceptsExactlyOneGibibyteWhenChunkMathIsValid() throws {
+        let manifest = try TransferManifest(
+            payload: manifestPayload(
+                fileId: "f_exactly_one_gib",
+                sizeBytes: TransferProtocol.maxV0TransferSizeBytes,
+                chunkSizeBytes: TransferProtocol.maxChunkSizeBytes,
+                chunkCount: 512
+            )
+        )
+
+        XCTAssertEqual(manifest.sizeBytes, TransferProtocol.maxV0TransferSizeBytes)
+        XCTAssertEqual(manifest.chunkCount, 512)
+    }
+
+    func testSenderRejectsOversizedSourcesBeforeHashing() throws {
+        let source = CountingTransferByteSource(sizeBytes: TransferProtocol.maxV0TransferSizeBytes + 1)
+
+        XCTAssertThrowsError(
+            try TransferManifest(
+                filename: "large.bin",
+                mimeType: "application/octet-stream",
+                source: source,
+                chunkSizeBytes: 1024,
+                fileId: "f_oversized_source"
+            )
+        )
+        XCTAssertEqual(source.openCount, 0)
+    }
+
     private func sendThroughReceiver(_ bytes: Data, fileId: String) throws -> TransferCompleted {
         let outbox = RecordingTransferOutbox()
         try TransferSender(outbox: outbox).sendSource(
@@ -605,6 +657,23 @@ final class TransferMessagesTests: XCTestCase {
         )
     }
 
+    private func manifestPayload(
+        fileId: String,
+        sizeBytes: Int64,
+        chunkSizeBytes: Int,
+        chunkCount: Int
+    ) -> [String: Any] {
+        [
+            "fileId": fileId,
+            "filename": "sample.bin",
+            "sizeBytes": sizeBytes,
+            "mimeType": "application/octet-stream",
+            "sha256": String(repeating: "0", count: 64),
+            "chunkSizeBytes": chunkSizeBytes,
+            "chunkCount": chunkCount,
+        ]
+    }
+
     private func toEnvelope(_ sent: SentTransferEnvelope, index: Int) -> Envelope {
         Envelope(
             messageId: "01JZ000000000000000000000\(index)",
@@ -616,6 +685,29 @@ final class TransferMessagesTests: XCTestCase {
             requiresAck: sent.requiresAck,
             payload: sent.payload
         )
+    }
+}
+
+private final class RejectingTransferStorage: TransferStorage {
+    func prepare(manifest: TransferManifest) throws -> URL {
+        XCTFail("oversized manifest should reject before storage allocation")
+        throw TransferError.io("unexpected storage allocation")
+    }
+
+    func discard(fileId: String) {}
+}
+
+private final class CountingTransferByteSource: TransferByteSource {
+    let sizeBytes: Int64
+    private(set) var openCount = 0
+
+    init(sizeBytes: Int64) {
+        self.sizeBytes = sizeBytes
+    }
+
+    func openStream() throws -> InputStream {
+        openCount += 1
+        return InputStream(data: Data())
     }
 }
 

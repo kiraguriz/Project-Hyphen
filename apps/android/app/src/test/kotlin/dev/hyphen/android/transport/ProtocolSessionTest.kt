@@ -54,6 +54,7 @@ class ProtocolSessionTest {
         val protocolError = AtomicReference<String?>(null)
         val protocolErrorLatch = CountDownLatch(1)
         val envelopeLatch = CountDownLatch(1)
+        val closedLatch = CountDownLatch(1)
 
         override fun onEnvelope(envelope: Envelope) {
             synchronized(envelopes) { envelopes.add(envelope) }
@@ -76,6 +77,10 @@ class ProtocolSessionTest {
             protocolError.set(code)
             protocolErrorLatch.countDown()
         }
+
+        override fun onClosed() {
+            closedLatch.countDown()
+        }
     }
 
     private var serverPort = 0
@@ -97,12 +102,13 @@ class ProtocolSessionTest {
         sessionId: String? = "s_test1",
         seq: Long = 1,
         type: String = "text.send",
+        capability: String? = "text.v1",
     ): Envelope =
         Envelope(
             messageId = Ulid.generate(),
             sessionId = sessionId,
             type = type,
-            capability = "text.v1",
+            capability = capability,
             seq = seq,
             sentAtUnixMs = System.currentTimeMillis(),
             requiresAck = false,
@@ -248,6 +254,7 @@ class ProtocolSessionTest {
         assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
         assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
         assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+        assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
     }
 
     @Test
@@ -268,6 +275,104 @@ class ProtocolSessionTest {
         assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
         assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
         assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+        assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `invalid then valid frames on same socket close without delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        try {
+            FrameIO.write(socket.outputStream, rawEnvelope(sessionId = "s_other").encode())
+            FrameIO.write(socket.outputStream, rawEnvelope(seq = 1).encode())
+
+            assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+            assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
+            assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+            assertEquals(0, synchronized(serverListener.envelopes) { serverListener.envelopes.size })
+        } finally {
+            runCatching { socket.close() }
+        }
+    }
+
+    @Test
+    fun `forward inbound sequence closes before delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        try {
+            FrameIO.write(socket.outputStream, rawEnvelope(seq = 2).encode())
+
+            assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+            assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+            assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
+        } finally {
+            runCatching { socket.close() }
+        }
+    }
+
+    @Test
+    fun `malformed envelope closes before delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        try {
+            FrameIO.write(socket.outputStream, "{".toByteArray(Charsets.UTF_8))
+
+            assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+            assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+            assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
+        } finally {
+            runCatching { socket.close() }
+        }
+    }
+
+    @Test
+    fun `post-handshake hello closes before delivery`() {
+        val serverListener = RecordingListener()
+        val port = startServerSession(serverListener)
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        try {
+            FrameIO.write(
+                socket.outputStream,
+                rawEnvelope(sessionId = null, type = Envelope.TYPE_HELLO, capability = null).encode(),
+            )
+
+            assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+            assertTrue(!serverListener.envelopeLatch.await(200, TimeUnit.MILLISECONDS))
+            assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
+        } finally {
+            runCatching { socket.close() }
+        }
     }
 
     @Test
@@ -290,5 +395,6 @@ class ProtocolSessionTest {
         assertEquals(1, synchronized(serverListener.envelopes) { serverListener.envelopes.size })
         assertTrue(serverListener.protocolErrorLatch.await(3, TimeUnit.SECONDS))
         assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
+        assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
     }
 }

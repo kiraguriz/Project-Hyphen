@@ -49,8 +49,9 @@ public struct NotificationPresentationRequest: Equatable {
 public struct NotificationReplyAction: Equatable {
     public let actionIndex: Int
     public let label: String
+    public let actionId: String?
 
-    public init(actionIndex: Int, label: String) throws {
+    public init(actionIndex: Int, label: String, actionId: String? = nil) throws {
         guard actionIndex >= 0 else {
             throw NotificationMirrorError.invalidPayload("reply actionIndex must be non-negative")
         }
@@ -58,8 +59,70 @@ public struct NotificationReplyAction: Equatable {
         guard !trimmed.isEmpty else {
             throw NotificationMirrorError.invalidPayload("reply label must be a non-empty string")
         }
+        let trimmedActionId = actionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedActionId, trimmedActionId.isEmpty {
+            throw NotificationMirrorError.invalidPayload("reply actionId must be a non-empty string")
+        }
         self.actionIndex = actionIndex
         self.label = trimmed
+        self.actionId = trimmedActionId
+    }
+}
+
+public struct NotificationReplyRoute: Equatable {
+    public let actionIdentifier: String
+    public let actionIndex: Int
+    public let actionId: String?
+    public let label: String
+}
+
+public enum NotificationReplyRouting {
+    public static func categoryIdentifier(for notificationIdentifier: String) -> String {
+        "hyphen.notification.mirror.reply.\(notificationIdentifier)"
+    }
+
+    public static func routes(for replyActions: [NotificationReplyAction]) -> [NotificationReplyRoute] {
+        let routableActions = replyActions.count <= 1
+            ? replyActions
+            : replyActions.filter { $0.actionId != nil }
+        return routableActions.enumerated().map { offset, action in
+            NotificationReplyRoute(
+                actionIdentifier: "hyphen.notification.reply.\(offset)",
+                actionIndex: action.actionIndex,
+                actionId: action.actionId,
+                label: action.label
+            )
+        }
+    }
+
+    public static func userInfo(sbnKey: String, routes: [NotificationReplyRoute]) -> [String: Any] {
+        var info: [String: Any] = ["sbnKey": sbnKey]
+        if !routes.isEmpty {
+            info["replyRoutes"] = routes.map { route in
+                var entry: [String: Any] = [
+                    "actionIdentifier": route.actionIdentifier,
+                    "actionIndex": route.actionIndex,
+                ]
+                if let actionId = route.actionId {
+                    entry["actionId"] = actionId
+                }
+                return entry
+            }
+        }
+        return info
+    }
+
+    public static func route(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> (actionIndex: Int, actionId: String?)? {
+        guard let routes = userInfo["replyRoutes"] as? [[String: Any]] else { return nil }
+        for route in routes {
+            guard route["actionIdentifier"] as? String == actionIdentifier,
+                  let actionIndex = route["actionIndex"] as? Int
+            else {
+                continue
+            }
+            return (actionIndex, route["actionId"] as? String)
+        }
+        return nil
     }
 }
 
@@ -130,17 +193,22 @@ public final class NotificationReplySender {
     }
 
     @discardableResult
-    public func requestReply(sbnKey: String, actionIndex: Int, text: String) -> String? {
+    public func requestReply(sbnKey: String, actionIndex: Int, actionId: String? = nil, text: String) -> String? {
         let trimmedKey = sbnKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedActionId = actionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty, actionIndex >= 0, !trimmedText.isEmpty else {
             return nil
+        }
+        var payload: [String: Any] = ["sbnKey": trimmedKey, "actionIndex": actionIndex, "text": trimmedText]
+        if let trimmedActionId, !trimmedActionId.isEmpty {
+            payload["actionId"] = trimmedActionId
         }
         return outbox.send(
             type: NotificationMirrorProtocol.typeReplyRequest,
             capability: NotificationMirrorProtocol.capability,
             requiresAck: true,
-            payload: ["sbnKey": trimmedKey, "actionIndex": actionIndex, "text": trimmedText]
+            payload: payload
         )
     }
 }
@@ -178,6 +246,10 @@ public struct AndroidNotificationPayload: Equatable {
     }
 
     public var presentationRequest: NotificationPresentationRequest {
+        presentationRequest(replyActionsEnabled: true)
+    }
+
+    public func presentationRequest(replyActionsEnabled: Bool) -> NotificationPresentationRequest {
         NotificationPresentationRequest(
             identifier: Self.identifier(for: sbnKey),
             sbnKey: sbnKey,
@@ -185,7 +257,7 @@ public struct AndroidNotificationPayload: Equatable {
             title: title ?? packageName,
             body: text ?? "",
             category: category,
-            replyActions: replyActions
+            replyActions: replyActionsEnabled ? replyActions : []
         )
     }
 
@@ -211,16 +283,22 @@ public struct AndroidNotificationPayload: Equatable {
             guard let label = action["label"] as? String else {
                 throw NotificationMirrorError.invalidPayload("reply label must be string")
             }
-            return try NotificationReplyAction(actionIndex: actionIndex, label: label)
+            let actionId = action["actionId"] as? String
+            return try NotificationReplyAction(actionIndex: actionIndex, label: label, actionId: actionId)
         }
     }
 }
 
 public final class NotificationMirrorReceiver {
     private let presenter: NotificationPresenter
+    private let replyActionsEnabled: () -> Bool
 
-    public init(presenter: NotificationPresenter) {
+    public init(
+        presenter: NotificationPresenter,
+        replyActionsEnabled: @escaping () -> Bool = { true }
+    ) {
         self.presenter = presenter
+        self.replyActionsEnabled = replyActionsEnabled
     }
 
     @discardableResult
@@ -229,7 +307,7 @@ public final class NotificationMirrorReceiver {
         case NotificationMirrorProtocol.typePosted, NotificationMirrorProtocol.typeUpdated:
             try requireNotificationsCapability(envelope)
             let payload = try AndroidNotificationPayload(payload: envelope.payload)
-            let request = payload.presentationRequest
+            let request = payload.presentationRequest(replyActionsEnabled: replyActionsEnabled())
             presenter.show(request)
             return .shown(identifier: request.identifier, sbnKey: payload.sbnKey)
 
@@ -284,51 +362,36 @@ public final class NotificationMirrorReceiver {
 
 public final class UserNotificationCenterPresenter: NSObject, NotificationPresenter, UNUserNotificationCenterDelegate {
     private static let categoryIdentifier = "hyphen.notification.mirror"
-    private static let replyCategoryIdentifier = "hyphen.notification.mirror.reply"
-    private static let replyActionIdentifier = "hyphen.notification.reply"
     private let center: UNUserNotificationCenter
     private var onDismiss: ((String) -> Void)?
-    private var onReply: ((String, Int, String) -> Void)?
+    private var onReply: ((String, Int, String?, String) -> Void)?
+    private var notificationCategories: [String: UNNotificationCategory] = [:]
 
     public init(
         center: UNUserNotificationCenter = .current(),
         onDismiss: ((String) -> Void)? = nil,
-        onReply: ((String, Int, String) -> Void)? = nil
+        onReply: ((String, Int, String?, String) -> Void)? = nil
     ) {
         self.center = center
         self.onDismiss = onDismiss
         self.onReply = onReply
         super.init()
         center.delegate = self
-        center.setNotificationCategories([
+        registerCategory(
             UNNotificationCategory(
                 identifier: Self.categoryIdentifier,
                 actions: [],
                 intentIdentifiers: [],
                 options: [.customDismissAction]
-            ),
-            UNNotificationCategory(
-                identifier: Self.replyCategoryIdentifier,
-                actions: [
-                    UNTextInputNotificationAction(
-                        identifier: Self.replyActionIdentifier,
-                        title: "Reply",
-                        options: [],
-                        textInputButtonTitle: "Send",
-                        textInputPlaceholder: "Reply"
-                    ),
-                ],
-                intentIdentifiers: [],
-                options: [.customDismissAction]
-            ),
-        ])
+            )
+        )
     }
 
     public func setDismissHandler(_ handler: ((String) -> Void)?) {
         onDismiss = handler
     }
 
-    public func setReplyHandler(_ handler: ((String, Int, String) -> Void)?) {
+    public func setReplyHandler(_ handler: ((String, Int, String?, String) -> Void)?) {
         onReply = handler
     }
 
@@ -339,16 +402,31 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
             content.body = request.body
             content.subtitle = request.packageName
             content.threadIdentifier = request.sbnKey
-            if request.replyActions.isEmpty {
+            let replyRoutes = NotificationReplyRouting.routes(for: request.replyActions)
+            if replyRoutes.isEmpty {
                 content.categoryIdentifier = Self.categoryIdentifier
             } else {
-                content.categoryIdentifier = Self.replyCategoryIdentifier
+                let categoryIdentifier = NotificationReplyRouting.categoryIdentifier(for: request.identifier)
+                content.categoryIdentifier = categoryIdentifier
+                let replyActions = replyRoutes.map { route in
+                    UNTextInputNotificationAction(
+                        identifier: route.actionIdentifier,
+                        title: route.label,
+                        options: [],
+                        textInputButtonTitle: "Send",
+                        textInputPlaceholder: route.label
+                    )
+                }
+                self.registerCategory(
+                    UNNotificationCategory(
+                        identifier: categoryIdentifier,
+                        actions: replyActions,
+                        intentIdentifiers: [],
+                        options: [.customDismissAction]
+                    )
+                )
             }
-            var userInfo: [String: Any] = ["sbnKey": request.sbnKey]
-            if let replyAction = request.replyActions.first {
-                userInfo["replyActionIndex"] = replyAction.actionIndex
-            }
-            content.userInfo = userInfo
+            content.userInfo = NotificationReplyRouting.userInfo(sbnKey: request.sbnKey, routes: replyRoutes)
             center.add(
                 UNNotificationRequest(identifier: request.identifier, content: content, trigger: nil)
             )
@@ -377,17 +455,21 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
         }
     }
 
+    private func registerCategory(_ category: UNNotificationCategory) {
+        notificationCategories[category.identifier] = category
+        center.setNotificationCategories(Set(notificationCategories.values))
+    }
+
     public func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        if response.actionIdentifier == Self.replyActionIdentifier,
-           let response = response as? UNTextInputNotificationResponse,
+        if let response = response as? UNTextInputNotificationResponse,
            let sbnKey = userInfo["sbnKey"] as? String,
-           let actionIndex = userInfo["replyActionIndex"] as? Int {
-            onReply?(sbnKey, actionIndex, response.userText)
+           let route = NotificationReplyRouting.route(actionIdentifier: response.actionIdentifier, userInfo: userInfo) {
+            onReply?(sbnKey, route.actionIndex, route.actionId, response.userText)
         } else if response.actionIdentifier == UNNotificationDismissActionIdentifier,
                   let sbnKey = userInfo["sbnKey"] as? String {
             onDismiss?(sbnKey)

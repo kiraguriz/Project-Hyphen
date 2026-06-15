@@ -68,23 +68,64 @@ class SessionReconnector(
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
     private var activeSession: ProtocolSession? = null
+    private var connecting = false
+    private var attemptInFlight = false
+    private var nextAttemptId = 0L
 
     /** First attempt runs immediately on a scheduler thread. */
     fun start() {
-        scheduler.schedule(0) { attempt() }
+        val attempt = synchronized(stateLock) {
+            if (stopped.get() || connecting || activeSession != null) {
+                null
+            } else {
+                scheduleAttemptLocked(0)
+            }
+        }
+        attempt?.let { scheduler.schedule(it.delayMs) { attempt(it.id) } }
     }
 
     fun stop() {
         if (stopped.getAndSet(true)) return
         val session = synchronized(stateLock) {
+            connecting = false
+            attemptInFlight = false
             activeSession.also { activeSession = null }
         }
         session?.stop()
         scheduler.shutdown()
     }
 
-    private fun attempt() {
-        if (stopped.get()) return
+    private data class AttemptSnapshot(
+        val id: Long,
+        val resumeToken: String?,
+        val lastSessionId: String?,
+    )
+
+    private data class ScheduledAttempt(
+        val id: Long,
+        val delayMs: Long,
+    )
+
+    private data class RetryPlan(
+        val attempt: ScheduledAttempt,
+        val attemptNumber: Int,
+        val delaySeconds: Long,
+    )
+
+    private fun attempt(id: Long) {
+        val snapshot = synchronized(stateLock) {
+            if (
+                stopped.get() ||
+                id != nextAttemptId ||
+                !connecting ||
+                attemptInFlight ||
+                activeSession != null
+            ) {
+                return
+            }
+            attemptInFlight = true
+            AttemptSnapshot(id, resumeToken, lastSessionId)
+        }
         val handshake: SessionHandshake.Result
         var socket: SSLSocket? = null
         try {
@@ -92,25 +133,23 @@ class SessionReconnector(
             handshake = SessionHandshake.initiate(
                 socket = socket,
                 device = device,
-                resumeToken = resumeToken,
-                previousSessionId = lastSessionId,
+                resumeToken = snapshot.resumeToken,
+                previousSessionId = snapshot.lastSessionId,
             )
         } catch (e: Exception) {
             runCatching { socket?.close() }
             listener.onAttemptFailed(e.message)
-            scheduleRetry()
+            scheduleRetryAfterFailedAttempt(snapshot.id)
             return
         }
         if (stopped.get()) {
+            finishAttempt(snapshot.id)
             runCatching { socket.close() }
             return
         }
         val connectedSocket = checkNotNull(socket)
-        // A presented token is spent either way (§4.6 single-use).
-        resumeToken = handshake.resumeToken
-        lastSessionId = handshake.sessionId
-        consecutiveFailures = 0
 
+        var sessionRef: ProtocolSession? = null
         val session = ProtocolSession(
             socket = connectedSocket,
             sessionId = handshake.sessionId,
@@ -127,14 +166,21 @@ class SessionReconnector(
                     listener.onProtocolError(code, detail)
 
                 override fun onClosed() {
-                    if (!stopped.get()) scheduleRetry()
+                    sessionRef?.let { scheduleRetryAfterSessionClosed(it) }
                 }
             },
         )
+        sessionRef = session
         val assigned = synchronized(stateLock) {
-            if (stopped.get()) {
+            attemptInFlight = false
+            connecting = false
+            if (stopped.get() || snapshot.id != nextAttemptId || activeSession != null) {
                 false
             } else {
+                // A presented token is spent either way (§4.6 single-use).
+                resumeToken = handshake.resumeToken
+                lastSessionId = handshake.sessionId
+                consecutiveFailures = 0
                 activeSession = session
                 true
             }
@@ -151,12 +197,59 @@ class SessionReconnector(
         listener.onSession(session, handshake)
     }
 
-    private fun scheduleRetry() {
-        if (stopped.get()) return
+    private fun finishAttempt(id: Long) {
+        synchronized(stateLock) {
+            if (id == nextAttemptId) {
+                attemptInFlight = false
+                connecting = false
+            }
+        }
+    }
+
+    private fun scheduleRetryAfterFailedAttempt(id: Long) {
+        val retry = synchronized(stateLock) {
+            attemptInFlight = false
+            connecting = false
+            if (stopped.get() || id != nextAttemptId || activeSession != null) {
+                null
+            } else {
+                nextRetryLocked()
+            }
+        }
+        retry?.schedule()
+    }
+
+    private fun scheduleRetryAfterSessionClosed(session: ProtocolSession) {
+        val retry = synchronized(stateLock) {
+            if (activeSession !== session) {
+                null
+            } else {
+                activeSession = null
+                if (stopped.get() || connecting) null else nextRetryLocked()
+            }
+        }
+        retry?.schedule()
+    }
+
+    private fun nextRetryLocked(): RetryPlan {
         val delaySeconds = BACKOFF_SECONDS[consecutiveFailures.coerceAtMost(BACKOFF_SECONDS.size - 1)]
         val attemptNumber = consecutiveFailures
         consecutiveFailures++
+        return RetryPlan(
+            attempt = scheduleAttemptLocked(delaySeconds * 1000),
+            attemptNumber = attemptNumber,
+            delaySeconds = delaySeconds,
+        )
+    }
+
+    private fun scheduleAttemptLocked(delayMs: Long): ScheduledAttempt {
+        connecting = true
+        val id = ++nextAttemptId
+        return ScheduledAttempt(id, delayMs)
+    }
+
+    private fun RetryPlan.schedule() {
         listener.onRetryScheduled(attemptNumber, delaySeconds)
-        scheduler.schedule(delaySeconds * 1000) { attempt() }
+        scheduler.schedule(attempt.delayMs) { attempt(attempt.id) }
     }
 }

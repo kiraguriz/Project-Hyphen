@@ -35,6 +35,31 @@ data class TextLinkMessage(
 
         fun url(value: String): TextLinkMessage = TextLinkMessage(TextLinkKind.URL, value)
 
+        fun fromUserInput(value: String): TextLinkMessage {
+            val trimmed = value.trim()
+            return when (classify(trimmed)) {
+                TextLinkKind.URL -> url(trimmed)
+                TextLinkKind.TEXT -> text(trimmed)
+            }
+        }
+
+        fun classify(value: String): TextLinkKind =
+            if (isAllowedUrl(value)) TextLinkKind.URL else TextLinkKind.TEXT
+
+        fun isAllowedUrlScheme(scheme: String?): Boolean =
+            scheme?.lowercase() == "http" || scheme?.lowercase() == "https"
+
+        fun isAllowedUrl(value: String): Boolean {
+            val uri = runCatching { URI(value) }.getOrNull() ?: return false
+            return isAllowedUrlScheme(uri.scheme) &&
+                !uri.isOpaque &&
+                !uri.rawAuthority.isNullOrBlank() &&
+                !uri.host.isNullOrBlank()
+        }
+
+        fun isAllowedOpenUrl(value: String, parsedScheme: String?): Boolean =
+            isAllowedUrl(value) && isAllowedUrlScheme(parsedScheme)
+
         fun fromJson(payload: Json.Obj): TextLinkMessage {
             val rawKind = (payload["kind"] as? Json.Str)?.value
                 ?: throw IllegalArgumentException("kind must be text or url")
@@ -43,11 +68,6 @@ data class TextLinkMessage(
             val kind = TextLinkKind.entries.firstOrNull { it.wireName == rawKind }
                 ?: throw IllegalArgumentException("kind must be text or url")
             return TextLinkMessage(kind, value)
-        }
-
-        private fun isAllowedUrl(value: String): Boolean {
-            val scheme = runCatching { URI(value).scheme?.lowercase() }.getOrNull()
-            return scheme == "http" || scheme == "https"
         }
     }
 }

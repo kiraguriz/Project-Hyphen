@@ -378,6 +378,72 @@ class TransferMessagesTest {
         }
     }
 
+    @Test
+    fun `receiver rejects oversized manifests before state allocation`() {
+        val receiver = TransferReceiver(object : TransferStorage {
+            override fun prepare(manifest: TransferManifest): java.io.File {
+                fail("oversized manifest should reject before storage allocation")
+                throw IllegalStateException("unexpected storage allocation")
+            }
+
+            override fun discard(fileId: String) = Unit
+        })
+
+        assertRejected("oversized manifest") {
+            receiver.handle(
+                toEnvelope(
+                    SentTransferEnvelope(
+                        type = TransferProtocol.TYPE_MANIFEST,
+                        capability = TransferProtocol.CAPABILITY,
+                        requiresAck = true,
+                        payload = manifestPayload(
+                            fileId = "f_oversized_manifest",
+                            sizeBytes = TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES + 1,
+                            chunkSizeBytes = 1024,
+                            chunkCount = TransferProtocol.MAX_V0_TRANSFER_CHUNK_COUNT + 1,
+                        ),
+                    ),
+                    index = 0,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `manifest accepts exactly one gibibyte when chunk math is valid`() {
+        val manifest = TransferManifest.fromJson(
+            manifestPayload(
+                fileId = "f_exactly_one_gib",
+                sizeBytes = TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES,
+                chunkSizeBytes = TransferProtocol.MAX_CHUNK_SIZE_BYTES,
+                chunkCount = 512,
+            ),
+        )
+
+        assertEquals(TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES, manifest.sizeBytes)
+        assertEquals(512, manifest.chunkCount)
+    }
+
+    @Test
+    fun `sender rejects oversized sources before hashing`() {
+        var opened = false
+        val source = StreamTransferByteSource(TransferProtocol.MAX_V0_TRANSFER_SIZE_BYTES + 1) {
+            opened = true
+            java.io.ByteArrayInputStream(ByteArray(0))
+        }
+
+        assertRejected("oversized source") {
+            TransferManifest.fromSource(
+                filename = "large.bin",
+                mimeType = "application/octet-stream",
+                source = source,
+                chunkSizeBytes = 1024,
+                fileId = "f_oversized_source",
+            )
+        }
+        assertFalse(opened)
+    }
+
     private fun sendThroughReceiver(bytes: ByteArray, fileId: String): TransferCompleted {
         val outbox = RecordingTransferOutbox()
         TransferSender(outbox).sendSource(
@@ -493,6 +559,22 @@ class TransferMessagesTest {
             capability = TransferProtocol.CAPABILITY,
             requiresAck = true,
             payload = TransferChunk(fileId, chunkIndex, bytes).toJson(),
+        )
+
+    private fun manifestPayload(
+        fileId: String,
+        sizeBytes: Long,
+        chunkSizeBytes: Int,
+        chunkCount: Int,
+    ): Json.Obj =
+        Json.obj(
+            "fileId" to Json.Str(fileId),
+            "filename" to Json.Str("sample.bin"),
+            "sizeBytes" to Json.Num(sizeBytes.toString()),
+            "mimeType" to Json.Str("application/octet-stream"),
+            "sha256" to Json.Str("0".repeat(64)),
+            "chunkSizeBytes" to Json.Num(chunkSizeBytes.toString()),
+            "chunkCount" to Json.Num(chunkCount.toString()),
         )
 
     private fun assertRejected(label: String, block: () -> Unit) {

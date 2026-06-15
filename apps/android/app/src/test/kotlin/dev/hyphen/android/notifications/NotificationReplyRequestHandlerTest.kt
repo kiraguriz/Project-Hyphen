@@ -11,12 +11,12 @@ import org.junit.Test
 private class FakeNotificationReplier(
     private val result: NotificationReplyAttempt = NotificationReplyAttempt.Sent,
 ) : NotificationReplier {
-    data class Reply(val sbnKey: String, val actionIndex: Int, val text: String)
+    data class Reply(val sbnKey: String, val actionIndex: Int, val actionId: String?, val text: String)
 
     val replies = mutableListOf<Reply>()
 
-    override fun reply(sbnKey: String, actionIndex: Int, text: String): NotificationReplyAttempt {
-        replies += Reply(sbnKey, actionIndex, text)
+    override fun reply(sbnKey: String, actionIndex: Int, actionId: String?, text: String): NotificationReplyAttempt {
+        replies += Reply(sbnKey, actionIndex, actionId, text)
         return result
     }
 }
@@ -33,7 +33,7 @@ class NotificationReplyRequestHandlerTest {
 
         assertEquals("01JZ0000000000000000000000", id)
         assertEquals(
-            listOf(FakeNotificationReplier.Reply("0|com.chat|7|thread-123|10101", 2, "On my way")),
+            listOf(FakeNotificationReplier.Reply("0|com.chat|7|thread-123|10101", 2, null, "On my way")),
             replier.replies,
         )
         val sent = outbox.envelopes.single()
@@ -42,6 +42,31 @@ class NotificationReplyRequestHandlerTest {
         assertEquals(true, sent.requiresAck)
         assertEquals(Json.Str("0|com.chat|7|thread-123|10101"), sent.payload["sbnKey"])
         assertEquals(Json.Bool(true), sent.payload["success"])
+    }
+
+    @Test
+    fun `reply request forwards stable action id when present`() {
+        val replier = FakeNotificationReplier()
+        NotificationReplyRequestHandler(replier, RecordingNotificationOutbox()).handle(
+            request(
+                "0|com.chat|7|thread-123|10101",
+                actionIndex = 2,
+                actionId = "reply:1:reply:android.reply",
+                text = "On my way",
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                FakeNotificationReplier.Reply(
+                    "0|com.chat|7|thread-123|10101",
+                    2,
+                    "reply:1:reply:android.reply",
+                    "On my way",
+                ),
+            ),
+            replier.replies,
+        )
     }
 
     @Test
@@ -102,10 +127,22 @@ class NotificationReplyRequestHandlerTest {
         assertThrows(IllegalArgumentException::class.java) {
             handler.handle(request("key", actionIndex = 0, text = " "))
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            handler.handle(request("key", actionIndex = 0, actionId = " ", text = "hi"))
+        }
     }
 
     private fun request(sbnKey: String, actionIndex: Int, text: String): Envelope =
-        Envelope(
+        request(sbnKey = sbnKey, actionIndex = actionIndex, actionId = null, text = text)
+
+    private fun request(sbnKey: String, actionIndex: Int, actionId: String?, text: String): Envelope {
+        val payload = linkedMapOf<String, Json>(
+            "sbnKey" to Json.Str(sbnKey),
+            "actionIndex" to Json.Num(actionIndex.toString()),
+            "text" to Json.Str(text),
+        )
+        actionId?.let { payload["actionId"] = Json.Str(it) }
+        return Envelope(
             messageId = Ulid.generate(),
             sessionId = "s_test1",
             type = NotificationProtocol.TYPE_REPLY_REQUEST,
@@ -113,10 +150,7 @@ class NotificationReplyRequestHandlerTest {
             seq = 2,
             sentAtUnixMs = 1_781_020_800_000,
             requiresAck = true,
-            payload = Json.obj(
-                "sbnKey" to Json.Str(sbnKey),
-                "actionIndex" to Json.Num(actionIndex.toString()),
-                "text" to Json.Str(text),
-            ),
+            payload = Json.Obj(payload),
         )
+    }
 }

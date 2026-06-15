@@ -53,7 +53,7 @@ class ProtocolSession(
     private val monitor = HeartbeatMonitor(
         intervalMs = config.heartbeatIntervalMs,
         missThreshold = config.missThreshold,
-        startedAtMs = System.currentTimeMillis(),
+        startedAtMs = monotonicNowMs(),
         onStateChange = listener::onLiveness,
     )
     private val ackTracker = AckTracker(config.ackTimeoutMs, listener::onAckTimeout)
@@ -81,7 +81,7 @@ class ProtocolSession(
         val tickMs = (config.heartbeatIntervalMs / 2).coerceAtLeast(1)
         scheduler.scheduleAtFixedRate(
             {
-                val now = System.currentTimeMillis()
+                val now = monotonicNowMs()
                 monitor.tick(now)
                 ackTracker.tick(now)
             },
@@ -98,20 +98,21 @@ class ProtocolSession(
         capability: String? = null,
         ackOf: String? = null,
     ): String {
-        val now = System.currentTimeMillis()
+        val wallNow = wallNowMs()
+        val timeoutNow = monotonicNowMs()
         val envelope = Envelope(
-            messageId = Ulid.generate(now),
+            messageId = Ulid.generate(wallNow),
             sessionId = sessionId,
             type = type,
             capability = capability,
             seq = seq.incrementAndGet(),
             ackOf = ackOf,
-            sentAtUnixMs = now,
+            sentAtUnixMs = wallNow,
             requiresAck = requiresAck,
             payload = payload,
         )
         val bytes = envelope.encode()
-        if (requiresAck) ackTracker.registerSent(envelope.messageId, now)
+        if (requiresAck) ackTracker.registerSent(envelope.messageId, timeoutNow)
         try {
             synchronized(writeLock) { FrameIO.write(socket.outputStream, bytes) }
         } catch (e: IOException) {
@@ -137,13 +138,11 @@ class ProtocolSession(
             val envelope = try {
                 Envelope.decode(frame)
             } catch (e: EnvelopeException) {
-                // Stay open per §3 (unknown types keep the connection);
-                // malformed envelopes are surfaced and skipped in v0.
                 listener.onProtocolError("protocol/invalid-envelope", e.message ?: "")
-                continue
+                break
             }
-            if (!validateSessionAndSeq(envelope)) continue
-            monitor.envelopeReceived(System.currentTimeMillis())
+            if (!validateSessionAndSeq(envelope)) break
+            monitor.envelopeReceived(monotonicNowMs())
             when (envelope.type) {
                 Envelope.TYPE_ACK -> envelope.ackOf?.let { if (ackTracker.ackReceived(it)) listener.onAck(it) }
                 Envelope.TYPE_HEARTBEAT -> Unit // liveness already recorded
@@ -159,7 +158,11 @@ class ProtocolSession(
     }
 
     private fun validateSessionAndSeq(envelope: Envelope): Boolean {
-        if (envelope.type != Envelope.TYPE_HELLO && envelope.sessionId != sessionId) {
+        if (envelope.type == Envelope.TYPE_HELLO) {
+            listener.onProtocolError("protocol/invalid-envelope", "hello is only valid during handshake")
+            return false
+        }
+        if (envelope.sessionId != sessionId) {
             listener.onProtocolError("protocol/invalid-envelope", "sessionId does not match active session")
             return false
         }
@@ -174,11 +177,16 @@ class ProtocolSession(
         return true
     }
 
+    private fun monotonicNowMs(): Long = TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
+
+    private fun wallNowMs(): Long = System.currentTimeMillis()
+
     @Synchronized
     private fun close() {
         if (closed.getAndSet(true)) return
         if (::scheduler.isInitialized) scheduler.shutdownNow()
-        runCatching { socket.close() }
+        // onClosed reports terminal session state; socket close is best-effort and may block in JSSE.
         listener.onClosed()
+        runCatching { socket.close() }
     }
 }

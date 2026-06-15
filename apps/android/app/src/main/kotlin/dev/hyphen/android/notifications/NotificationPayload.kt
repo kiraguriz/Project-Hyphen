@@ -1,6 +1,7 @@
 package dev.hyphen.android.notifications
 
 import android.app.Notification
+import android.os.Build
 import android.service.notification.StatusBarNotification
 import dev.hyphen.android.transport.Json
 
@@ -18,17 +19,80 @@ object NotificationProtocol {
 data class NotificationReplyAction(
     val actionIndex: Int,
     val label: String,
+    val actionId: String? = null,
 ) {
     init {
         require(actionIndex >= 0) { "actionIndex must be non-negative" }
         require(label.isNotBlank()) { "label must not be blank" }
+        require(actionId == null || actionId.isNotBlank()) { "actionId must not be blank" }
     }
 
-    fun toJson(): Json.Obj =
-        Json.obj(
+    fun toJson(): Json.Obj {
+        val entries = linkedMapOf(
             "actionIndex" to Json.Num(actionIndex.toString()),
             "label" to Json.Str(label),
         )
+        actionId?.let { entries["actionId"] = Json.Str(it) }
+        return Json.Obj(entries)
+    }
+}
+
+internal data class NotificationReplyActionMetadata(
+    val actionIndex: Int,
+    val semanticAction: Int,
+    val title: String?,
+    val resultKeys: List<String>,
+    val hasActionIntent: Boolean,
+)
+
+internal object NotificationReplyActions {
+    fun stableActionId(metadata: NotificationReplyActionMetadata): String? {
+        if (metadata.resultKeys.isEmpty()) return null
+        val parts = listOf(
+            metadata.semanticAction.toString(),
+            normalizePart(metadata.title),
+            metadata.resultKeys.sorted().joinToString("+") { normalizePart(it) },
+        )
+        return "reply:${parts.joinToString(":")}"
+    }
+
+    fun stableActionIds(actions: List<NotificationReplyActionMetadata>): Map<Int, String?> {
+        val replyCapableActions = actions.filter { it.isReplyCapable() }
+        val baseIds = replyCapableActions.map { it to stableActionId(it) }
+        val duplicateCounts = baseIds
+            .mapNotNull { it.second }
+            .groupingBy { it }
+            .eachCount()
+        val stableIds = baseIds.associate { (metadata, baseId) ->
+            val actionId = baseId?.takeIf { id -> duplicateCounts[id] == 1 }
+            metadata.actionIndex to actionId
+        }
+        return actions.associate { metadata -> metadata.actionIndex to stableIds[metadata.actionIndex] }
+    }
+
+    fun resolveActionIndex(
+        actions: List<NotificationReplyActionMetadata>,
+        requestedActionIndex: Int,
+        requestedActionId: String?,
+    ): Int? {
+        if (requestedActionId != null) {
+            val currentActionIds = stableActionIds(actions)
+            val current = actions.firstOrNull { currentActionIds[it.actionIndex] == requestedActionId } ?: return null
+            return current.takeIf { it.isReplyCapable() }?.actionIndex
+        }
+        return actions.firstOrNull { it.actionIndex == requestedActionIndex && it.isReplyCapable() }?.actionIndex
+    }
+
+    private fun NotificationReplyActionMetadata.isReplyCapable(): Boolean =
+        hasActionIntent && resultKeys.isNotEmpty()
+
+    private fun normalizePart(value: String?): String =
+        value
+            ?.trim()
+            ?.lowercase()
+            ?.replace(Regex("\\s+"), "-")
+            ?.takeIf { it.isNotEmpty() }
+            ?: "_"
 }
 
 /**
@@ -112,16 +176,28 @@ data class NormalizedNotificationPayload(
         private fun normalizeText(value: String?): String? =
             value?.trim()?.takeIf { it.isNotEmpty() }
 
-        private fun replyActions(notification: Notification): List<NotificationReplyAction> =
-            notification.actions
+        private fun replyActions(notification: Notification): List<NotificationReplyAction> {
+            val metadata = notification.actions
                 ?.mapIndexedNotNull { index, action ->
                     val remoteInputs = action.remoteInputs ?: return@mapIndexedNotNull null
                     if (remoteInputs.isEmpty() || action.actionIntent == null) return@mapIndexedNotNull null
-                    NotificationReplyAction(
+                    NotificationReplyActionMetadata(
                         actionIndex = index,
-                        label = normalizeText(action.title?.toString()) ?: "Reply",
+                        semanticAction = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) action.semanticAction else 0,
+                        title = action.title?.toString(),
+                        resultKeys = remoteInputs.map { it.resultKey },
+                        hasActionIntent = action.actionIntent != null,
                     )
                 }
                 ?: emptyList()
+            val actionIds = NotificationReplyActions.stableActionIds(metadata)
+            return metadata.map { action ->
+                NotificationReplyAction(
+                    actionIndex = action.actionIndex,
+                    label = normalizeText(action.title) ?: "Reply",
+                    actionId = actionIds[action.actionIndex],
+                )
+            }
+        }
     }
 }

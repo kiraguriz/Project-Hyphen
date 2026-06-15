@@ -23,6 +23,7 @@ interface NsdBackend {
 
 interface BackendCallbacks {
     fun onStartFailed(errorCode: Int)
+    fun onStopFailed(errorCode: Int)
     fun onServiceFound(name: String)
     fun onServiceLost(name: String)
     fun onResolved(name: String, host: String, port: Int)
@@ -119,6 +120,10 @@ class DiscoveryManager(
         }
     }
 
+    override fun onStopFailed(errorCode: Int) {
+        record(DiscoveryFailure.STOP_FAILED)
+    }
+
     override fun onServiceFound(name: String) {
         if (!running || name in seen) return
         seen += name
@@ -127,12 +132,14 @@ class DiscoveryManager(
     }
 
     override fun onServiceLost(name: String) {
+        if (!running) return
         seen -= name // allow re-resolve if it comes back
         resolveQueue.remove(name)
         onEvent(DiscoveryEvent.ServiceLost(name))
     }
 
     override fun onResolved(name: String, host: String, port: Int) {
+        if (!running) return
         resolveQueue.remove(name)
         resolving = false
         resolvedCount++
@@ -141,6 +148,7 @@ class DiscoveryManager(
     }
 
     override fun onResolveFailed(name: String, errorCode: Int) {
+        if (!running) return
         resolveQueue.remove(name)
         resolving = false
         // Stays in `seen`: retry happens in the next window, not a hot loop.

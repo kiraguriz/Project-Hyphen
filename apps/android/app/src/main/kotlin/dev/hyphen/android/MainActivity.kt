@@ -7,10 +7,18 @@ import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.provider.OpenableColumns
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -29,6 +37,7 @@ import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
+import dev.hyphen.android.notifications.NotificationCapabilityGate
 import dev.hyphen.android.notifications.NotificationAccessController
 import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
@@ -68,17 +77,17 @@ import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
 import dev.hyphen.android.trust.TrustedPeer
 import java.io.File
-import java.io.InputStream
 import javax.net.ssl.SSLSocket
 
-// Plain-view debug surface for the M1 PoCs; Compose arrives with the first
-// real UI task (plan §7.2). One tap runs one discovery window (HYP-M1-004).
+// Native-view pre-alpha surface. Keep this dependency-free until the first
+// formal Android UI framework task decides whether Compose enters the app.
 class MainActivity : Activity() {
 
     private var manager: DiscoveryManager? = null
     private lateinit var log: TextView
     private lateinit var button: Button
     private lateinit var betaDiagnosticsButton: Button
+    private val activeStateLock = Any()
     private var activeSession: ProtocolSession? = null
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
     private var activeTransferSender: TransferSender? = null
@@ -87,135 +96,596 @@ class MainActivity : Activity() {
     private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = LocalStructuredLogStore()
     private var lastTransferProgress: TransferProgress? = null
+    private val logBuffer = BoundedLineBuffer(MAX_LOG_LINES, "Hyphen 事件流")
+    private val workerLock = Any()
+    private val activeWorkers = mutableSetOf<Thread>()
+    @Volatile
+    private var activityDestroyed = false
     private val transferReceiver by lazy {
         TransferReceiver(FileTransferStorage(File(cacheDir, "transfers"))) { progress ->
-            lastTransferProgress = progress
-            runOnUiThread { append(transferProgressLine(progress)) }
+            updateLastTransferProgress(progress)
+            append(transferProgressLine(progress))
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        log = TextView(this).apply {
-            text = "Hyphen pre-alpha — NSD discovery PoC (HYP-M1-004)\n"
-            textSize = 14f
+        log = bodyText(logBuffer.render()).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(HYPHEN_CARD_2, 14, HYPHEN_HAIR)
         }
-        button = Button(this).apply {
-            text = "Start discovery window (20s)"
-            setOnClickListener { startWindow() }
-        }
+        button = hyphenButton("查找 Mac（20 秒）", primary = true) { startWindow() }
 
         // Manual-endpoint fallback path (HYP-M1-006): works with mDNS
         // disabled or the LAN permission denied. A pasted hyphen://pair
         // payload takes the QR parse path (HYP-M2-010) — same code a
         // camera scan will feed once the scanner-library decision lands.
-        val endpointInput = EditText(this).apply {
-            hint = "host:port or hyphen://pair payload"
-        }
-        val connectButton = Button(this).apply {
-            text = "Test manual endpoint / QR payload"
-            setOnClickListener { probeManualEndpoint(endpointInput.text.toString()) }
+        val endpointInput = hyphenInput("host:port 或 hyphen://pair")
+        val connectButton = hyphenButton("手动连接 / 解析二维码") {
+            probeManualEndpoint(endpointInput.text.toString())
         }
 
         // CDM self-managed association PoC (HYP-M1-007).
         val cdm = AssociationController(CdmAssociationBackend(this), ::renderCdm)
-        val associateButton = Button(this).apply {
-            text = "CDM associate (self-managed)"
-            setOnClickListener { cdm.associate("Hyphen Mac") }
+        val associateButton = hyphenButton("创建系统关联") {
+            cdm.associate("Hyphen Mac")
         }
-        val listButton = Button(this).apply {
-            text = "CDM list + disassociate all"
-            setOnClickListener {
+        val listButton = hyphenButton("列出并移除系统关联") {
                 val ids = cdm.associations()
                 append("associations: $ids")
                 ids.forEach(cdm::disassociate)
-            }
         }
-        val managePeersButton = Button(this).apply {
-            text = "Manage paired devices"
-            setOnClickListener { showPeerManagement() }
+        val managePeersButton = hyphenButton("管理已配对设备") {
+            showPeerManagement()
         }
 
         // Notification listener onboarding (HYP-M3-001): explicit user
         // action, rationale before system settings, no payload forwarding yet.
-        val notificationStatusButton = Button(this).apply {
-            text = "Check notification listener"
-            setOnClickListener { append(notificationAccessLine()) }
+        val notificationStatusButton = hyphenButton("检查通知使用权") {
+            append(notificationAccessLine())
         }
-        val notificationSettingsButton = Button(this).apply {
-            text = "Enable notification mirror"
-            setOnClickListener { showNotificationAccessOnboarding() }
+        val notificationSettingsButton = hyphenButton("开启通知镜像", primary = true) {
+            showNotificationAccessOnboarding()
         }
-        val notificationPrivacyButton = Button(this).apply {
-            text = notificationPrivacyButtonText(HyphenNotificationListenerRuntime.notificationPrivacyMode())
-            setOnClickListener {
-                val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
-                    NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
-                    NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.SHOW_FULL
-                }
-                HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
-                text = notificationPrivacyButtonText(next)
-                append("notification privacy: ${notificationPrivacyStatus(next)}")
+        lateinit var notificationPrivacyButton: Button
+        notificationPrivacyButton = hyphenButton(
+            notificationPrivacyButtonText(HyphenNotificationListenerRuntime.notificationPrivacyMode()),
+        ) {
+            val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
+                NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
+                NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.SHOW_FULL
             }
+            HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
+            notificationPrivacyButton.text = notificationPrivacyButtonText(next)
+            append("notification privacy: ${notificationPrivacyStatus(next)}")
         }
 
-        val textInput = EditText(this).apply {
-            hint = "Text or https:// link to send to Mac"
+        val textInput = hyphenInput("发送文本或链接到 Mac…")
+        val sendTextButton = hyphenButton("发送文本 / 链接", primary = true) {
+            sendTextLink(textInput.text.toString())
         }
-        val sendTextButton = Button(this).apply {
-            text = "Send text/link to Mac"
-            setOnClickListener { sendTextLink(textInput.text.toString()) }
+        val sendFileButton = hyphenButton("发送文件") {
+            pickFileToSend()
         }
-        val sendFileButton = Button(this).apply {
-            text = "Send file to Mac"
-            setOnClickListener { pickFileToSend() }
+        val cancelTransferButton = hyphenButton("取消当前传输") {
+            cancelActiveTransfer()
         }
-        val cancelTransferButton = Button(this).apply {
-            text = "Cancel active transfer"
-            setOnClickListener { cancelActiveTransfer() }
+        val previewDiagnosticsButton = hyphenButton("预览诊断") {
+            previewDiagnostics()
         }
-        val previewDiagnosticsButton = Button(this).apply {
-            text = "Preview diagnostics"
-            setOnClickListener { previewDiagnostics() }
+        val exportDiagnosticsButton = hyphenButton("导出诊断包", primary = true) {
+            exportDiagnostics()
         }
-        val exportDiagnosticsButton = Button(this).apply {
-            text = "Export diagnostics"
-            setOnClickListener { exportDiagnostics() }
+        val deleteDiagnosticsButton = hyphenButton("删除日志") {
+            deleteDiagnostics()
         }
-        val deleteDiagnosticsButton = Button(this).apply {
-            text = "Delete diagnostics"
-            setOnClickListener { deleteDiagnostics() }
-        }
-        betaDiagnosticsButton = Button(this).apply {
-            text = betaDiagnosticsButtonText()
-            setOnClickListener { toggleBetaDiagnostics() }
+        betaDiagnosticsButton = hyphenButton(betaDiagnosticsButtonText()) {
+            toggleBetaDiagnostics()
         }
 
         setContentView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(48, 96, 48, 48)
-                addView(button)
-                addView(endpointInput)
-                addView(connectButton)
-                addView(associateButton)
-                addView(listButton)
-                addView(managePeersButton)
-                addView(notificationStatusButton)
-                addView(notificationSettingsButton)
-                addView(notificationPrivacyButton)
-                addView(textInput)
-                addView(sendTextButton)
-                addView(sendFileButton)
-                addView(cancelTransferButton)
-                addView(betaDiagnosticsButton)
-                addView(previewDiagnosticsButton)
-                addView(exportDiagnosticsButton)
-                addView(deleteDiagnosticsButton)
-                addView(ScrollView(this@MainActivity).apply { addView(log) })
-            }
+            buildHyphenHome(
+                endpointInput = endpointInput,
+                connectButton = connectButton,
+                associateButton = associateButton,
+                listButton = listButton,
+                managePeersButton = managePeersButton,
+                notificationStatusButton = notificationStatusButton,
+                notificationSettingsButton = notificationSettingsButton,
+                notificationPrivacyButton = notificationPrivacyButton,
+                textInput = textInput,
+                sendTextButton = sendTextButton,
+                sendFileButton = sendFileButton,
+                cancelTransferButton = cancelTransferButton,
+                betaDiagnosticsButton = betaDiagnosticsButton,
+                previewDiagnosticsButton = previewDiagnosticsButton,
+                exportDiagnosticsButton = exportDiagnosticsButton,
+                deleteDiagnosticsButton = deleteDiagnosticsButton,
+            ),
         )
+    }
+
+    private fun buildHyphenHome(
+        endpointInput: EditText,
+        connectButton: Button,
+        associateButton: Button,
+        listButton: Button,
+        managePeersButton: Button,
+        notificationStatusButton: Button,
+        notificationSettingsButton: Button,
+        notificationPrivacyButton: Button,
+        textInput: EditText,
+        sendTextButton: Button,
+        sendFileButton: Button,
+        cancelTransferButton: Button,
+        betaDiagnosticsButton: Button,
+        previewDiagnosticsButton: Button,
+        exportDiagnosticsButton: Button,
+        deleteDiagnosticsButton: Button,
+    ): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(28), dp(18), dp(28))
+        }
+        return ScrollView(this).apply {
+            isFillViewport = false
+            setBackgroundColor(HYPHEN_CANVAS)
+            clipToPadding = true
+            setOnApplyWindowInsetsListener { view, insets ->
+                val (top, bottom) = systemBarInsets(insets)
+                view.setPadding(0, top, 0, bottom)
+                insets
+            }
+            addView(
+                content,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            content.addView(brandHeader())
+            content.addView(connectionSummary())
+            content.addView(
+                card("时间线", "推荐信息流方向：通知、传输、文本与链接在同一上下文中出现。") {
+                    addView(timelineRow("微", "#1f9d57", "微信 · 张伟", "晚上一起吃饭吗？", "9:41"))
+                    addView(timelineRow("↓", null, "来自 Mac · 设计稿.pdf", "8.2 MB · 已保存到下载", "打开"))
+                    addView(timelineRow("↑", null, "链接已发送到 Mac", "github.com/hyphen/spec", "9:21"))
+                    addView(textInput, fullWidthParams(top = dp(10)))
+                    addView(buttonRow(sendTextButton, sendFileButton), fullWidthParams(top = dp(10)))
+                    addView(cancelTransferButton, fullWidthParams(top = dp(10)))
+                },
+            )
+            content.addView(
+                card("权限与配对", "逐项说明用途；本地网络发现失败时仍保留二维码或手动地址路径。") {
+                    addView(statusRow("本地网络", "在 Wi-Fi 上查找并连接你的 Mac，不扫描互联网。", "本地", button))
+                    addView(statusRow("手动配对", "粘贴 host:port 或 hyphen://pair 载荷，走同一条校验链路。", null, null))
+                    addView(endpointInput, fullWidthParams(top = dp(10)))
+                    addView(connectButton, fullWidthParams(top = dp(10)))
+                    addView(statusRow("系统关联", "系统伴侣设备管理器自管理关联 PoC。", "CDM", associateButton))
+                    addView(listButton, fullWidthParams(top = dp(10)))
+                    addView(managePeersButton, fullWidthParams(top = dp(10)))
+                },
+            )
+            content.addView(
+                card("通知镜像", "不保存通知历史；可在完整与隐藏内容之间切换。") {
+                    addView(statusRow("通知使用权", "显式跳转系统设置，开启后才读取通知。", "权限", notificationSettingsButton))
+                    addView(notificationStatusButton, fullWidthParams(top = dp(10)))
+                    addView(notificationPrivacyButton, fullWidthParams(top = dp(10)))
+                },
+            )
+            content.addView(
+                card("本地脱敏诊断", "默认本地保存并脱敏。无遥测、不自动上传。") {
+                    addView(statusRow("跟踪 ID", "选择加入；仅写入用户主动导出的诊断包。", "可审计", betaDiagnosticsButton))
+                    addView(buttonRow(previewDiagnosticsButton, exportDiagnosticsButton), fullWidthParams(top = dp(10)))
+                    addView(deleteDiagnosticsButton, fullWidthParams(top = dp(10)))
+                },
+            )
+            content.addView(
+                card("本机事件流", "协议、配对、传输与诊断操作会追加到这里。") {
+                    addView(log, fullWidthParams())
+                },
+            )
+        }
+    }
+
+    private fun brandHeader(): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(18))
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(markBlock(dp(16), dp(16), dp(5)))
+                    addView(
+                        View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 3) },
+                        LinearLayout.LayoutParams(dp(20), dp(4)).apply { leftMargin = dp(7); rightMargin = dp(7) },
+                    )
+                    addView(markBlock(dp(11), dp(18), dp(4)))
+                },
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = "Hyphen—"
+                            setTextColor(HYPHEN_TEXT)
+                            textSize = 24f
+                            typeface = Typeface.DEFAULT_BOLD
+                        },
+                    )
+                    addView(captionText("本地优先 · 可审计 · Mac × Android 持续连接层"))
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    leftMargin = dp(14)
+                },
+            )
+        }
+
+    private fun connectionSummary(): View =
+        card("MacBook Pro", "同一 Wi-Fi · 延迟 18ms · 通知镜像开启", showTitle = false) {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 99) },
+                LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(13) },
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(titleText("已连接"))
+                    addView(captionText("MacBook Pro · hyphen/0.3"))
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(signalBars())
+        }
+
+    private fun card(
+        title: String,
+        subtitle: String? = null,
+        showTitle: Boolean = true,
+        body: LinearLayout.() -> Unit,
+    ): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(HYPHEN_CARD, 20, HYPHEN_HAIR)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) }
+            if (showTitle) {
+                addView(titleText(title))
+                if (subtitle != null) addView(captionText(subtitle), fullWidthParams(top = dp(3), bottom = dp(12)))
+            }
+            body()
+        }
+
+    private fun timelineRow(icon: String, iconColor: String?, title: String, detail: String, meta: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(HYPHEN_CARD_2, 16, HYPHEN_HAIR)
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = icon
+                    gravity = Gravity.CENTER
+                    textSize = 14f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.WHITE)
+                    background = rounded(iconColor?.let(Color::parseColor) ?: HYPHEN_SURFACE_3, 10)
+                },
+                LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(11) },
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(bodyText(title).apply { typeface = Typeface.DEFAULT_BOLD })
+                    addView(captionText(detail))
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(captionText(meta).apply {
+                typeface = Typeface.MONOSPACE
+                setTextColor(if (meta == "打开") HYPHEN_ACCENT else HYPHEN_FAINT)
+            })
+        }.withBottomMargin(dp(8))
+
+    private fun statusRow(title: String, detail: String, badge: String?, control: View?): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(HYPHEN_CARD_2, 16, HYPHEN_HAIR)
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            gravity = Gravity.CENTER_VERTICAL
+                            addView(bodyText(title).apply { typeface = Typeface.DEFAULT_BOLD })
+                            if (badge != null) addView(pill(badge), LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ).apply { leftMargin = dp(8) })
+                        },
+                    )
+                    addView(captionText(detail), fullWidthParams(top = dp(3)))
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            if (control != null) {
+                addView(
+                    control,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        dp(42),
+                    ).apply { leftMargin = dp(12) },
+                )
+            }
+        }.withBottomMargin(dp(8))
+
+    private fun buttonRow(vararg buttons: Button): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            buttons.forEachIndexed { index, view ->
+                addView(
+                    view,
+                    LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                        if (index > 0) leftMargin = dp(9)
+                    },
+                )
+            }
+        }
+
+    private fun hyphenButton(text: String, primary: Boolean = false, onClick: () -> Unit): Button =
+        Button(this).apply {
+            this.text = text
+            isAllCaps = false
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            minHeight = dp(42)
+            minWidth = 0
+            setPadding(dp(12), 0, dp(12), 0)
+            setTextColor(if (primary) HYPHEN_ACCENT_INK else HYPHEN_TEXT)
+            background = rounded(if (primary) HYPHEN_ACCENT else HYPHEN_CARD_2, 12, if (primary) null else HYPHEN_HAIR_2)
+            setOnClickListener { onClick() }
+        }
+
+    private fun hyphenInput(hintText: String): EditText =
+        EditText(this).apply {
+            hint = hintText
+            setSingleLine(true)
+            textSize = 14f
+            setTextColor(HYPHEN_TEXT)
+            setHintTextColor(HYPHEN_DIM)
+            setPadding(dp(13), 0, dp(13), 0)
+            minHeight = dp(48)
+            background = rounded(HYPHEN_CARD_2, 14, HYPHEN_HAIR)
+        }
+
+    private fun titleText(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(HYPHEN_TEXT)
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = true
+        }
+
+    private fun bodyText(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(HYPHEN_TEXT)
+            textSize = 13f
+            includeFontPadding = true
+        }
+
+    private fun captionText(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(HYPHEN_DIM)
+            textSize = 12f
+            includeFontPadding = true
+        }
+
+    private fun pill(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(HYPHEN_ACCENT_INK)
+            setPadding(dp(7), dp(2), dp(7), dp(2))
+            background = rounded(HYPHEN_ACCENT, 6)
+        }
+
+    private fun markBlock(width: Int, height: Int, radius: Int): View =
+        View(this).apply {
+            background = rounded(HYPHEN_SURFACE_3, radius, HYPHEN_HAIR_2)
+            layoutParams = LinearLayout.LayoutParams(width, height)
+        }
+
+    private fun signalBars(): View =
+        LinearLayout(this).apply {
+            gravity = Gravity.BOTTOM
+            val heights = listOf(7, 12, 18)
+            heights.forEach { h ->
+                addView(
+                    View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 1) },
+                    LinearLayout.LayoutParams(dp(3), dp(h)).apply { leftMargin = dp(2) },
+                )
+            }
+        }
+
+    private fun rounded(color: Int, radius: Int, strokeColor: Int? = null): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radius).toFloat()
+            if (strokeColor != null) setStroke(dp(1), strokeColor)
+        }
+
+    private fun fullWidthParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            topMargin = top
+            bottomMargin = bottom
+        }
+
+    private fun View.withBottomMargin(bottom: Int): View =
+        apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = bottom }
+        }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun systemBarInsets(insets: WindowInsets): Pair<Int, Int> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bars = insets.getInsets(WindowInsets.Type.systemBars())
+            bars.top to bars.bottom
+        } else {
+            legacySystemBarInsets(insets)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
+        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+
+    private data class ActiveStateSnapshot(
+        val session: ProtocolSession?,
+        val capabilities: SessionHandshake.NegotiatedCapabilities?,
+        val transferSender: TransferSender?,
+        val lastTransferProgress: TransferProgress?,
+    )
+
+    private data class ActiveSessionInstall(
+        val previousSession: ProtocolSession?,
+    )
+
+    private fun activeStateSnapshot(): ActiveStateSnapshot =
+        synchronized(activeStateLock) {
+            ActiveStateSnapshot(
+                session = activeSession,
+                capabilities = activeCapabilities,
+                transferSender = activeTransferSender,
+                lastTransferProgress = lastTransferProgress,
+            )
+        }
+
+    private fun installActiveState(
+        session: ProtocolSession,
+        capabilities: SessionHandshake.NegotiatedCapabilities,
+        transferSender: TransferSender,
+    ): ProtocolSession? =
+        synchronized(activeStateLock) {
+            val previous = activeSession
+            activeSession = session
+            activeCapabilities = capabilities
+            activeTransferSender = transferSender
+            lastTransferProgress = null
+            previous
+        }
+
+    private fun installActiveStateAndBindOutboxIfAlive(
+        session: ProtocolSession,
+        capabilities: SessionHandshake.NegotiatedCapabilities,
+        transferSender: TransferSender,
+    ): ActiveSessionInstall? =
+        synchronized(workerLock) {
+            if (activityDestroyed) return@synchronized null
+            val previous = installActiveState(session, capabilities, transferSender)
+            if (NotificationCapabilityGate.shouldBindOutbox(capabilities)) {
+                HyphenNotificationListenerRuntime.bindNotificationOutbox(
+                    outbox = ProtocolSessionNotificationOutbox(session),
+                    allowReplyActions = NotificationCapabilityGate.allowReplyActions(capabilities),
+                )
+            } else {
+                HyphenNotificationListenerRuntime.clearNotificationOutbox()
+            }
+            ActiveSessionInstall(previous)
+        }
+
+    private fun startSessionIfAlive(session: ProtocolSession): Boolean =
+        synchronized(workerLock) {
+            if (activityDestroyed) {
+                false
+            } else {
+                session.start()
+                true
+            }
+        }
+
+    private fun clearActiveStateIf(session: ProtocolSession? = null): ProtocolSession? =
+        synchronized(activeStateLock) {
+            if (session != null && activeSession !== session) return@synchronized null
+            val current = activeSession
+            activeSession = null
+            activeCapabilities = null
+            activeTransferSender = null
+            lastTransferProgress = null
+            current
+        }
+
+    private fun updateLastTransferProgress(progress: TransferProgress?) {
+        synchronized(activeStateLock) {
+            lastTransferProgress = progress
+        }
+    }
+
+    private fun launchWorker(name: String, work: () -> Unit): Boolean {
+        val worker = Thread({
+            try {
+                work()
+            } finally {
+                synchronized(workerLock) {
+                    activeWorkers.remove(Thread.currentThread())
+                }
+            }
+        }, name)
+        val shouldStart = synchronized(workerLock) {
+            if (activityDestroyed) {
+                false
+            } else {
+                activeWorkers.add(worker)
+                true
+            }
+        }
+        if (!shouldStart) return false
+        worker.start()
+        return true
+    }
+
+    private fun postToUi(onDropped: (() -> Unit)? = null, action: () -> Unit): Boolean {
+        fun drop(): Boolean {
+            onDropped?.invoke()
+            return false
+        }
+        if (activityDestroyed) return drop()
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (activityDestroyed) return drop()
+            action()
+            return true
+        }
+        runOnUiThread {
+            if (activityDestroyed) {
+                onDropped?.invoke()
+            } else {
+                action()
+            }
+        }
+        return true
     }
 
     override fun onResume() {
@@ -302,11 +772,10 @@ class MainActivity : Activity() {
     }
 
     private fun stopCurrentSessionAfterTrustChange() {
-        activeSession?.stop()
-        activeSession = null
+        val session = clearActiveStateIf()
+        session?.stop()
         resumeToken = null
         lastSessionId = null
-        lastTransferProgress = null
         HyphenNotificationListenerRuntime.clearNotificationOutbox()
     }
 
@@ -330,9 +799,9 @@ class MainActivity : Activity() {
             is ParseResult.Rejected -> append("endpoint rejected: ${parsed.reason}")
             is ParseResult.Ok -> {
                 append("probing ${parsed.endpoint.host}:${parsed.endpoint.port} …")
-                Thread {
+                launchWorker("hyphen-endpoint-probe") {
                     val result = EndpointConnectProbe().probe(parsed.endpoint)
-                    runOnUiThread {
+                    postToUi {
                         when (result) {
                             is EndpointConnectProbe.Result.Connected ->
                                 append("connected: ${result.host}:${result.port}")
@@ -340,7 +809,7 @@ class MainActivity : Activity() {
                                 append("connect failed: ${result.reason}")
                         }
                     }
-                }.start()
+                }
             }
         }
     }
@@ -354,11 +823,12 @@ class MainActivity : Activity() {
      */
     private fun startPairing(qr: ParsedEndpoint.QrPayload) {
         append("pairing: provisional TLS to ${qr.host}:${qr.port} …")
-        Thread {
+        launchWorker("hyphen-pairing") {
+            var socket: SSLSocket? = null
             try {
                 val identity = AndroidKeystoreTlsIdentity.getOrCreate()
                 val macFp = qr.decodedFingerprint()
-                val socket = TlsClient.connect(
+                socket = TlsClient.connect(
                     host = qr.host,
                     port = qr.port,
                     identity = identity,
@@ -376,15 +846,22 @@ class MainActivity : Activity() {
                     peerDisplayName = qr.deviceName ?: "Mac",
                     trustStore = AndroidTrustStores.openDefault(applicationContext),
                 )
-                runOnUiThread { presentSasDialog(qr, gate, socket) }
+                val handoffSocket = socket
+                socket = null
+                postToUi(onDropped = { runCatching { handoffSocket.close() } }) {
+                    presentSasDialog(qr, gate, handoffSocket)
+                }
             } catch (e: Exception) {
-                runOnUiThread { append("pairing failed: ${e.message}") }
+                runCatching { socket?.close() }
+                append("pairing failed: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private fun presentSasDialog(qr: ParsedEndpoint.QrPayload, gate: SasConfirmationGate, socket: SSLSocket) {
-        fun closeSocket() = Thread { runCatching { socket.close() } }.start()
+        fun closeSocket() {
+            launchWorker("hyphen-close-pairing-socket") { runCatching { socket.close() } }
+        }
         AlertDialog.Builder(this)
             .setTitle("Confirm pairing code")
             .setMessage("Code: ${gate.sas}\n\nTrust this Mac only if it shows the same code.")
@@ -403,7 +880,7 @@ class MainActivity : Activity() {
     }
 
     private fun startSteadySession(qr: ParsedEndpoint.QrPayload, socket: SSLSocket) {
-        Thread {
+        launchWorker("hyphen-steady-session") {
             try {
                 val device = SessionHandshake.DeviceInfo(
                     kind = "android",
@@ -421,11 +898,11 @@ class MainActivity : Activity() {
                 lateinit var session: ProtocolSession
                 val listener = object : ProtocolSession.Listener {
                     override fun onLiveness(state: HeartbeatMonitor.State) {
-                        runOnUiThread { append("session liveness: $state") }
+                        append("session liveness: $state")
                     }
 
                     override fun onProtocolError(code: String, detail: String) {
-                        runOnUiThread { append("session protocol error: $code $detail") }
+                        append("session protocol error: $code $detail")
                     }
 
                     override fun onEnvelope(envelope: Envelope) {
@@ -434,18 +911,15 @@ class MainActivity : Activity() {
 
                     override fun onAck(messageId: String) {
                         // Advances the outbound transfer window (chunk acks).
-                        runCatching { activeTransferSender?.handleAck(messageId) }
+                        val sender = activeStateSnapshot().transferSender
+                        runCatching { sender?.handleAck(messageId) }
                     }
 
-	                    override fun onClosed() {
-	                        if (activeSession === session) {
-                            activeSession = null
-	                            activeCapabilities = null
-                            activeTransferSender = null
-                            lastTransferProgress = null
-	                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
-	                        }
-                        runOnUiThread { append("Mac session closed") }
+                    override fun onClosed() {
+                        if (clearActiveStateIf(session) != null) {
+                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
+                        }
+                        append("Mac session closed")
                     }
                 }
                 session = ProtocolSession(
@@ -454,36 +928,46 @@ class MainActivity : Activity() {
                     config = ProtocolSession.Config(startingSeq = 1),
                     listener = DiagnosticProtocolSessionListener(diagnosticLogs, listener),
                 )
-                activeSession?.stop()
-                activeSession = session
-                activeCapabilities = handshake.negotiatedCapabilities
-                activeTransferSender = TransferSender(
+                val sender = TransferSender(
                     ProtocolSessionTransferOutbox(session),
                     handshake.negotiatedCapabilities,
                     onProgress = { progress ->
-                        lastTransferProgress = progress
-                        runOnUiThread { append(transferProgressLine(progress)) }
+                        updateLastTransferProgress(progress)
+                        append(transferProgressLine(progress))
                     },
                 )
-                HyphenNotificationListenerRuntime.bindNotificationOutbox(
-                    ProtocolSessionNotificationOutbox(session),
+                val install = installActiveStateAndBindOutboxIfAlive(
+                    session,
+                    handshake.negotiatedCapabilities,
+                    sender,
                 )
-                session.start()
-                runOnUiThread {
-                    append("session connected to ${handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"}")
+                if (install == null) {
+                    clearActiveStateIf(session)
+                    runCatching { session.stop() }
+                    return@launchWorker
                 }
+                install.previousSession?.stop()
+                if (!startSessionIfAlive(session)) {
+                    clearActiveStateIf(session)
+                    runCatching { session.stop() }
+                    return@launchWorker
+                }
+                append(
+                    "session connected to ${handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"}",
+                )
             } catch (e: Exception) {
                 runCatching { socket.close() }
-                runOnUiThread { append("session failed: ${e.message}") }
+                append("session failed: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private fun handleSessionEnvelope(envelope: Envelope) {
+        val state = activeStateSnapshot()
+        val session = state.session
         try {
-            val session = activeSession
             if (envelope.type == Envelope.TYPE_ERROR) {
-                runOnUiThread { append(peerErrorLine(envelope)) }
+                append(peerErrorLine(envelope))
                 return
             }
             val expectedCapability = expectedCapability(envelope.type)
@@ -494,26 +978,37 @@ class MainActivity : Activity() {
                     code = "plugin/unsupported-capability",
                     message = "Message type was sent under the wrong capability.",
                 )
-                runOnUiThread { append("unsupported capability reported: $id (${envelope.capability})") }
+                append("unsupported capability reported: $id (${envelope.capability})")
                 return
             }
-            if (session != null && !isNegotiatedCapability(envelope.capability)) {
+            if (session != null && !isNegotiatedCapability(state, envelope.capability)) {
                 val id = sendProtocolError(
                     session = session,
                     regarding = envelope,
                     code = "plugin/unsupported-capability",
                     message = "Capability is not negotiated for this session.",
                 )
-                runOnUiThread { append("unsupported capability reported: $id (${envelope.capability})") }
+                append("unsupported capability reported: $id (${envelope.capability})")
+                return
+            }
+            if (session != null && !isNegotiatedNotificationOption(state, envelope.type)) {
+                val id = sendProtocolError(
+                    session = session,
+                    regarding = envelope,
+                    code = "plugin/unsupported-capability",
+                    message = "Notification action is not negotiated for this session.",
+                )
+                append("unsupported notification option reported: $id (${envelope.type})")
                 return
             }
             if (session != null) {
                 val dismissResultId = NotificationDismissRequestHandler(
                     canceller = HyphenNotificationListenerRuntime.notificationCanceller(),
+                    isActiveNotification = HyphenNotificationListenerRuntime::isNotificationActive,
                     outbox = ProtocolSessionNotificationOutbox(session),
                 ).handle(envelope)
                 if (dismissResultId != null) {
-                    runOnUiThread { append("notification dismiss result sent: $dismissResultId") }
+                    append("notification dismiss result sent: $dismissResultId")
                     return
                 }
                 val replyResultId = NotificationReplyRequestHandler(
@@ -521,7 +1016,7 @@ class MainActivity : Activity() {
                     outbox = ProtocolSessionNotificationOutbox(session),
                 ).handle(envelope)
                 if (replyResultId != null) {
-                    runOnUiThread { append("notification reply result sent: $replyResultId") }
+                    append("notification reply result sent: $replyResultId")
                     return
                 }
             }
@@ -529,33 +1024,33 @@ class MainActivity : Activity() {
                 if (envelope.type == TransferProtocol.TYPE_RESUME_INFO) {
                     val info = TransferResumeInfo.fromJson(envelope.payload)
                     try {
-                        activeTransferSender?.handleResumeInfo(info)
-                        runOnUiThread { append("transfer resume continued: ${info.fileId}") }
+                        state.transferSender?.handleResumeInfo(info)
+                        append("transfer resume continued: ${info.fileId}")
                     } catch (e: Exception) {
-                        runOnUiThread { append("transfer resume info ignored: ${e.message}") }
+                        append("transfer resume info ignored: ${e.message}")
                     }
                     return
                 }
                 when (val event = transferReceiver.handle(envelope)) {
                     is TransferEvent.Completed -> {
-                        lastTransferProgress = null
+                        updateLastTransferProgress(null)
                         // Debug surface keeps no copy; drop the temp file so completed
                         // transfers do not accumulate in the storage directory.
                         val line = transferCompletedLine(event.completed)
                         event.completed.file.delete()
-                        runOnUiThread { append(line) }
+                        append(line)
                     }
                     is TransferEvent.ResumeRequested -> {
                         if (session != null) {
                             val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendResumeInfo(event.info)
-                            runOnUiThread { append("transfer resume info sent: $id (${event.info.fileId})") }
+                            append("transfer resume info sent: $id (${event.info.fileId})")
                         } else {
-                            runOnUiThread { append("transfer resume requested without active session") }
+                            append("transfer resume requested without active session")
                         }
                     }
                     is TransferEvent.Cancelled -> {
-                        lastTransferProgress = null
-                        runOnUiThread { append("transfer cancelled: ${event.cancel.fileId}") }
+                        updateLastTransferProgress(null)
+                        append("transfer cancelled: ${event.cancel.fileId}")
                     }
                     TransferEvent.Ignored -> Unit
                 }
@@ -563,36 +1058,39 @@ class MainActivity : Activity() {
             }
             val request = textReceiver.handle(envelope)
             if (request != null) {
-                runOnUiThread { presentTextLinkConfirmation(request) }
+                postToUi { presentTextLinkConfirmation(request) }
                 return
             }
         } catch (e: IllegalArgumentException) {
-            activeSession?.let { session ->
+            session?.let {
                 sendProtocolError(
-                    session = session,
+                    session = it,
                     regarding = envelope,
                     code = "protocol/invalid-envelope",
                     message = "Envelope payload is invalid for its type.",
                 )
             }
-            runOnUiThread { append("session envelope rejected: ${e.message}") }
+            append("session envelope rejected: ${e.message}")
             return
         }
         if (isPluginEnvelope(envelope)) {
-            activeSession?.let { session ->
+            session?.let {
                 val id = sendProtocolError(
-                    session = session,
+                    session = it,
                     regarding = envelope,
                     code = "protocol/unknown-type",
                     message = "No handler is registered for this message type.",
                 )
-                runOnUiThread { append("unknown type reported: $id (${envelope.type})") }
+                append("unknown type reported: $id (${envelope.type})")
             }
         }
     }
 
-    private fun isNegotiatedCapability(capability: String?): Boolean =
-        capability == null || activeCapabilities?.contains(capability) != false
+    private fun isNegotiatedCapability(state: ActiveStateSnapshot, capability: String?): Boolean =
+        capability == null || state.capabilities?.contains(capability) != false
+
+    private fun isNegotiatedNotificationOption(state: ActiveStateSnapshot, type: String): Boolean =
+        NotificationCapabilityGate.allowsInboundRequest(type, state.capabilities)
 
     private fun isPluginEnvelope(envelope: Envelope): Boolean =
         envelope.type !in setOf(Envelope.TYPE_ACK, Envelope.TYPE_HEARTBEAT, Envelope.TYPE_HELLO, Envelope.TYPE_ERROR)
@@ -635,7 +1133,7 @@ class MainActivity : Activity() {
     }
 
     private fun pickFileToSend() {
-        if (activeTransferSender == null) {
+        if (activeStateSnapshot().transferSender == null) {
             append("transfer/send: no active Mac session")
             return
         }
@@ -667,12 +1165,13 @@ class MainActivity : Activity() {
      * resume.info/ack from the peer routes to a real transfer.
      */
     private fun sendFile(uri: Uri) {
-        val sender = activeTransferSender
+        val state = activeStateSnapshot()
+        val sender = state.transferSender
         if (sender == null) {
             append("transfer/send: no active Mac session")
             return
         }
-        if (activeCapabilities?.contains(TransferProtocol.CAPABILITY) != true) {
+        if (state.capabilities?.contains(TransferProtocol.CAPABILITY) != true) {
             append("transfer/send: peer did not negotiate transfer.v1")
             return
         }
@@ -684,7 +1183,7 @@ class MainActivity : Activity() {
         val source = StreamTransferByteSource(meta.sizeBytes) {
             contentResolver.openInputStream(uri) ?: throw java.io.IOException("could not open $uri")
         }
-        Thread {
+        launchWorker("hyphen-send-file") {
             try {
                 val manifest = sender.sendSource(
                     filename = meta.filename,
@@ -692,13 +1191,11 @@ class MainActivity : Activity() {
                     source = source,
                     chunkSizeBytes = DEFAULT_TRANSFER_CHUNK_BYTES,
                 )
-                runOnUiThread {
-                    append("transfer/send started: ${manifest.filename} (${manifest.sizeBytes} bytes)")
-                }
+                append("transfer/send started: ${manifest.filename} (${manifest.sizeBytes} bytes)")
             } catch (e: Exception) {
-                runOnUiThread { append("transfer/send failed: ${e.message}") }
+                append("transfer/send failed: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private data class ContentMetadata(
@@ -724,12 +1221,13 @@ class MainActivity : Activity() {
     }
 
     private fun cancelActiveTransfer() {
-        val progress = lastTransferProgress
+        val state = activeStateSnapshot()
+        val progress = state.lastTransferProgress
         if (progress == null || progress.isComplete) {
             append("transfer cancel: no active transfer")
             return
         }
-        val session = activeSession
+        val session = state.session
         if (session == null) {
             append("transfer cancel: no active session")
             return
@@ -737,7 +1235,7 @@ class MainActivity : Activity() {
         val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendCancel(
             TransferCancel(progress.fileId, discard = true),
         )
-        lastTransferProgress = null
+        updateLastTransferProgress(null)
         append("transfer cancel sent: $id (${progress.filename})")
     }
 
@@ -775,8 +1273,13 @@ class MainActivity : Activity() {
     }
 
     private fun openConfirmedLink(value: String) {
+        val uri = Uri.parse(value)
+        if (!TextLinkMessage.isAllowedOpenUrl(value, uri.scheme)) {
+            append("link open rejected: url must use http or https")
+            return
+        }
         try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value)))
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
             append("link opened from Mac")
         } catch (e: ActivityNotFoundException) {
             append("link open failed: ${e.message}")
@@ -784,34 +1287,30 @@ class MainActivity : Activity() {
     }
 
     private fun sendTextLink(raw: String) {
-        val session = activeSession
+        val state = activeStateSnapshot()
+        val session = state.session
         if (session == null) {
             append("text/link: no active Mac session")
             return
         }
-        if (activeCapabilities?.contains(SessionHandshake.CAPABILITY_TEXT) != true) {
+        if (state.capabilities?.contains(SessionHandshake.CAPABILITY_TEXT) != true) {
             append("text/link: peer did not negotiate text.v1")
             return
         }
-        val trimmed = raw.trim()
         val message = try {
-            if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-                TextLinkMessage.url(trimmed)
-            } else {
-                TextLinkMessage.text(trimmed)
-            }
+            TextLinkMessage.fromUserInput(raw)
         } catch (e: IllegalArgumentException) {
             append("text/link rejected: ${e.message}")
             return
         }
-        Thread {
+        launchWorker("hyphen-send-text-link") {
             try {
                 val id = TextLinkSender(ProtocolSessionTextLinkOutbox(session)).send(message)
-                runOnUiThread { append("text/link sent: $id") }
+                append("text/link sent: $id")
             } catch (e: Exception) {
-                runOnUiThread { append("text/link send failed: ${e.message}") }
+                append("text/link send failed: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private fun showNotificationAccessOnboarding() {
@@ -855,12 +1354,12 @@ class MainActivity : Activity() {
     }
 
     private fun notificationPrivacyButtonText(mode: NotificationPrivacyMode): String =
-        "Notification privacy: ${notificationPrivacyStatus(mode)}"
+        "通知隐私：${notificationPrivacyStatus(mode)}"
 
     private fun notificationPrivacyStatus(mode: NotificationPrivacyMode): String =
         when (mode) {
-            NotificationPrivacyMode.SHOW_FULL -> "full"
-            NotificationPrivacyMode.HIDE_BODY -> "hidden body"
+            NotificationPrivacyMode.SHOW_FULL -> "完整"
+            NotificationPrivacyMode.HIDE_BODY -> "隐藏内容"
         }
 
     private fun toggleBetaDiagnostics() {
@@ -870,20 +1369,18 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Enable beta diagnostics?")
+            .setTitle("开启 Beta 诊断？")
             .setMessage(
-                "Beta diagnostics are off by default.\n\n" +
-                    "Enable only when debugging a beta issue. Local previews and exports " +
-                    "may include trace IDs for failure correlation. Notification bodies, " +
-                    "file names, URLs, and IP suffixes stay redacted.\n\n" +
-                    "Hyphen never uploads diagnostics automatically. Export stays " +
-                    "user-triggered, and this button disables beta extras immediately.",
+                "Beta 诊断默认关闭。\n\n" +
+                    "仅在排查 Beta 问题时开启。本地预览和导出可能包含用于关联失败的跟踪 ID；" +
+                    "通知正文、文件名、URL 和 IP 后缀仍会脱敏。\n\n" +
+                    "Hyphen 不会自动上传诊断。导出始终由用户主动触发，也可以随时关闭此项。",
             )
-            .setPositiveButton("Enable") { _, _ ->
+            .setPositiveButton("开启") { _, _ ->
                 setBetaDiagnosticsEnabled(true)
                 append("beta diagnostics: enabled")
             }
-            .setNegativeButton("Cancel") { _, _ ->
+            .setNegativeButton("取消") { _, _ ->
                 append("beta diagnostics: unchanged (off)")
             }
             .show()
@@ -906,15 +1403,15 @@ class MainActivity : Activity() {
     }
 
     private fun betaDiagnosticsButtonText(): String =
-        "Beta diagnostics: ${betaDiagnosticsStatus()}"
+        "Beta 诊断：${betaDiagnosticsStatus()}"
 
     private fun betaDiagnosticsStatus(): String =
-        if (betaDiagnosticsEnabled()) "on" else "off"
+        if (betaDiagnosticsEnabled()) "开启" else "关闭"
 
     private fun previewDiagnostics() {
         val json = diagnosticsExporter().previewJson()
         AlertDialog.Builder(this)
-            .setTitle("Diagnostics preview")
+            .setTitle("诊断预览")
             .setMessage(json)
             .setPositiveButton("OK", null)
             .show()
@@ -977,27 +1474,47 @@ class MainActivity : Activity() {
             is DiscoveryEvent.Failed -> append("failure: ${event.reason}")
             is DiscoveryEvent.WindowEnded -> {
                 append("window ended, resolved=${event.resolvedCount}")
-                button.isEnabled = true
+                postToUi { button.isEnabled = true }
             }
         }
     }
 
     private fun append(line: String) {
-        log.text = "${log.text}$line\n"
+        postToUi {
+            logBuffer.append(line)
+            if (::log.isInitialized) log.text = logBuffer.render()
+        }
     }
 
     override fun onDestroy() {
+        val workers = synchronized(workerLock) {
+            activityDestroyed = true
+            activeWorkers.toList().also { activeWorkers.clear() }
+        }
+        workers.forEach { it.interrupt() }
+        val session = clearActiveStateIf()
         super.onDestroy()
         HyphenNotificationListenerRuntime.clearNotificationOutbox()
-        activeSession?.stop()
-        activeSession = null
+        session?.stop()
         manager?.stop()
     }
 
     private companion object {
+        const val HYPHEN_CANVAS = 0xFF101318.toInt()
+        const val HYPHEN_CARD = 0xFF1A1D23.toInt()
+        const val HYPHEN_CARD_2 = 0xFF23262E.toInt()
+        const val HYPHEN_SURFACE_3 = 0xFF2B3038.toInt()
+        const val HYPHEN_HAIR = 0x24FFFFFF
+        const val HYPHEN_HAIR_2 = 0x33FFFFFF
+        const val HYPHEN_TEXT = 0xFFE8EAEF.toInt()
+        const val HYPHEN_DIM = 0xFF9298A3.toInt()
+        const val HYPHEN_FAINT = 0xFF646A75.toInt()
+        const val HYPHEN_ACCENT = 0xFF2BC48F.toInt()
+        const val HYPHEN_ACCENT_INK = 0xFF04140D.toInt()
         const val DIAGNOSTICS_PREFS = "dev.hyphen.android.diagnostics"
         const val PREF_BETA_DIAGNOSTICS_ENABLED = "beta_diagnostics_enabled"
         const val REQUEST_PICK_FILE = 4201
         const val DEFAULT_TRANSFER_CHUNK_BYTES = 256 * 1024
+        const val MAX_LOG_LINES = 500
     }
 }

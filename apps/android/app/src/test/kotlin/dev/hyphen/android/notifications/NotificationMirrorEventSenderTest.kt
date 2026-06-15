@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
 
 data class SentNotificationEnvelope(
     val type: String,
@@ -14,7 +15,7 @@ data class SentNotificationEnvelope(
 )
 
 class RecordingNotificationOutbox : NotificationOutbox {
-    val envelopes = mutableListOf<SentNotificationEnvelope>()
+    val envelopes: MutableList<SentNotificationEnvelope> = Collections.synchronizedList(mutableListOf())
 
     override fun send(
         type: String,
@@ -91,6 +92,22 @@ class NotificationMirrorEventSenderTest {
     }
 
     @Test
+    fun `reply actions are omitted when negotiated reply is disabled`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox, allowReplyActions = false)
+
+        sender.sendPostedOrUpdated(
+            payload(
+                sbnKey = "0|com.chat|7|thread-123|10101",
+                text = "reply-capable",
+                replyActions = listOf(NotificationReplyAction(2, "Reply", "reply:1:reply:android.reply")),
+            ),
+        )
+
+        assertFalse(outbox.envelopes.single().payload.entries.containsKey("replyActions"))
+    }
+
+    @Test
     fun `changing privacy mode preserves active key update behavior`() {
         val outbox = RecordingNotificationOutbox()
         val sender = NotificationMirrorEventSender(outbox)
@@ -126,7 +143,11 @@ class NotificationMirrorEventSenderTest {
         assertTrue(outbox.envelopes.all { it.requiresAck })
     }
 
-    private fun payload(sbnKey: String, text: String): NormalizedNotificationPayload =
+    private fun payload(
+        sbnKey: String,
+        text: String,
+        replyActions: List<NotificationReplyAction> = emptyList(),
+    ): NormalizedNotificationPayload =
         NormalizedNotificationPayload(
             sbnKey = sbnKey,
             packageName = "com.example",
@@ -134,5 +155,6 @@ class NotificationMirrorEventSenderTest {
             text = text,
             category = "msg",
             isClearable = true,
+            replyActions = replyActions,
         )
 }

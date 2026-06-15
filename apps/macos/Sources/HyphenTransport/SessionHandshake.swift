@@ -62,6 +62,14 @@ public enum SessionHandshake {
             entries[capability] != nil
         }
 
+        public var notificationReplyEnabled: Bool {
+            (entries[capabilityNotifications]?["reply"] as? String ?? "off") != "off"
+        }
+
+        public var notificationDismissEnabled: Bool {
+            entries[capabilityNotifications]?["dismiss"] as? Bool ?? false
+        }
+
         public var transferMaxChunkBytes: Int? {
             entries[capabilityTransfer]?["maxChunkBytes"] as? Int
         }

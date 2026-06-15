@@ -8,6 +8,7 @@ import java.net.InetAddress
 import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -191,6 +192,156 @@ class SessionReconnectTest {
     }
 
     @Test
+    fun `start is idempotent while initial attempt is pending`() {
+        val scheduler = RecordingScheduler()
+        val dialCount = AtomicInteger(0)
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+
+        reconnector = SessionReconnector(
+            dial = {
+                dialCount.incrementAndGet()
+                liveHandshakeSocket()
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+            },
+        )
+
+        reconnector!!.start()
+        reconnector!!.start()
+
+        assertEquals("second start must not queue a duplicate initial attempt", 1, scheduler.scheduledCount())
+        scheduler.runNext()
+
+        assertNotNull(sessions.poll(1, TimeUnit.SECONDS))
+        assertEquals("only one dial is allowed for duplicate start calls", 1, dialCount.get())
+    }
+
+    @Test
+    fun `start is idempotent while an attempt is already connecting`() {
+        val scheduler = RecordingScheduler()
+        val releaseReply = CountDownLatch(1)
+        val dialed = CountDownLatch(1)
+        val dialCount = AtomicInteger(0)
+
+        reconnector = SessionReconnector(
+            dial = {
+                dialCount.incrementAndGet()
+                dialed.countDown()
+                TrackingSocket(input = ReleasableInputStream(helloReplyFrame(), releaseReply))
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) = Unit
+            },
+        ).also { it.start() }
+
+        val worker = Thread({ scheduler.runNext() }, "blocked-reconnect-attempt").apply { isDaemon = true }
+        worker.start()
+
+        assertTrue(dialed.await(5, TimeUnit.SECONDS))
+        reconnector!!.start()
+
+        assertEquals("start during an in-flight handshake must not queue another attempt", 0, scheduler.scheduledCount())
+        assertEquals(1, dialCount.get())
+
+        releaseReply.countDown()
+        worker.join(5_000)
+    }
+
+    @Test
+    fun `duplicated stale attempt cannot replace the active session or schedule from stale close`() {
+        val scheduler = RecordingScheduler()
+        val dialCount = AtomicInteger(0)
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+        val retries = mutableListOf<Pair<Int, Long>>()
+
+        reconnector = SessionReconnector(
+            dial = {
+                val count = dialCount.incrementAndGet()
+                liveHandshakeSocket(sessionId = "s_duplicate_$count", resumeToken = "resume-token-$count")
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+
+                override fun onRetryScheduled(attempt: Int, delaySeconds: Long) {
+                    synchronized(retries) { retries.add(attempt to delaySeconds) }
+                }
+            },
+        ).also { it.start() }
+
+        scheduler.runFirstWithoutRemoving()
+        scheduler.runFirstWithoutRemoving()
+
+        val first = sessions.poll(1, TimeUnit.SECONDS)
+        assertNotNull(first)
+        assertEquals("a stale duplicate scheduler callback must not publish a replacement session", 0, sessions.size)
+        assertEquals(1, dialCount.get())
+
+        first!!.stop()
+
+        assertEquals(
+            "only the real active close may schedule one retry",
+            listOf(0 to 1L),
+            synchronized(retries) { retries.toList() },
+        )
+    }
+
+    @Test
+    fun `successful replacement resets retry state before the next close retry`() {
+        val scheduler = RecordingScheduler()
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+        val retries = mutableListOf<Pair<Int, Long>>()
+        var failuresLeft = 2
+
+        reconnector = SessionReconnector(
+            dial = {
+                if (failuresLeft > 0) {
+                    failuresLeft--
+                    throw java.io.IOException("simulated dial failure")
+                }
+                liveHandshakeSocket()
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+
+                override fun onRetryScheduled(attempt: Int, delaySeconds: Long) {
+                    synchronized(retries) { retries.add(attempt to delaySeconds) }
+                }
+            },
+        ).also { it.start() }
+
+        scheduler.runNext()
+        scheduler.runNext()
+        scheduler.runNext()
+
+        val replacement = sessions.poll(1, TimeUnit.SECONDS)
+        assertNotNull(replacement)
+        assertEquals(listOf(0 to 1L, 1 to 5L), synchronized(retries) { retries.toList() })
+
+        replacement!!.stop()
+
+        assertEquals(
+            "the first retry after a successful replacement must restart at attempt 0",
+            listOf(0 to 1L, 1 to 5L, 0 to 1L),
+            synchronized(retries) { retries.toList() },
+        )
+    }
+
+    @Test
     fun `handshake failure closes the dialed socket`() {
         val socket = TrackingSocket(input = ByteArrayInputStream(ByteArray(0)))
         val scheduler = OneShotScheduler()
@@ -303,6 +454,28 @@ class SessionReconnectTest {
         }
     }
 
+    private class RecordingScheduler : SessionReconnector.RetryScheduler {
+        private val actions = mutableListOf<Pair<Long, () -> Unit>>()
+
+        @Synchronized
+        override fun schedule(delayMs: Long, action: () -> Unit) {
+            actions.add(delayMs to action)
+        }
+
+        @Synchronized
+        fun scheduledCount(): Int = actions.size
+
+        fun runNext() {
+            val action = synchronized(this) { actions.removeAt(0).second }
+            action()
+        }
+
+        fun runFirstWithoutRemoving() {
+            val action = synchronized(this) { actions.first().second }
+            action()
+        }
+    }
+
     private class ReleasableInputStream(
         private val bytes: ByteArray,
         private val release: CountDownLatch,
@@ -313,6 +486,27 @@ class SessionReconnectTest {
             release.await(5, TimeUnit.SECONDS)
             if (index >= bytes.size) return -1
             return bytes[index++].toInt() and 0xff
+        }
+    }
+
+    private class BlockingAfterBytesInputStream(private val bytes: ByteArray) : InputStream() {
+        private val closed = CountDownLatch(1)
+        private var index = 0
+
+        @Synchronized
+        override fun read(): Int {
+            if (index < bytes.size) return bytes[index++].toInt() and 0xff
+            return try {
+                closed.await()
+                -1
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                -1
+            }
+        }
+
+        override fun close() {
+            closed.countDown()
         }
     }
 
@@ -327,6 +521,8 @@ class SessionReconnectTest {
         override fun getOutputStream(): OutputStream = output
         override fun close() {
             closed.set(true)
+            runCatching { input.close() }
+            runCatching { output.close() }
         }
 
         override fun setSoTimeout(timeout: Int) {
@@ -364,6 +560,8 @@ class SessionReconnectTest {
     }
 
     private fun helloReplyFrame(
+        sessionId: String = "s_test1",
+        resumeToken: String = "resume-token-test",
         deviceKind: String = "macos",
         appVersion: String = "0.0.1",
         capabilities: Json.Obj = Json.obj(
@@ -375,7 +573,7 @@ class SessionReconnectTest {
     ): ByteArray {
         val reply = Envelope(
             messageId = Ulid.generate(),
-            sessionId = "s_test1",
+            sessionId = sessionId,
             type = Envelope.TYPE_HELLO,
             seq = 1,
             sentAtUnixMs = System.currentTimeMillis(),
@@ -386,7 +584,7 @@ class SessionReconnectTest {
                     "appVersion" to Json.Str(appVersion),
                     "deviceName" to Json.Str("Test Mac"),
                 ),
-                "resumeToken" to Json.Str("resume-token-test"),
+                "resumeToken" to Json.Str(resumeToken),
                 "capabilities" to capabilities,
             ),
         ).encode()
@@ -395,4 +593,11 @@ class SessionReconnectTest {
             .put(reply)
             .array()
     }
+
+    private fun liveHandshakeSocket(
+        sessionId: String = "s_test1",
+        resumeToken: String = "resume-token-test",
+    ): TrackingSocket = TrackingSocket(
+        input = BlockingAfterBytesInputStream(helloReplyFrame(sessionId = sessionId, resumeToken = resumeToken)),
+    )
 }

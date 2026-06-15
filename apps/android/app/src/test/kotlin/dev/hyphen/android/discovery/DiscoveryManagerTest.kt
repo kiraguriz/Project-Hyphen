@@ -11,6 +11,7 @@ private class FakeBackend : NsdBackend {
     var lastServiceType: String? = null
     val resolveRequests = mutableListOf<String>()
     lateinit var cb: BackendCallbacks
+    var failStop = false
 
     override fun startDiscovery(serviceType: String, callbacks: BackendCallbacks) {
         startCalls++
@@ -20,7 +21,11 @@ private class FakeBackend : NsdBackend {
 
     override fun stopDiscovery() {
         stopCalls++
-        cb.onStopped()
+        if (failStop) {
+            cb.onStopFailed(0)
+        } else {
+            cb.onStopped()
+        }
     }
 
     override fun resolve(serviceName: String) {
@@ -146,6 +151,57 @@ class DiscoveryManagerTest {
         assertEquals(1, lock.releases)
         assertFalse(m.isRunning())
         assertEquals(0, backend.stopCalls) // nothing to stop
+    }
+
+    @Test
+    fun `start failure clears window state so a later start is fresh`() {
+        val m = manager()
+        assertTrue(m.start())
+        val firstToken = scheduler.pending.keys.single()
+        backend.cb.onServiceFound("MacA")
+
+        backend.cb.onStartFailed(0)
+
+        assertFalse(m.isRunning())
+        assertTrue(scheduler.cancelled.contains(firstToken))
+        assertTrue(m.start())
+        backend.cb.onServiceFound("MacA")
+        assertEquals(listOf("MacA", "MacA"), backend.resolveRequests)
+        assertEquals(2, lock.acquires)
+        assertEquals(1, lock.releases)
+    }
+
+    @Test
+    fun `stop failure is recorded instead of ending the window`() {
+        backend.failStop = true
+        val m = manager()
+        m.start()
+
+        m.stop()
+
+        assertEquals(listOf(DiscoveryFailure.STOP_FAILED), m.failureLog())
+        assertFalse(events.any { it is DiscoveryEvent.WindowEnded })
+        assertEquals(1, lock.releases)
+        assertFalse(m.isRunning())
+    }
+
+    @Test
+    fun `late callbacks after stop are ignored`() {
+        val m = manager()
+        m.start()
+        backend.cb.onServiceFound("Mac")
+
+        m.stop()
+        events.clear()
+
+        backend.cb.onServiceLost("Mac")
+        backend.cb.onResolved("Mac", "192.168.1.20", 1)
+        backend.cb.onResolveFailed("Mac", 0)
+        backend.cb.onServiceFound("MacB")
+
+        assertTrue(events.isEmpty())
+        assertEquals(emptyList<DiscoveryFailure>(), m.failureLog())
+        assertEquals(listOf("Mac"), backend.resolveRequests)
     }
 
     @Test

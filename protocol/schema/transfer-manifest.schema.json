@@ -20,7 +20,8 @@
     },
     "sizeBytes": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 1073741824
     },
     "mimeType": {
       "type": "string",
@@ -41,6 +42,7 @@
     "chunkCount": {
       "type": "integer",
       "minimum": 0,
+      "maximum": 1048576,
       "description": "Number of transfer.chunk payloads expected. Empty files use 0."
     }
   }

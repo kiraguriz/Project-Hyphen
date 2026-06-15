@@ -68,7 +68,13 @@ class NotificationPayloadTest {
             NotificationPayloadSource(
                 sbnKey = "0|com.chat|7|thread-123|10101",
                 packageName = "com.chat",
-                replyActions = listOf(NotificationReplyAction(actionIndex = 2, label = "Reply")),
+                replyActions = listOf(
+                    NotificationReplyAction(
+                        actionIndex = 2,
+                        label = "Reply",
+                        actionId = "reply:1:reply:android-reply",
+                    ),
+                ),
             ),
         ).toJson()
 
@@ -76,6 +82,103 @@ class NotificationPayloadTest {
         val action = replyActions.items.single() as Json.Obj
         assertEquals(Json.Num("2"), action["actionIndex"])
         assertEquals(Json.Str("Reply"), action["label"])
+        assertEquals(Json.Str("reply:1:reply:android-reply"), action["actionId"])
+    }
+
+    @Test
+    fun `reply action id resolves reordered actions and legacy index fallback`() {
+        val reply = NotificationReplyActionMetadata(
+            actionIndex = 2,
+            semanticAction = 1,
+            title = "Reply",
+            resultKeys = listOf("android.reply"),
+            hasActionIntent = true,
+        )
+        val markRead = NotificationReplyActionMetadata(
+            actionIndex = 0,
+            semanticAction = 2,
+            title = "Mark read",
+            resultKeys = emptyList(),
+            hasActionIntent = true,
+        )
+        val reorderedReply = reply.copy(actionIndex = 0)
+        val actionId = NotificationReplyActions.stableActionId(reply)
+
+        assertEquals(
+            0,
+            NotificationReplyActions.resolveActionIndex(
+                actions = listOf(reorderedReply, markRead.copy(actionIndex = 1)),
+                requestedActionIndex = 2,
+                requestedActionId = actionId,
+            ),
+        )
+        assertEquals(
+            null,
+            NotificationReplyActions.resolveActionIndex(
+                actions = listOf(markRead.copy(actionIndex = 0)),
+                requestedActionIndex = 2,
+                requestedActionId = actionId,
+            ),
+        )
+        assertEquals(
+            2,
+            NotificationReplyActions.resolveActionIndex(
+                actions = listOf(markRead, reply),
+                requestedActionIndex = 2,
+                requestedActionId = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `reply action ids are omitted for duplicate reply metadata`() {
+        val firstReply = NotificationReplyActionMetadata(
+            actionIndex = 1,
+            semanticAction = 1,
+            title = "Reply",
+            resultKeys = listOf("android.reply"),
+            hasActionIntent = true,
+        )
+        val secondReply = firstReply.copy(actionIndex = 3)
+        val actionIds = NotificationReplyActions.stableActionIds(listOf(firstReply, secondReply))
+        val unstableBaseId = NotificationReplyActions.stableActionId(firstReply)
+
+        assertEquals(null, actionIds[1])
+        assertEquals(null, actionIds[3])
+        assertEquals(
+            null,
+            NotificationReplyActions.resolveActionIndex(
+                actions = listOf(firstReply, secondReply),
+                requestedActionIndex = 3,
+                requestedActionId = unstableBaseId,
+            ),
+        )
+    }
+
+    @Test
+    fun `reply action id ignores non-sendable duplicate when resolving`() {
+        val reply = NotificationReplyActionMetadata(
+            actionIndex = 1,
+            semanticAction = 1,
+            title = "Reply",
+            resultKeys = listOf("android.reply"),
+            hasActionIntent = true,
+        )
+        val unsendableDuplicate = reply.copy(
+            actionIndex = 2,
+            hasActionIntent = false,
+        )
+        val actionId = NotificationReplyActions.stableActionIds(listOf(reply))[1]
+
+        assertEquals(
+            1,
+            NotificationReplyActions.resolveActionIndex(
+                actions = listOf(reply, unsendableDuplicate),
+                requestedActionIndex = 1,
+                requestedActionId = actionId,
+            ),
+        )
+        assertEquals(null, NotificationReplyActions.stableActionIds(listOf(reply, unsendableDuplicate))[2])
     }
 
     @Test

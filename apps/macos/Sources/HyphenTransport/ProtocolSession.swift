@@ -44,6 +44,7 @@ public final class ProtocolSession {
     private var heartbeatTimer: DispatchSourceTimer?
     private var tickTimer: DispatchSourceTimer?
     private var seq: Int64 = 0
+    private var nextInboundSeq: Int64 = 1
     private var closed = false
 
     /// - Parameter connection: an already-established (post-handshake)
@@ -60,6 +61,7 @@ public final class ProtocolSession {
         self.callbacks = callbacks
         self.queue = DispatchQueue(label: "hyphen-session")
         self.seq = config.startingSeq
+        self.nextInboundSeq = config.startingSeq + 1
         queue.setSpecific(key: queueKey, value: true)
     }
 
@@ -70,7 +72,7 @@ public final class ProtocolSession {
             monitor = HeartbeatMonitor(
                 intervalMs: config.heartbeatIntervalMs,
                 missThreshold: config.missThreshold,
-                startedAtMs: Self.nowMs(),
+                startedAtMs: Self.monotonicNowMs(),
                 onStateChange: callbacks.onLiveness
             )
             ackTracker = AckTracker(timeoutMs: config.ackTimeoutMs, onTimeout: callbacks.onAckTimeout)
@@ -90,7 +92,7 @@ public final class ProtocolSession {
             let tick = DispatchSource.makeTimerSource(queue: queue)
             tick.schedule(deadline: .now() + .milliseconds(tickMs), repeating: .milliseconds(tickMs))
             tick.setEventHandler { [weak self] in
-                let now = Self.nowMs()
+                let now = Self.monotonicNowMs()
                 self?.monitor.tick(nowMs: now)
                 self?.ackTracker.tick(nowMs: now)
             }
@@ -99,7 +101,9 @@ public final class ProtocolSession {
 
             if !leftover.isEmpty {
                 do {
-                    for frame in try reader.feed(leftover) { handleFrame(frame) }
+                    for frame in try reader.feed(leftover) {
+                        if !handleFrame(frame) { break }
+                    }
                 } catch {
                     callbacks.onProtocolError("transport/frame-too-large", "\(error)")
                     close()
@@ -141,7 +145,8 @@ public final class ProtocolSession {
         ackOf: String? = nil
     ) -> String? {
         guard !closed else { return nil }
-        let now = Self.nowMs()
+        let wallNow = Self.wallNowMs()
+        let timeoutNow = Self.monotonicNowMs()
         seq += 1
         let envelope = Envelope(
             messageId: Ulid.generate(),
@@ -150,13 +155,13 @@ public final class ProtocolSession {
             capability: capability,
             seq: seq,
             ackOf: ackOf,
-            sentAtUnixMs: now,
+            sentAtUnixMs: wallNow,
             requiresAck: requiresAck,
             payload: payload
         )
         do {
             let frame = try FrameCodec.encode(try envelope.encode())
-            if requiresAck { ackTracker.registerSent(messageId: envelope.messageId, nowMs: now) }
+            if requiresAck { ackTracker.registerSent(messageId: envelope.messageId, nowMs: timeoutNow) }
             connection.send(content: frame, completion: .contentProcessed { [weak self] error in
                 guard error != nil else { return }
                 self?.queue.async { [weak self] in
@@ -178,7 +183,7 @@ public final class ProtocolSession {
                 if let data, !data.isEmpty {
                     do {
                         for frame in try self.reader.feed(data) {
-                            self.handleFrame(frame)
+                            if !self.handleFrame(frame) { break }
                         }
                     } catch {
                         self.callbacks.onProtocolError("transport/frame-too-large", "\(error)")
@@ -195,16 +200,21 @@ public final class ProtocolSession {
         }
     }
 
-    private func handleFrame(_ frame: Data) {
+    private func handleFrame(_ frame: Data) -> Bool {
+        guard !closed else { return false }
         let envelope: Envelope
         do {
             envelope = try Envelope.decode(frame)
         } catch {
-            // Stay open per §3; malformed envelopes are surfaced and skipped.
             callbacks.onProtocolError("protocol/invalid-envelope", "\(error)")
-            return
+            close()
+            return false
         }
-        monitor.envelopeReceived(nowMs: Self.nowMs())
+        guard validateSessionAndSeq(envelope) else {
+            close()
+            return false
+        }
+        monitor.envelopeReceived(nowMs: Self.monotonicNowMs())
         switch envelope.type {
         case Envelope.typeAck:
             if let ackOf = envelope.ackOf, ackTracker.ackReceived(ackOf) {
@@ -218,6 +228,24 @@ public final class ProtocolSession {
             }
             callbacks.onEnvelope(envelope)
         }
+        return !closed
+    }
+
+    private func validateSessionAndSeq(_ envelope: Envelope) -> Bool {
+        if envelope.type == Envelope.typeHello {
+            callbacks.onProtocolError("protocol/invalid-envelope", "hello is only valid during handshake")
+            return false
+        }
+        if envelope.sessionId != sessionId {
+            callbacks.onProtocolError("protocol/invalid-envelope", "sessionId does not match active session")
+            return false
+        }
+        if envelope.seq != nextInboundSeq {
+            callbacks.onProtocolError("protocol/invalid-envelope", "expected seq \(nextInboundSeq), got \(envelope.seq)")
+            return false
+        }
+        nextInboundSeq += 1
+        return true
     }
 
     private func close() {
@@ -229,7 +257,11 @@ public final class ProtocolSession {
         callbacks.onClosed()
     }
 
-    private static func nowMs() -> Int64 {
+    private static func monotonicNowMs() -> Int64 {
+        Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000)
+    }
+
+    private static func wallNowMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
 }

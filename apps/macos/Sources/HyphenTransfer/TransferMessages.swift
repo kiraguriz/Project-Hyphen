@@ -11,6 +11,8 @@ public enum TransferProtocol {
     public static let typeCancel = "transfer.cancel"
     public static let minChunkSizeBytes = 1024
     public static let maxChunkSizeBytes = 2 * 1024 * 1024
+    public static let maxV0TransferSizeBytes: Int64 = 1_073_741_824
+    public static let maxV0TransferChunkCount = 1_048_576
 }
 
 public enum TransferError: Error, Equatable {
@@ -47,6 +49,9 @@ public struct TransferManifest: Equatable {
             throw TransferError.invalidPayload("invalid filename")
         }
         guard sizeBytes >= 0 else { throw TransferError.invalidPayload("sizeBytes must be >= 0") }
+        guard sizeBytes <= TransferProtocol.maxV0TransferSizeBytes else {
+            throw TransferError.invalidPayload("sizeBytes exceeds v0 transfer limit")
+        }
         guard Self.matches(mimeType, #"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$"#) else {
             throw TransferError.invalidPayload("invalid mimeType")
         }
@@ -57,6 +62,9 @@ public struct TransferManifest: Equatable {
             throw TransferError.invalidPayload("invalid chunkSizeBytes")
         }
         guard chunkCount >= 0 else { throw TransferError.invalidPayload("chunkCount must be >= 0") }
+        guard chunkCount <= TransferProtocol.maxV0TransferChunkCount else {
+            throw TransferError.invalidPayload("chunkCount exceeds v0 transfer limit")
+        }
         let expectedChunks: Int64 = sizeBytes == 0 ? 0 : (sizeBytes + Int64(chunkSizeBytes) - 1) / Int64(chunkSizeBytes)
         guard expectedChunks <= Int64(Int.max), Int64(chunkCount) == expectedChunks else {
             throw TransferError.invalidPayload("chunkCount does not match sizeBytes/chunkSizeBytes")
@@ -77,6 +85,9 @@ public struct TransferManifest: Equatable {
         chunkSizeBytes: Int,
         fileId: String = "f_\(Ulid.generate())"
     ) throws {
+        guard source.sizeBytes <= TransferProtocol.maxV0TransferSizeBytes else {
+            throw TransferError.invalidPayload("sizeBytes exceeds v0 transfer limit")
+        }
         try self.init(
             fileId: fileId,
             filename: filename,

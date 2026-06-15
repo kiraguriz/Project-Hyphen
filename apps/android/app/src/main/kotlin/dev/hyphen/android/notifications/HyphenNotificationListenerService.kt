@@ -7,15 +7,17 @@ class HyphenNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        HyphenNotificationListenerRuntime.setCanceller(AndroidNotificationCanceller(this))
-        HyphenNotificationListenerRuntime.setReplier(AndroidNotificationReplier(this))
-        HyphenNotificationListenerRuntime.onConnected()
+        HyphenNotificationListenerRuntime.onConnected(
+            notificationCanceller = AndroidNotificationCanceller(this),
+            notificationReplier = AndroidNotificationReplier(this),
+            activeNotifications
+                ?.map { NormalizedNotificationPayload.fromStatusBarNotification(it) }
+                ?: emptyList(),
+        )
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        HyphenNotificationListenerRuntime.clearCanceller()
-        HyphenNotificationListenerRuntime.clearReplier()
         HyphenNotificationListenerRuntime.onDisconnected()
     }
 
@@ -30,8 +32,6 @@ class HyphenNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onDestroy() {
-        HyphenNotificationListenerRuntime.clearCanceller()
-        HyphenNotificationListenerRuntime.clearReplier()
         HyphenNotificationListenerRuntime.onDestroyed()
         super.onDestroy()
     }
