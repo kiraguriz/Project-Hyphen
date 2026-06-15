@@ -16,12 +16,15 @@ import UniformTypeIdentifiers
 /// `SasConfirmationGate` only when the user confirms; reject/close
 /// persists nothing. The provisional connection is closed after the
 /// decision either way — the steady-state session arrives with M2-012/013.
-final class PairingController: NSObject, NSWindowDelegate {
+final class PairingController: NSObject {
 
     private let queue = DispatchQueue(label: "hyphen-pairing")
     private var listener: TLSEndpointListener?
-    private var window: NSWindow?
-    private var codeLabel: NSTextField?
+    // Section C pairing surface: the design SwiftUI window (QR + SAS) hosted in
+    // a borderless window. Only the presentation changed here — the listener,
+    // SAS gate, and session logic below are unchanged.
+    private var pairingWindow: DesignWindowController?
+    private let pairingModel = PairingWindowModel()
     private var pendingFingerprint: Data?
     private var provisionalConnection: NWConnection?
     private var activeSession: ProtocolSession?
@@ -55,11 +58,13 @@ final class PairingController: NSObject, NSWindowDelegate {
         self.onStatus = onStatus
     }
 
-    var isActive: Bool { window != nil }
+    var isActive: Bool { pairingWindow != nil }
 
     func beginPairing() {
-        guard window == nil else {
-            window?.makeKeyAndOrderFront(nil)
+        guard pairingWindow == nil else {
+            pairingWindow?.present { [pairingModel, weak self] in
+                PairingWindowHost(model: pairingModel, onClose: { self?.endPairing() })
+            }
             return
         }
         do {
@@ -119,12 +124,8 @@ final class PairingController: NSObject, NSWindowDelegate {
         provisionalConnection?.cancel()
         provisionalConnection = nil
         pendingFingerprint = nil
-        if let window {
-            window.delegate = nil
-            window.orderOut(nil)
-        }
-        window = nil
-        codeLabel = nil
+        pairingWindow?.close()
+        pairingWindow = nil
     }
 
     private func presentWindow(identity: DeviceIdentity, nonce: Data, port: UInt16, deviceName: String) {
@@ -139,45 +140,32 @@ final class PairingController: NSObject, NSWindowDelegate {
             spkiFingerprint: identity.spkiFingerprint,
             nonce: nonce,
             deviceName: deviceName
-        ), let qr = QRCodeRenderer.image(for: payload.uriString) else {
+        ) else {
             onStatus("Pairing QR could not be built")
             endPairing()
             return
         }
 
-        let imageView = NSImageView(frame: NSRect(x: 20, y: 100, width: 320, height: 320))
-        imageView.image = NSImage(cgImage: qr, size: NSSize(width: 320, height: 320))
-        imageView.imageScaling = .scaleProportionallyUpOrDown
+        // Feed the design window real values; the SwiftUI view renders the QR
+        // from the payload URI. SAS/peer fields fill in once a phone connects.
+        pairingModel.address = "\(host):\(port)"
+        pairingModel.qrPayload = payload.uriString
+        pairingModel.peerName = "等待手机连接…"
+        pairingModel.fingerprint = "等待手机连接…"
+        pairingModel.sasCodes = ["··", "··", "··"]
+        pairingModel.awaitingConfirmation = false
 
-        let instructions = NSTextField(labelWithString: "Scan with the Hyphen Android app\n\(host):\(port)")
-        instructions.frame = NSRect(x: 20, y: 56, width: 320, height: 36)
-        instructions.alignment = .center
-
-        let code = NSTextField(labelWithString: "Waiting for the phone to connect…")
-        code.frame = NSRect(x: 20, y: 16, width: 320, height: 28)
-        code.alignment = .center
-        code.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
-        codeLabel = code
-
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 440))
-        content.addSubview(imageView)
-        content.addSubview(instructions)
-        content.addSubview(code)
-
-        let window = NSWindow(
-            contentRect: content.frame,
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Pair New Device"
-        window.contentView = content
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.center()
-        self.window = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        let controller = DesignWindowController(onClosed: { [weak self] in
+            // Closing the window aborts pairing; nothing was persisted unless
+            // the SAS gate already confirmed (which clears the window first).
+            self?.endPairing()
+        })
+        pairingWindow = controller
+        controller.present { [pairingModel, weak self] in
+            // The window-chrome close button aborts pairing too, matching Escape
+            // and the legacy `.closable` window's behavior.
+            PairingWindowHost(model: pairingModel, onClose: { self?.endPairing() })
+        }
     }
 
     private func presentSasConfirmation(
@@ -202,48 +190,69 @@ final class PairingController: NSObject, NSWindowDelegate {
             peerDisplayName: "Android device", // device-chosen names arrive with hello (M2-012)
             trustStore: KeychainTrustStore()
         )
-        codeLabel?.stringValue = "Pairing code: \(gate.sas)"
 
-        let alert = NSAlert()
-        alert.messageText = "Confirm pairing code"
-        alert.informativeText = "Code: \(gate.sas)\n\nTrust this phone only if it shows the same code."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Codes Match — Trust")
-        alert.addButton(withTitle: "Reject")
-        NSApp.activate(ignoringOtherApps: true)
-
-        if alert.runModal() == .alertFirstButtonReturn {
+        // Drive the design window's SAS step (Section C): the "一致，建立信任" /
+        // "不一致" buttons call the same gate.confirm()/reject() paths that the
+        // old NSAlert used — the trust decision logic is unchanged.
+        pairingModel.sasCodes = Self.sasGroups(gate.sas)
+        // The device-chosen name arrives with hello (M2-012); until then use a
+        // neutral, accurate label. Identity is carried by the real fingerprint
+        // below, not a fabricated model name.
+        pairingModel.peerName = "Android 设备"
+        pairingModel.fingerprint = Self.fingerprintLine(peerFingerprint)
+        pairingModel.awaitingConfirmation = true
+        pairingModel.onConfirm = { [weak self] in
+            guard let self else { return }
             do {
                 try gate.confirm()
-                onStatus("Paired — fingerprint pinned (\(gate.sas))")
-                closePairingUI()
-                startSteadySession(
-                    connection: provisionalConnection,
+                self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
+                self.closePairingUI()
+                self.startSteadySession(
+                    connection: self.provisionalConnection,
                     deviceName: deviceName,
                     peerFingerprint: peerFingerprint
                 )
-                provisionalConnection = nil
-                pendingFingerprint = nil
-                return
+                self.provisionalConnection = nil
+                self.pendingFingerprint = nil
             } catch {
-                onStatus("Trust store write failed: \(error)")
+                self.onStatus("Trust store write failed: \(error)")
+                self.endPairing()
             }
-        } else {
-            gate.reject()
-            onStatus("Pairing rejected — nothing stored")
         }
-        endPairing()
+        pairingModel.onReject = { [weak self] in
+            gate.reject()
+            self?.onStatus("Pairing rejected — nothing stored")
+            self?.endPairing()
+        }
+    }
+
+    /// Splits the SAS string into the three groups the design shows. Falls back
+    /// to even thirds when the gate does not pre-group it.
+    private static func sasGroups(_ sas: String) -> [String] {
+        let parts = sas.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
+        if parts.count >= 3 { return Array(parts.prefix(3)) }
+        let digits = Array(sas.filter { !$0.isWhitespace })
+        guard digits.count >= 3 else { return [sas, "", ""] }
+        let n = digits.count / 3
+        let g1 = String(digits[0..<n])
+        let g2 = String(digits[n..<(2 * n)])
+        let g3 = String(digits[(2 * n)...])
+        return [g1, g2, g3]
+    }
+
+    /// "SHA‑256 · AA:BB:…:YY" preview from the pinned fingerprint bytes.
+    private static func fingerprintLine(_ fingerprint: Data) -> String {
+        let hex = fingerprint.map { String(format: "%02X", $0) }
+        let head = hex.prefix(4).joined(separator: ":")
+        let tail = hex.suffix(1).joined()
+        return "SHA‑256 · \(head):…:\(tail)"
     }
 
     private func closePairingUI() {
         listener?.stop()
         listener = nil
-        if let window {
-            window.delegate = nil
-            window.orderOut(nil)
-        }
-        window = nil
-        codeLabel = nil
+        pairingWindow?.close()
+        pairingWindow = nil
     }
 
     private func startSteadySession(connection: NWConnection?, deviceName: String, peerFingerprint: Data) {
@@ -737,11 +746,6 @@ final class PairingController: NSObject, NSWindowDelegate {
         }
     }
 
-    func windowWillClose(_ notification: Notification) {
-        // Closing the window aborts pairing; nothing was persisted unless
-        // the gate already confirmed.
-        endPairing()
-    }
 }
 
 /// First active non-loopback IPv4, preferring en* interfaces (Wi-Fi/

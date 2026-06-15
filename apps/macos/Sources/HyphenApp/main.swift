@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import HyphenCore
 import HyphenDiagnostics
 import HyphenDiscovery
@@ -69,6 +70,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private let stateItem = NSMenuItem(title: "Not advertising", action: nil, keyEquivalent: "")
 
+    // Section B · 变体 3 (timeline) menu-bar popover is the primary click target;
+    // the legacy NSMenu is preserved on right-click so every backend action
+    // stays reachable.
+    private let popover = NSPopover()
+    private var statusMenu: NSMenu?
+    private var settingsWindow: DesignWindowController?
+    // Outside-click dismissal for the popover. A global monitor only sees events
+    // routed to *other* apps, so a click on the status button never reaches it —
+    // which is exactly why this avoids the `.transient` race where the button
+    // could not toggle the popover shut.
+    private var popoverMonitor: Any?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "⌁"
@@ -117,7 +130,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: "q"
             )
         )
-        item.menu = menu
+        // Left-click opens the SwiftUI Variant-3 popover; right-click / control
+        // -click opens the full legacy menu so nothing is lost.
+        statusMenu = menu
+        let popoverHost = NSHostingController(rootView: MenuBarPopoverView(
+            onPair: { [weak self] in self?.popover.performClose(nil); self?.beginPairing(self!.pairItem) },
+            onSettings: { [weak self] in self?.popover.performClose(nil); self?.openSettingsWindow() },
+            onSend: { [weak self] in self?.popover.performClose(nil); self?.presentSendChooser() },
+            onReply: { [weak self] _ in self?.stateItem.title = "回复需要活动会话（示例时间线）" },
+            onDismiss: { [weak self] _ in self?.stateItem.title = "清除需要活动会话（示例时间线）" }
+        ))
+        popover.contentViewController = popoverHost
+        popover.delegate = self
+        item.button?.action = #selector(statusItemClicked(_:))
+        item.button?.target = self
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
 
         // Wake drives the reconnect state machine (HYP-M1-013/014);
@@ -143,6 +170,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         observer.start()
         sleepWakeObserver = observer
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isSecondary = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+        if isSecondary, let menu = statusMenu {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+            return
+        }
+        if popover.isShown {
+            closePopover()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+            popoverMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] _ in
+                self?.closePopover()
+            }
+        }
+    }
+
+    private func closePopover() {
+        popover.performClose(nil)
+    }
+
+    private func openSettingsWindow() {
+        if let settingsWindow {
+            settingsWindow.present { [weak settingsWindow] in
+                self.settingsView(onClose: { settingsWindow?.requestClose() })
+            }
+            return
+        }
+        let controller = DesignWindowController(onClosed: { [weak self] in
+            self?.settingsWindow = nil
+        })
+        settingsWindow = controller
+        controller.present { [weak controller] in
+            self.settingsView(onClose: { controller?.requestClose() })
+        }
+    }
+
+    private func settingsView(onClose: @escaping () -> Void) -> SettingsWindowView {
+        let peer = (try? KeychainTrustStore().allPeers())?.first
+        return SettingsWindowView(
+            deviceName: peer.map { $0.displayName.isEmpty ? "已配对设备" : $0.displayName },
+            fingerprint: peer.map { fingerprintPrefix($0.spkiFingerprint) },
+            includeTraceIds: betaDiagnosticsEnabled(),
+            onClose: onClose,
+            onRevokeTrust: { [weak self] in self?.managePeers(self!.managePeersItem) },
+            onRenameDevice: { [weak self] in self?.presentRenameUnavailable() },
+            onExportDiagnostics: { [weak self] in self?.exportDiagnostics(self!.exportDiagnosticsItem) },
+            onDeleteDiagnostics: { [weak self] in self?.deleteDiagnostics(self!.deleteDiagnosticsItem) },
+            onRequestTraceIds: { [weak self] desired in self?.setBetaDiagnosticsWithConsent(desired) ?? false }
+        )
+    }
+
+    private func presentRenameUnavailable() {
+        let alert = NSAlert()
+        alert.messageText = "重命名设备"
+        alert.informativeText = "设备重命名将在后续版本提供。"
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private func presentSendChooser() {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "发送文件…", action: #selector(sendFile(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "发送文本 / 链接…", action: #selector(sendTextLink(_:)), keyEquivalent: "")
+        menu.items.forEach { $0.target = self }
+        if let button = statusItem?.button {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
     }
 
     private func renderReconnect(_ state: ReconnectState) {
@@ -356,11 +458,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleBetaDiagnostics(_ sender: NSMenuItem) {
-        if betaDiagnosticsEnabled() {
+        setBetaDiagnosticsWithConsent(!betaDiagnosticsEnabled())
+    }
+
+    /// Applies a beta-diagnostics opt-in change behind the privacy consent gate:
+    /// enabling requires confirming the explainer; disabling is immediate.
+    /// Returns the state actually in effect afterwards so a caller (e.g. the
+    /// settings toggle) can revert its UI if consent was declined.
+    @discardableResult
+    private func setBetaDiagnosticsWithConsent(_ desired: Bool) -> Bool {
+        guard desired != betaDiagnosticsEnabled() else { return desired }
+
+        if !desired {
             setBetaDiagnosticsEnabled(false)
             stateItem.title = "Beta diagnostics disabled"
-            return
+            return false
         }
+
         let alert = NSAlert()
         alert.messageText = "Enable beta diagnostics?"
         alert.informativeText = """
@@ -377,10 +491,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             stateItem.title = "Beta diagnostics left off"
-            return
+            return false
         }
         setBetaDiagnosticsEnabled(true)
         stateItem.title = "Beta diagnostics enabled"
+        return true
     }
 
     private func setBetaDiagnosticsEnabled(_ enabled: Bool) {
@@ -447,13 +562,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func presentLocalNetworkExplanation() -> Bool {
-        let alert = NSAlert()
-        alert.messageText = LocalNetworkCopy.title
-        alert.informativeText = LocalNetworkCopy.body
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: LocalNetworkCopy.continueTitle)
-        alert.addButton(withTitle: LocalNetworkCopy.notNowTitle)
-        return alert.runModal() == .alertFirstButtonReturn
+        // Section C · 本地网络授权 — the SwiftUI explain-first dialog (frozen
+        // copy lives in PairingLocalNetworkDialogView) replaces the old NSAlert.
+        LocalNetworkDialog.runModal()
     }
 
     private func render(_ state: BonjourAdvertiser.State) {
@@ -472,6 +583,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static let betaDiagnosticsOptInKey = "dev.hyphen.betaDiagnostics.includeTraceIds"
+}
+
+extension AppDelegate: NSPopoverDelegate {
+    /// Tears down the outside-click monitor whenever the popover closes — via the
+    /// toggle, the monitor itself, or a popover action that calls `performClose`.
+    func popoverDidClose(_ notification: Notification) {
+        if let popoverMonitor {
+            NSEvent.removeMonitor(popoverMonitor)
+            self.popoverMonitor = nil
+        }
+    }
 }
 
 let app = NSApplication.shared
