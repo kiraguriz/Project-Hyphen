@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairingController: PairingController?
     private let diagnosticLogs = LocalStructuredLogStore()
     private let lnpGate = LocalNetworkOnboardingGate(store: UserDefaults.standard)
+    // App-level observable model (frontend UX plan M-A1): the single source of
+    // truth for the popover's connection + activity rendering. The
+    // PairingController feeds it ActivityEvents; AppDelegate feeds it the
+    // pairing-identity changes it owns (launch / pair / forget / reset).
+    private let appModel = HyphenAppModel()
     private let pairItem = NSMenuItem(
         title: "Pair New Device…",
         action: #selector(beginPairing(_:)),
@@ -95,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateNotificationPrivacyIfNeeded()
         rebuildNotificationPrivacyCache()
+        refreshPairingState()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "⌁"
@@ -169,10 +175,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         reconnectMachine = machine
 
-        let observer = SleepWakeObserver(reconnect: machine) { event in
+        let observer = SleepWakeObserver(reconnect: machine) { [weak self] event in
             NSLog("hyphen-power: \(event)")
             if event == .willSleep {
                 machine.sleepOccurred()
+            }
+            // Surface the real power signal in the popover (only when paired —
+            // an unpaired Mac stays in the not-paired presentation). Wake returns
+            // to the paired-idle state; a live session re-asserts `.connected`
+            // via PairingController.
+            DispatchQueue.main.async {
+                guard let self, self.appModel.connection.isPaired else { return }
+                if self.pairingController?.hasActiveSession == true { return }
+                switch event {
+                case .willSleep:
+                    self.appModel.apply(.connectionStateChanged(.sleeping, latencyMs: nil))
+                case .didWake:
+                    self.appModel.apply(.connectionStateChanged(.suspended, latencyMs: nil))
+                }
             }
         }
         observer.start()
@@ -194,11 +214,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             popover.contentViewController = NSHostingController(rootView: makeMenuBarPopoverView())
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            popoverMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self] _ in
-                self?.closePopover()
-            }
+            // Remove any stale monitor before installing a new one. A re-open
+            // before `popoverDidClose` fires would otherwise overwrite the single
+            // `popoverMonitor` slot and leak the previous global monitor.
+            installPopoverMonitor()
+        }
+    }
+
+    private func installPopoverMonitor() {
+        if let popoverMonitor {
+            NSEvent.removeMonitor(popoverMonitor)
+            self.popoverMonitor = nil
+        }
+        popoverMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            self?.closePopover()
         }
     }
 
@@ -206,19 +237,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.performClose(nil)
     }
 
-    private func makeMenuBarPopoverView() -> MenuBarPopoverView {
-        let peer = currentTrustedPeer()
-        let hasSession = pairingController?.hasActiveSession == true
-        let state: HyphenConnectionState = peer == nil
-            ? .suspended
-            : (hasSession ? .connected : .suspended)
-        let name = peer.map { $0.displayName.isEmpty ? "已配对设备" : $0.displayName }
-            ?? "尚未配对"
-        return MenuBarPopoverView(
-            state: state,
-            deviceName: name,
-            latencyMs: nil,
-            days: [],
+    private func makeMenuBarPopoverView() -> MenuBarPopoverHost {
+        // The host observes `appModel`, so the popover re-renders live while it
+        // is open (no more `days: []`). Connection + activity are the model's,
+        // not derived inline from a synchronous Keychain read.
+        MenuBarPopoverHost(
+            model: appModel,
             onPair: { [weak self] in
                 guard let self else { return }
                 self.closePopover()
@@ -228,12 +252,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.closePopover()
                 self?.openSettingsWindow()
             },
-            onSend: { [weak self] in
-                self?.closePopover()
-                self?.presentSendChooser()
+            onSendText: { [weak self] text in
+                self?.sendComposedText(text)
             },
-            onReply: { [weak self] _ in self?.stateItem.title = "回复需要活动会话" },
-            onDismiss: { [weak self] _ in self?.stateItem.title = "清除需要活动会话" }
+            onSendFile: { [weak self] in
+                self?.closePopover()
+                self?.sendFile(self?.sendFileItem ?? NSMenuItem())
+            },
+            onReply: { [weak self] ref in
+                self?.closePopover()
+                self?.presentNotificationReplyComposer(ref)
+            },
+            onDismiss: { [weak self] ref in
+                self?.requestNotificationDismiss(ref)
+            }
         )
     }
 
@@ -267,7 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mirroringEnabled: notificationMirroringEnabled(),
             rows: notificationPrivacyRows(),
             defaultMode: notificationDefaultMode(),
-            deviceName: peer.map { $0.displayName.isEmpty ? "已配对设备" : $0.displayName },
+            deviceName: peer.map { $0.displayName.isEmpty ? L("conn.pairedFallback") : $0.displayName },
             fingerprint: peer.map { HyphenFingerprintDisplay.string(for: $0.spkiFingerprint, style: .shortPrefix) },
             includeTraceIds: betaDiagnosticsEnabled(),
             onClose: onClose,
@@ -292,8 +324,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    // Cached trusted peer. The popover no longer reads the Keychain on its hot
+    // path (it renders from `appModel`), but the settings view still resolves the
+    // peer and can rebuild several times per open (trace-ID consent, trust
+    // edits). Cache the read and invalidate on trust mutations.
+    private var trustedPeerCacheValid = false
+    private var cachedTrustedPeer: TrustedPeer?
+
     private func currentTrustedPeer() -> TrustedPeer? {
-        (try? KeychainTrustStore().allPeers())?.first
+        if trustedPeerCacheValid { return cachedTrustedPeer }
+        let peer = (try? KeychainTrustStore().allPeers())?.first
+        cachedTrustedPeer = peer
+        trustedPeerCacheValid = true
+        return peer
+    }
+
+    private func invalidateTrustedPeerCache() {
+        trustedPeerCacheValid = false
+        cachedTrustedPeer = nil
+    }
+
+    /// Push the current pairing identity into the app model. Called at launch
+    /// and after pair / forget / reset so the popover's not-paired vs paired
+    /// presentation tracks the trust store. Live connection state (connected /
+    /// suspended) is driven separately by `PairingController` events.
+    private func refreshPairingState() {
+        let peer = currentTrustedPeer()
+        let name = peer.map { $0.displayName.isEmpty ? L("conn.pairedFallback") : $0.displayName }
+        appModel.apply(.peerChanged(isPaired: peer != nil, peerName: name))
     }
 
     private func notificationMirroringEnabled() -> Bool {
@@ -388,22 +446,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentRenameUnavailable() {
         let alert = NSAlert()
-        alert.messageText = "重命名设备"
-        alert.informativeText = "设备重命名将在后续版本提供。"
-        alert.addButton(withTitle: "好")
+        alert.messageText = L("rename.title")
+        alert.informativeText = L("rename.body")
+        alert.addButton(withTitle: L("common.ok"))
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
 
-    private func presentSendChooser() {
-        closePopover()
-        let menu = NSMenu()
-        menu.addItem(withTitle: "发送文件…", action: #selector(sendFile(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "发送文本 / 链接…", action: #selector(sendTextLink(_:)), keyEquivalent: "")
-        menu.items.forEach { $0.target = self }
-        if let button = statusItem?.button {
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    /// Send text/link composed in the popover (M-A4). The capability gate +
+    /// URL-vs-text classification live in `PairingController.sendTextLink`.
+    private func sendComposedText(_ text: String) {
+        guard let pairingController, pairingController.hasActiveSession else {
+            stateItem.title = L("menu.sendNeedsSession")
+            return
         }
+        pairingController.sendTextLink(raw: text)
+    }
+
+    /// Inline-style reply composer for a mirrored notification (M-A3). Uses the
+    /// proven NSTextField-in-NSAlert pattern (same as `sendTextLink`); the
+    /// capability gate + send live in `PairingController`.
+    private func presentNotificationReplyComposer(_ ref: MenuBarNotificationRef) {
+        guard let pairingController, pairingController.hasActiveSession else {
+            stateItem.title = L("menu.replyNeedsSession")
+            return
+        }
+        guard let actionIndex = ref.replyActionIndex else {
+            stateItem.title = L("menu.replyUnsupported")
+            return
+        }
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        input.placeholderString = L("reply.placeholder", ref.sender)
+
+        let alert = NSAlert()
+        alert.messageText = L("reply.title", ref.appName)
+        alert.informativeText = L("reply.body")
+        alert.alertStyle = .informational
+        alert.accessoryView = input
+        alert.addButton(withTitle: L("reply.send"))
+        alert.addButton(withTitle: L("common.cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            stateItem.title = L("reply.cancelled")
+            return
+        }
+        pairingController.requestNotificationReply(
+            sbnKey: ref.sbnKey,
+            actionIndex: actionIndex,
+            actionId: ref.replyActionId,
+            text: input.stringValue
+        )
+    }
+
+    private func requestNotificationDismiss(_ ref: MenuBarNotificationRef) {
+        guard let pairingController, pairingController.hasActiveSession else {
+            stateItem.title = L("menu.dismissNeedsSession")
+            return
+        }
+        pairingController.requestNotificationDismiss(sbnKey: ref.sbnKey)
     }
 
     private func renderReconnect(_ state: ReconnectState) {
@@ -427,6 +528,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     diagnosticLogs: self.diagnosticLogs,
                     notificationPrivacyPolicy: { [weak self] in
                         self?.notificationPrivacyPolicy() ?? .allowAll
+                    },
+                    onActivity: { [weak self] event in
+                        // A confirmed pairing writes a new trusted peer just
+                        // before the session connects; drop the cache on either
+                        // the peer-identity change or the connect so the settings
+                        // view always resolves the fresh peer.
+                        switch event {
+                        case .peerChanged, .connectionStateChanged(.connected, _):
+                            self?.invalidateTrustedPeerCache()
+                        default:
+                            break
+                        }
+                        self?.appModel.apply(event)
                     }
                 ) { [weak self] status in
                     self?.stateItem.title = status
@@ -529,7 +643,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let removed = try store.remove(fingerprint: peer.spkiFingerprint)
         pairingController?.endPairing()
         stateItem.title = "Forgot \(peer.displayName.isEmpty ? "peer" : peer.displayName) (removed=\(removed))"
+        invalidateTrustedPeerCache()
         refreshSettingsWindow()
+        refreshPairingState()
     }
 
     private func confirmResetPeers(count: Int, store: KeychainTrustStore) {
@@ -549,7 +665,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try store.removeAll()
             pairingController?.endPairing()
             stateItem.title = "Paired devices reset (\(count) removed)"
+            invalidateTrustedPeerCache()
             refreshSettingsWindow()
+            refreshPairingState()
         } catch {
             stateItem.title = "Peer reset failed: \(error)"
         }

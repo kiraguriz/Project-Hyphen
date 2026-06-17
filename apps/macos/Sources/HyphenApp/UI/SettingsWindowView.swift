@@ -12,9 +12,9 @@ import HyphenNotifications
 extension NotificationPrivacyMode {
     var settingsLabel: String {
         switch self {
-        case .full: return "完整"
-        case .hideBody: return "隐藏内容"
-        case .existsOnly: return "仅提示"
+        case .full: return L("privacy.full")
+        case .hideBody: return L("privacy.hideBody")
+        case .existsOnly: return L("privacy.existsOnly")
         }
     }
 }
@@ -52,11 +52,11 @@ enum SettingsNavSection: CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .general: return "通用"
-        case .devices: return "设备"
-        case .notifications: return "通知隐私"
-        case .transfer: return "传输"
-        case .diagnostics: return "诊断"
+        case .general: return L("settings.nav.general")
+        case .devices: return L("settings.nav.devices")
+        case .notifications: return L("settings.nav.notifications")
+        case .transfer: return L("settings.nav.transfer")
+        case .diagnostics: return L("settings.nav.diagnostics")
         }
     }
 
@@ -134,21 +134,21 @@ struct SettingsWindowView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            WindowChrome(title: "Hyphen 设置", onClose: onClose)
-            HStack(spacing: 0) {
-                sidebar
-                pane
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        HyphenCard(cornerRadius: 13, padding: 0) {
+            VStack(spacing: 0) {
+                WindowChrome(title: L("settings.windowTitle"), onClose: onClose)
+                HStack(spacing: 0) {
+                    sidebar
+                    pane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .frame(minHeight: 380)
             }
-            .frame(minHeight: 380)
+            .frame(width: 632)
         }
-        .frame(width: 632)
-        .background(p.surface)
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(p.hair, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 13))
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 24)
         .hyphenThemed()
+        .hyphenDynamicTypeClamp()
         .onChange(of: selection) {
             // Report the active pane so the owner can preserve it across a
             // refresh (trace-ID consent, trust revoke/reset) instead of snapping
@@ -205,10 +205,10 @@ struct SettingsWindowView: View {
     private var devicePlaceholder: some View {
         VStack(spacing: 8) {
             Text("📱").font(.system(size: 30)).foregroundColor(p.faint)
-            Text("尚无已配对的设备")
+            Text(L("settings.device.placeholderTitle"))
                 .font(.hyphenBody(13, weight: .semibold))
                 .foregroundColor(p.text)
-            Text("点击菜单栏的「＋」配对一台 Android 设备。")
+            Text(L("settings.device.placeholderDetail"))
                 .font(.hyphenBody(12))
                 .foregroundColor(p.dim)
         }
@@ -220,7 +220,7 @@ struct SettingsWindowView: View {
         VStack(spacing: 8) {
             Spacer()
             Text(section.icon).font(.system(size: 30)).foregroundColor(p.faint)
-            Text("\(section.label)设置即将提供")
+            Text(L("settings.comingSoon", section.label))
                 .font(.hyphenBody(13))
                 .foregroundColor(p.dim)
             Spacer()
@@ -288,10 +288,10 @@ struct SettingsWindowView: View {
             // Header + global mirroring toggle.
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("通知镜像")
+                    Text(L("settings.notif.title"))
                         .font(.hyphenTitle(16, weight: .semibold))
                         .foregroundColor(p.text)
-                    Text("在 Mac 上接收手机通知。不保存通知历史。")
+                    Text(L("settings.notif.subtitle"))
                         .font(.hyphenBody(12))
                         .foregroundColor(p.dim)
                 }
@@ -307,7 +307,7 @@ struct SettingsWindowView: View {
 
             Hairline()
 
-            Text("逐应用隐私")
+            Text(L("settings.notif.perApp"))
                 .font(.hyphenBody(11, weight: .semibold))
                 .tracking(11 * 0.04)
                 .foregroundColor(p.faint)
@@ -324,10 +324,10 @@ struct SettingsWindowView: View {
             HStack(spacing: 12) {
                 AppGlyph(label: "其", tint: .hex(0x5b626d), size: 32, corner: 9)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("其他应用")
+                    Text(L("settings.notif.otherApps"))
                         .font(.hyphenBody(13, weight: .semibold))
                         .foregroundColor(p.text)
-                    Text("未单独设置的应用")
+                    Text(L("settings.notif.otherAppsDetail"))
                         .font(.hyphenBody(11))
                         .foregroundColor(p.faint)
                 }

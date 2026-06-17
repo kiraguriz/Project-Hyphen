@@ -17,12 +17,12 @@ enum HyphenConnectionState: CaseIterable {
 
     var title: String {
         switch self {
-        case .connected: return "已连接"
-        case .degraded: return "连接不稳定"
-        case .reconnecting: return "正在重新连接"
-        case .discovering: return "正在查找"
-        case .sleeping: return "Mac 已休眠"
-        case .suspended: return "已暂停"
+        case .connected: return L("state.connected")
+        case .degraded: return L("state.degraded")
+        case .reconnecting: return L("state.reconnecting")
+        case .discovering: return L("state.discovering")
+        case .sleeping: return L("state.sleeping")
+        case .suspended: return L("state.suspended")
         }
     }
 
@@ -184,9 +184,9 @@ struct DangerTextButtonStyle: ButtonStyle {
 
 // MARK: - Small atoms
 
-// STAGED: `MonoTag` and `HyphenCard` below are shared primitives with no call
-// site yet — they back design surfaces that land later. Intentional foundation,
-// not forgotten/dead code.
+// STAGED: `MonoTag` is a shared primitive with no call site yet — it backs an
+// audit-detail chip that lands later. Intentional foundation, not forgotten/
+// dead code. (`HyphenCard` now backs the borderless pairing/settings windows.)
 
 /// Monospace tag chip (e.g. 本地优先 / 可审计 / 零遥测).
 struct MonoTag: View {

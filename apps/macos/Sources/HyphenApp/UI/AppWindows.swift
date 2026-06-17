@@ -158,8 +158,8 @@ enum LocalNetworkDialog {
 final class PairingWindowModel: ObservableObject {
     @Published var sasCodes: [String] = ["··", "··", "··"]
     @Published var address: String = ""
-    @Published var peerName: String = "等待手机连接…"
-    @Published var fingerprint: String = "等待手机连接…"
+    @Published var peerName: String = L("pairing.waitingForPhone")
+    @Published var fingerprint: String = L("pairing.waitingForPhone")
     @Published var qrPayload: String = ""
     @Published var awaitingConfirmation = false
 

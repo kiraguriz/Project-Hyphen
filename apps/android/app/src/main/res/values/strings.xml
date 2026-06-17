@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Default (zh) copy. Frontend UX plan B4: the app is Chinese-first, so the
+     default resource set is Chinese and values-en/ is the English overlay.
+     Auditable technical output (the event-log lines, fingerprints, SAS, IPs,
+     sizes, timestamps) is not localized; only user-facing chrome is. -->
+<resources>
+    <string name="app_name">Hyphen</string>
+    <string name="brand_tagline">本地优先 · 可审计 · Mac × Android 持续连接层</string>
+
+    <!-- Connection header -->
+    <string name="conn_paired_fallback">已配对设备</string>
+    <string name="conn_unpaired_title">尚未配对</string>
+    <string name="conn_unpaired_subtitle">扫描二维码或输入 Mac 地址完成配对</string>
+    <string name="state_connected">已连接</string>
+    <string name="state_degraded">连接不稳定</string>
+    <string name="state_reconnecting">正在重新连接</string>
+    <string name="state_discovering">正在查找</string>
+    <string name="state_sleeping">已休眠</string>
+    <string name="state_suspended">已暂停</string>
+    <string name="conn_subtitle_with_peer">%1$s · %2$s</string>
+
+    <!-- Timeline card -->
+    <string name="timeline_title">时间线</string>
+    <string name="timeline_subtitle">通知、传输、文本与链接在同一上下文中出现。</string>
+    <string name="feed_today">今天</string>
+    <string name="feed_yesterday">昨天</string>
+    <string name="feed_date_month_day">%1$d月%2$d日</string>
+    <string name="field_send_hint">发送文本或链接到 Mac…</string>
+    <string name="btn_send_text">发送文本 / 链接</string>
+    <string name="btn_send_file">发送文件</string>
+    <string name="btn_cancel_transfer">取消当前传输</string>
+
+    <!-- Empty timeline states -->
+    <string name="empty_unpaired_title">尚未配对设备</string>
+    <string name="empty_unpaired_sub">扫描二维码或输入地址完成配对。</string>
+    <string name="empty_idle_title">暂无活动</string>
+    <string name="empty_idle_sub">镜像通知、文件与链接会显示在这里。</string>
+    <string name="empty_reconnecting_title">正在重新连接…</string>
+    <string name="empty_reconnecting_sub">正在恢复与已配对设备的连接。</string>
+    <string name="empty_discovering_title">正在查找设备…</string>
+    <string name="empty_discovering_sub">正在局域网中查找已配对的 Mac。</string>
+    <string name="empty_sleeping_title">已休眠</string>
+    <string name="empty_sleeping_sub">唤醒后将自动重新连接。</string>
+    <string name="empty_suspended_title">连接已暂停</string>
+    <string name="empty_suspended_sub">已配对，但当前没有活动会话。</string>
+
+    <!-- Transfer rows -->
+    <string name="transfer_receiving">接收中</string>
+    <string name="transfer_sending">发送中</string>
+    <string name="transfer_received_verified">%1$s · SHA‑256 校验通过</string>
+    <string name="transfer_received">%1$s · 已接收</string>
+    <string name="transfer_sent">%1$s · 已发送</string>
+    <string name="transfer_cancelled">已取消</string>
+
+    <!-- Text / link rows -->
+    <string name="text_link_sent">链接已发送到 Mac</string>
+    <string name="text_text_sent">文本已发送到 Mac</string>
+    <string name="text_link_opened">已打开来自 Mac 的链接</string>
+    <string name="text_text_copied">已复制来自 Mac 的文本</string>
+
+    <!-- Notification-action row -->
+    <string name="notif_action_subtitle">应 Mac 请求在本机执行</string>
+    <string name="notif_action_name">通知</string>
+    <string name="notif_action_cleared">已清除</string>
+    <string name="notif_action_replied">已回复</string>
+
+    <!-- Pairing timeline notes -->
+    <string name="pairing_note_paired">已配对 — 指纹已固定</string>
+    <string name="pairing_note_connected">已连接到 %1$s</string>
+
+    <!-- Connection-header accessibility -->
+    <string name="cd_connection_status">连接状态</string>
+
+    <!-- Permissions &amp; pairing card -->
+    <string name="perm_title">权限与配对</string>
+    <string name="perm_subtitle">本地网络发现失败时仍保留二维码或手动地址路径。</string>
+    <string name="perm_localnet_title">本地网络</string>
+    <string name="perm_localnet_detail">在 Wi-Fi 上查找并连接你的 Mac，不扫描互联网。</string>
+    <string name="perm_localnet_badge">本地</string>
+    <string name="perm_btn_find_mac">查找 Mac</string>
+    <string name="perm_manual_title">手动配对</string>
+    <string name="perm_manual_detail">粘贴 host:port 或 hyphen://pair 载荷，走同一条校验链路。</string>
+    <string name="perm_manual_hint">host:port 或 hyphen://pair</string>
+    <string name="perm_btn_manual_connect">手动连接 / 解析二维码</string>
+    <string name="perm_cdm_title">系统关联</string>
+    <string name="perm_cdm_detail">系统伴侣设备管理器自管理关联。</string>
+    <string name="perm_cdm_badge">CDM</string>
+    <string name="perm_btn_create_assoc">创建关联</string>
+    <string name="perm_btn_list_assoc">列出/移除关联</string>
+    <string name="perm_btn_manage_peers">管理已配对设备</string>
+
+    <!-- Notification-mirror card -->
+    <string name="notif_card_title">通知镜像</string>
+    <string name="notif_card_subtitle">不保存通知历史；可在完整与隐藏内容之间切换。</string>
+    <string name="notif_access_title">通知使用权</string>
+    <string name="notif_access_on_detail">已开启 · Hyphen 可镜像通知到 Mac。</string>
+    <string name="notif_access_off_detail">显式跳转系统设置，开启后才读取通知。</string>
+    <string name="notif_access_badge_on">已开启</string>
+    <string name="notif_access_badge_off">权限</string>
+    <string name="notif_btn_on">已开启</string>
+    <string name="notif_btn_off">开启通知镜像</string>
+    <string name="notif_btn_check">检查通知使用权</string>
+    <string name="notif_btn_privacy">通知隐私：%1$s</string>
+    <string name="privacy_full">完整</string>
+    <string name="privacy_hide_body">隐藏内容</string>
+    <string name="privacy_exists_only">仅提示</string>
+
+    <!-- Diagnostics card -->
+    <string name="diag_title">本地脱敏诊断</string>
+    <string name="diag_subtitle">默认本地保存并脱敏。无遥测、不自动上传。</string>
+    <string name="diag_trace_title">跟踪 ID</string>
+    <string name="diag_trace_detail">选择加入；仅写入用户主动导出的诊断包。</string>
+    <string name="diag_trace_badge">可审计</string>
+    <string name="diag_btn_beta">Beta 诊断：%1$s</string>
+    <string name="diag_beta_on">开启</string>
+    <string name="diag_beta_off">关闭</string>
+    <string name="diag_btn_preview">预览诊断</string>
+    <string name="diag_btn_export">导出诊断包</string>
+    <string name="diag_btn_delete">删除日志</string>
+
+    <!-- Event-log card -->
+    <string name="log_title">本机事件流</string>
+    <string name="log_subtitle">协议、配对、传输与诊断操作会追加到这里。</string>
+    <string name="log_empty">Hyphen 事件流</string>
+
+    <!-- Dialogs: paired-device management -->
+    <string name="dlg_ok">确定</string>
+    <string name="dlg_cancel">取消</string>
+    <string name="dlg_close">关闭</string>
+    <string name="peer_unnamed">未命名设备</string>
+    <string name="dlg_peers_title">已配对设备</string>
+    <string name="dlg_peers_empty_msg">本机未存储任何受信任的设备。</string>
+    <string name="dlg_peers_list_msg">点按设备以将其遗忘，或重置全部本地信任。</string>
+    <string name="dlg_peers_reset_all">全部重置</string>
+    <string name="dlg_forget_title">遗忘 %1$s？</string>
+    <string name="dlg_forget_msg">这将移除已固定的指纹 %1$s。需重新配对后此设备才能再次连接。</string>
+    <string name="dlg_forget_confirm">遗忘</string>
+    <string name="dlg_reset_title">重置已配对设备？</string>
+    <string name="dlg_reset_msg">这将移除 %1$d 个受信任的设备。需重新配对后任意设备才能再次连接。</string>
+    <string name="dlg_reset_confirm">重置</string>
+
+    <!-- Dialogs: SAS pairing -->
+    <string name="dlg_sas_title">确认配对码</string>
+    <string name="dlg_sas_msg">配对码：%1$s\n\n只有当 Mac 显示相同的配对码时才信任它。</string>
+    <string name="dlg_sas_confirm">配对码一致，信任</string>
+    <string name="dlg_sas_reject">拒绝</string>
+
+    <!-- Dialogs: text / link confirmation -->
+    <string name="dlg_link_title">打开来自 Mac 的链接？</string>
+    <string name="dlg_text_title">复制来自 Mac 的文本？</string>
+    <string name="dlg_link_open">打开</string>
+    <string name="dlg_text_copy">复制</string>
+
+    <!-- Dialogs: notification onboarding -->
+    <string name="dlg_notif_onboard_title">开启通知镜像</string>
+    <string name="dlg_notif_onboard_msg">Hyphen 可以读取 Android 通知的标题、操作和内容，并通过局域网 TLS 将它们镜像到已配对的 Mac。\n\n通知不会发送到云端中继，Hyphen 也不保存通知历史。开启后，如果希望 Mac 上显示更少的细节，可以切换到隐藏内容模式。\n\nHyphen 从不请求短信或通话记录权限。你之后可以在 Android 设置中关闭通知使用权。</string>
+    <string name="dlg_notif_open_settings">打开设置</string>
+    <string name="dlg_notif_not_now">暂不</string>
+
+    <!-- Dialogs: beta diagnostics -->
+    <string name="dlg_beta_title">开启 Beta 诊断？</string>
+    <string name="dlg_beta_msg">Beta 诊断默认关闭。\n\n仅在排查 Beta 问题时开启。本地预览和导出可能包含用于关联失败的跟踪 ID；通知正文、文件名、URL 和 IP 后缀仍会脱敏。\n\nHyphen 不会自动上传诊断。导出始终由用户主动触发，也可以随时关闭此项。</string>
+    <string name="dlg_beta_enable">开启</string>
+
+    <!-- Dialogs: diagnostics preview -->
+    <string name="dlg_diag_preview_title">诊断预览</string>
+</resources>

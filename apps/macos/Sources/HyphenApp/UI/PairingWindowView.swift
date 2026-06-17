@@ -99,19 +99,19 @@ struct PairingWindowView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            WindowChrome(title: "配对新设备", onClose: onClose)
-            HStack(alignment: .top, spacing: 0) {
-                leftColumn
-                rightColumn
+        HyphenCard(cornerRadius: 13, padding: 0) {
+            VStack(spacing: 0) {
+                WindowChrome(title: L("pairing.windowTitle"), onClose: onClose)
+                HStack(alignment: .top, spacing: 0) {
+                    leftColumn
+                    rightColumn
+                }
             }
+            .frame(width: 512)
         }
-        .frame(width: 512)
-        .background(p.surface)
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(p.hair, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 13))
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 24)
         .hyphenThemed()
+        .hyphenDynamicTypeClamp()
     }
 
     // MARK: Left column
@@ -120,7 +120,7 @@ struct PairingWindowView: View {
         VStack(spacing: 14) {
             PairingQRCodeView(payload: qrPayload, size: 132)
             VStack(spacing: 3) {
-                Text("在手机上扫描")
+                Text(L("pairing.scanOnPhone"))
                     .font(.hyphenBody(11))
                     .foregroundColor(p.faint)
                 Text(address)
@@ -141,11 +141,11 @@ struct PairingWindowView: View {
             stepIndicator
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("确认两台设备的校验码一致")
+                Text(L("pairing.confirmTitle"))
                     .font(.hyphenTitle(17, weight: .semibold))
                     .tracking(-0.17)
                     .foregroundColor(p.text)
-                Text("若数字相同，即可在双方之间建立可信连接（SAS）。")
+                Text(L("pairing.confirmDetail"))
                     .font(.hyphenBody(12))
                     .lineSpacing(12 * 0.5)
                     .foregroundColor(p.dim)
@@ -158,10 +158,10 @@ struct PairingWindowView: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 10) {
-                Button("一致，建立信任", action: onConfirm)
+                Button(L("pairing.match"), action: onConfirm)
                     .buttonStyle(AccentButtonStyle())
                     .disabled(!awaitingConfirmation)
-                Button("不一致", action: onReject)
+                Button(L("pairing.mismatch"), action: onReject)
                     .buttonStyle(DangerTextButtonStyle())
                     .fixedSize()
                     .disabled(!awaitingConfirmation)
@@ -173,11 +173,11 @@ struct PairingWindowView: View {
 
     private var stepIndicator: some View {
         HStack(spacing: 6) {
-            PairingStepBadge(kind: .done, number: "1", label: "扫码")
+            PairingStepBadge(kind: .done, number: "1", label: L("pairing.step.scan"))
             Rectangle().fill(p.hair2).frame(width: 14, height: 1)
-            PairingStepBadge(kind: .current, number: "2", label: "校验")
+            PairingStepBadge(kind: .current, number: "2", label: L("pairing.step.verify"))
             Rectangle().fill(p.hair2).frame(width: 14, height: 1)
-            PairingStepBadge(kind: .upcoming, number: "3", label: "完成")
+            PairingStepBadge(kind: .upcoming, number: "3", label: L("pairing.step.done"))
         }
     }
 

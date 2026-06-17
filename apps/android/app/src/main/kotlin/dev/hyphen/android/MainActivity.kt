@@ -1,29 +1,18 @@
 package dev.hyphen.android
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.provider.OpenableColumns
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.view.WindowInsets
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import android.app.AlertDialog
 import dev.hyphen.android.companion.AssociationController
 import dev.hyphen.android.companion.AssociationEvent
 import dev.hyphen.android.companion.CdmAssociationBackend
@@ -33,6 +22,7 @@ import dev.hyphen.android.diagnostics.RedactedDiagnosticsExporter
 import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
 import dev.hyphen.android.discovery.DiscoveryEvent
+import dev.hyphen.android.discovery.DiscoveryFailure
 import dev.hyphen.android.discovery.DiscoveryManager
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
@@ -77,17 +67,29 @@ import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.trust.AndroidTrustStores
 import dev.hyphen.android.trust.TrustedPeer
+import dev.hyphen.android.ui.ActivityEvent
+import dev.hyphen.android.ui.ConnectionState
+import dev.hyphen.android.ui.HyphenActions
+import dev.hyphen.android.ui.HyphenHome
+import dev.hyphen.android.ui.HyphenUiModel
+import dev.hyphen.android.ui.TextDirection
+import dev.hyphen.android.ui.TextKind
+import dev.hyphen.android.ui.TransferDirection
+import dev.hyphen.android.ui.theme.HyphenTheme
 import java.io.File
 import javax.net.ssl.SSLSocket
 
-// Native-view pre-alpha surface. Keep this dependency-free until the first
-// formal Android UI framework task decides whether Compose enters the app.
-class MainActivity : Activity() {
+// Compose host + controller (frontend UX plan Track B). The UI is Jetpack
+// Compose bound to `HyphenUiModel` (the Phase-0 observable model); this Activity
+// keeps the backend wiring (discovery, pairing/SAS, session, transfer, text,
+// notifications, diagnostics) and feeds the model structured `ActivityEvent`s.
+// The previous hand-built View hierarchy and its hardcoded timeline / fake
+// "已连接 · 延迟 18ms" summary are gone — the timeline and connection header now
+// render real state.
+class MainActivity : ComponentActivity() {
 
     private var manager: DiscoveryManager? = null
-    private lateinit var log: TextView
-    private lateinit var button: Button
-    private lateinit var betaDiagnosticsButton: Button
+    private var discoveryActive = false
     private val activeStateLock = Any()
     private var activeSession: ProtocolSession? = null
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
@@ -97,473 +99,74 @@ class MainActivity : Activity() {
     private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = LocalStructuredLogStore()
     private var lastTransferProgress: TransferProgress? = null
-    private val logBuffer = BoundedLineBuffer(MAX_LOG_LINES, "Hyphen 事件流")
+    // Empty until events arrive; the empty log card renders the localized
+    // R.string.log_empty placeholder instead of a hardcoded seed line.
+    private val logBuffer = BoundedLineBuffer(MAX_LOG_LINES)
     private val workerLock = Any()
     private val activeWorkers = mutableSetOf<Thread>()
     @Volatile
     private var activityDestroyed = false
+    private val model = HyphenUiModel()
     private val transferReceiver by lazy {
         TransferReceiver(FileTransferStorage(File(cacheDir, "transfers"))) { progress ->
             updateLastTransferProgress(progress)
             append(transferProgressLine(progress))
+            emit(transferProgressEvent(progress, TransferDirection.INCOMING))
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        log = bodyText(logBuffer.render()).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 12f
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(HYPHEN_CARD_2, 14, HYPHEN_HAIR)
+        refreshPairingState()
+        model.setBetaDiagnostics(betaDiagnosticsEnabled())
+        model.updateNotificationPrivacyLabel(notificationPrivacyStatus(HyphenNotificationListenerRuntime.notificationPrivacyMode()))
+        model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
+        model.setLog(logBuffer.snapshot())
+        setContent {
+            HyphenTheme {
+                HyphenHome(model = model, actions = buildActions())
+            }
         }
-        button = hyphenButton("查找 Mac（20 秒）", primary = true) { startWindow() }
+    }
 
-        // Manual-endpoint fallback path (HYP-M1-006): works with mDNS
-        // disabled or the LAN permission denied. A pasted hyphen://pair
-        // payload takes the QR parse path (HYP-M2-010) — same code a
-        // camera scan will feed once the scanner-library decision lands.
-        val endpointInput = hyphenInput("host:port 或 hyphen://pair")
-        val connectButton = hyphenButton("手动连接 / 解析二维码") {
-            probeManualEndpoint(endpointInput.text.toString())
-        }
-
-        // CDM self-managed association PoC (HYP-M1-007).
-        val cdm = AssociationController(CdmAssociationBackend(this), ::renderCdm)
-        val associateButton = hyphenButton("创建系统关联") {
-            cdm.associate("Hyphen Mac")
-        }
-        val listButton = hyphenButton("列出并移除系统关联") {
-                val ids = cdm.associations()
+    private fun buildActions(): HyphenActions =
+        HyphenActions(
+            onFindMac = { startWindow() },
+            onManualConnect = { probeManualEndpoint(it) },
+            onCreateAssociation = { cdmController().associate("Hyphen Mac") },
+            onListAssociations = {
+                val controller = cdmController()
+                val ids = controller.associations()
                 append("associations: $ids")
-                ids.forEach(cdm::disassociate)
-        }
-        val managePeersButton = hyphenButton("管理已配对设备") {
-            showPeerManagement()
-        }
-
-        // Notification listener onboarding (HYP-M3-001): explicit user
-        // action, rationale before system settings, no payload forwarding yet.
-        val notificationStatusButton = hyphenButton("检查通知使用权") {
-            append(notificationAccessLine())
-        }
-        val notificationSettingsButton = hyphenButton("开启通知镜像", primary = true) {
-            showNotificationAccessOnboarding()
-        }
-        lateinit var notificationPrivacyButton: Button
-        notificationPrivacyButton = hyphenButton(
-            notificationPrivacyButtonText(HyphenNotificationListenerRuntime.notificationPrivacyMode()),
-        ) {
-            val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
-                NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
-                NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.EXISTS_ONLY
-                NotificationPrivacyMode.EXISTS_ONLY -> NotificationPrivacyMode.SHOW_FULL
-            }
-            HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
-            notificationPrivacyButton.text = notificationPrivacyButtonText(next)
-            append("notification privacy: ${notificationPrivacyStatus(next)}")
-        }
-
-        val textInput = hyphenInput("发送文本或链接到 Mac…")
-        val sendTextButton = hyphenButton("发送文本 / 链接", primary = true) {
-            sendTextLink(textInput.text.toString())
-        }
-        val sendFileButton = hyphenButton("发送文件") {
-            pickFileToSend()
-        }
-        val cancelTransferButton = hyphenButton("取消当前传输") {
-            cancelActiveTransfer()
-        }
-        val previewDiagnosticsButton = hyphenButton("预览诊断") {
-            previewDiagnostics()
-        }
-        val exportDiagnosticsButton = hyphenButton("导出诊断包", primary = true) {
-            exportDiagnostics()
-        }
-        val deleteDiagnosticsButton = hyphenButton("删除日志") {
-            deleteDiagnostics()
-        }
-        betaDiagnosticsButton = hyphenButton(betaDiagnosticsButtonText()) {
-            toggleBetaDiagnostics()
-        }
-
-        setContentView(
-            buildHyphenHome(
-                endpointInput = endpointInput,
-                connectButton = connectButton,
-                associateButton = associateButton,
-                listButton = listButton,
-                managePeersButton = managePeersButton,
-                notificationStatusButton = notificationStatusButton,
-                notificationSettingsButton = notificationSettingsButton,
-                notificationPrivacyButton = notificationPrivacyButton,
-                textInput = textInput,
-                sendTextButton = sendTextButton,
-                sendFileButton = sendFileButton,
-                cancelTransferButton = cancelTransferButton,
-                betaDiagnosticsButton = betaDiagnosticsButton,
-                previewDiagnosticsButton = previewDiagnosticsButton,
-                exportDiagnosticsButton = exportDiagnosticsButton,
-                deleteDiagnosticsButton = deleteDiagnosticsButton,
-            ),
+                ids.forEach(controller::disassociate)
+            },
+            onManagePeers = { showPeerManagement() },
+            onCheckNotificationAccess = {
+                append(notificationAccessLine())
+                model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
+            },
+            onOpenNotificationMirror = { showNotificationAccessOnboarding() },
+            onCycleNotificationPrivacy = { cycleNotificationPrivacy() },
+            onSendText = { sendTextLink(it) },
+            onSendFile = { pickFileToSend() },
+            onCancelTransfer = { cancelActiveTransfer() },
+            onToggleBetaDiagnostics = { toggleBetaDiagnostics() },
+            onPreviewDiagnostics = { previewDiagnostics() },
+            onExportDiagnostics = { exportDiagnostics() },
+            onDeleteDiagnostics = { deleteDiagnostics() },
         )
+
+    private fun cdmController(): AssociationController =
+        AssociationController(CdmAssociationBackend(this), ::renderCdm)
+
+    /** Push the current pairing identity into the model (launch / forget / reset). */
+    private fun refreshPairingState() {
+        val peer = runCatching {
+            AndroidTrustStores.openDefault(applicationContext).allPeers().firstOrNull()
+        }.getOrNull()
+        val name = peer?.displayName?.ifBlank { getString(R.string.conn_paired_fallback) }
+        emit(ActivityEvent.PeerChanged(isPaired = peer != null, peerName = name))
     }
-
-    private fun buildHyphenHome(
-        endpointInput: EditText,
-        connectButton: Button,
-        associateButton: Button,
-        listButton: Button,
-        managePeersButton: Button,
-        notificationStatusButton: Button,
-        notificationSettingsButton: Button,
-        notificationPrivacyButton: Button,
-        textInput: EditText,
-        sendTextButton: Button,
-        sendFileButton: Button,
-        cancelTransferButton: Button,
-        betaDiagnosticsButton: Button,
-        previewDiagnosticsButton: Button,
-        exportDiagnosticsButton: Button,
-        deleteDiagnosticsButton: Button,
-    ): View {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(28), dp(18), dp(28))
-        }
-        return ScrollView(this).apply {
-            isFillViewport = false
-            setBackgroundColor(HYPHEN_CANVAS)
-            clipToPadding = true
-            setOnApplyWindowInsetsListener { view, insets ->
-                val (top, bottom) = systemBarInsets(insets)
-                view.setPadding(0, top, 0, bottom)
-                insets
-            }
-            addView(
-                content,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            content.addView(brandHeader())
-            content.addView(connectionSummary())
-            content.addView(
-                card("时间线", "推荐信息流方向：通知、传输、文本与链接在同一上下文中出现。") {
-                    addView(timelineRow("微", "#1f9d57", "微信 · 张伟", "晚上一起吃饭吗？", "9:41"))
-                    addView(timelineRow("↓", null, "来自 Mac · 设计稿.pdf", "8.2 MB · 已保存到下载", "打开"))
-                    addView(timelineRow("↑", null, "链接已发送到 Mac", "github.com/hyphen/spec", "9:21"))
-                    addView(textInput, fullWidthParams(top = dp(10)))
-                    addView(buttonRow(sendTextButton, sendFileButton), fullWidthParams(top = dp(10)))
-                    addView(cancelTransferButton, fullWidthParams(top = dp(10)))
-                },
-            )
-            content.addView(
-                card("权限与配对", "逐项说明用途；本地网络发现失败时仍保留二维码或手动地址路径。") {
-                    addView(statusRow("本地网络", "在 Wi-Fi 上查找并连接你的 Mac，不扫描互联网。", "本地", button))
-                    addView(statusRow("手动配对", "粘贴 host:port 或 hyphen://pair 载荷，走同一条校验链路。", null, null))
-                    addView(endpointInput, fullWidthParams(top = dp(10)))
-                    addView(connectButton, fullWidthParams(top = dp(10)))
-                    addView(statusRow("系统关联", "系统伴侣设备管理器自管理关联 PoC。", "CDM", associateButton))
-                    addView(listButton, fullWidthParams(top = dp(10)))
-                    addView(managePeersButton, fullWidthParams(top = dp(10)))
-                },
-            )
-            content.addView(
-                card("通知镜像", "不保存通知历史；可在完整与隐藏内容之间切换。") {
-                    addView(statusRow("通知使用权", "显式跳转系统设置，开启后才读取通知。", "权限", notificationSettingsButton))
-                    addView(notificationStatusButton, fullWidthParams(top = dp(10)))
-                    addView(notificationPrivacyButton, fullWidthParams(top = dp(10)))
-                },
-            )
-            content.addView(
-                card("本地脱敏诊断", "默认本地保存并脱敏。无遥测、不自动上传。") {
-                    addView(statusRow("跟踪 ID", "选择加入；仅写入用户主动导出的诊断包。", "可审计", betaDiagnosticsButton))
-                    addView(buttonRow(previewDiagnosticsButton, exportDiagnosticsButton), fullWidthParams(top = dp(10)))
-                    addView(deleteDiagnosticsButton, fullWidthParams(top = dp(10)))
-                },
-            )
-            content.addView(
-                card("本机事件流", "协议、配对、传输与诊断操作会追加到这里。") {
-                    addView(log, fullWidthParams())
-                },
-            )
-        }
-    }
-
-    private fun brandHeader(): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(18))
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(markBlock(dp(16), dp(16), dp(5)))
-                    addView(
-                        View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 3) },
-                        LinearLayout.LayoutParams(dp(20), dp(4)).apply { leftMargin = dp(7); rightMargin = dp(7) },
-                    )
-                    addView(markBlock(dp(11), dp(18), dp(4)))
-                },
-            )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = "Hyphen—"
-                            setTextColor(HYPHEN_TEXT)
-                            textSize = 24f
-                            typeface = Typeface.DEFAULT_BOLD
-                        },
-                    )
-                    addView(captionText("本地优先 · 可审计 · Mac × Android 持续连接层"))
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    leftMargin = dp(14)
-                },
-            )
-        }
-
-    private fun connectionSummary(): View =
-        card("MacBook Pro", "同一 Wi-Fi · 延迟 18ms · 通知镜像开启", showTitle = false) {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(
-                View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 99) },
-                LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(13) },
-            )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(titleText("已连接"))
-                    addView(captionText("MacBook Pro · hyphen/0.3"))
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            addView(signalBars())
-        }
-
-    private fun card(
-        title: String,
-        subtitle: String? = null,
-        showTitle: Boolean = true,
-        body: LinearLayout.() -> Unit,
-    ): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(HYPHEN_CARD, 20, HYPHEN_HAIR)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(12) }
-            if (showTitle) {
-                addView(titleText(title))
-                if (subtitle != null) addView(captionText(subtitle), fullWidthParams(top = dp(3), bottom = dp(12)))
-            }
-            body()
-        }
-
-    private fun timelineRow(icon: String, iconColor: String?, title: String, detail: String, meta: String): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(HYPHEN_CARD_2, 16, HYPHEN_HAIR)
-            addView(
-                TextView(this@MainActivity).apply {
-                    text = icon
-                    gravity = Gravity.CENTER
-                    textSize = 14f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(Color.WHITE)
-                    background = rounded(iconColor?.let(Color::parseColor) ?: HYPHEN_SURFACE_3, 10)
-                },
-                LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(11) },
-            )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(bodyText(title).apply { typeface = Typeface.DEFAULT_BOLD })
-                    addView(captionText(detail))
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            addView(captionText(meta).apply {
-                typeface = Typeface.MONOSPACE
-                setTextColor(if (meta == "打开") HYPHEN_ACCENT else HYPHEN_FAINT)
-            })
-        }.withBottomMargin(dp(8))
-
-    private fun statusRow(title: String, detail: String, badge: String?, control: View?): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = rounded(HYPHEN_CARD_2, 16, HYPHEN_HAIR)
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        LinearLayout(this@MainActivity).apply {
-                            gravity = Gravity.CENTER_VERTICAL
-                            addView(bodyText(title).apply { typeface = Typeface.DEFAULT_BOLD })
-                            if (badge != null) addView(pill(badge), LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ).apply { leftMargin = dp(8) })
-                        },
-                    )
-                    addView(captionText(detail), fullWidthParams(top = dp(3)))
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-            if (control != null) {
-                addView(
-                    control,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        dp(42),
-                    ).apply { leftMargin = dp(12) },
-                )
-            }
-        }.withBottomMargin(dp(8))
-
-    private fun buttonRow(vararg buttons: Button): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            buttons.forEachIndexed { index, view ->
-                addView(
-                    view,
-                    LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                        if (index > 0) leftMargin = dp(9)
-                    },
-                )
-            }
-        }
-
-    private fun hyphenButton(text: String, primary: Boolean = false, onClick: () -> Unit): Button =
-        Button(this).apply {
-            this.text = text
-            isAllCaps = false
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            minHeight = dp(42)
-            minWidth = 0
-            setPadding(dp(12), 0, dp(12), 0)
-            setTextColor(if (primary) HYPHEN_ACCENT_INK else HYPHEN_TEXT)
-            background = rounded(if (primary) HYPHEN_ACCENT else HYPHEN_CARD_2, 12, if (primary) null else HYPHEN_HAIR_2)
-            setOnClickListener { onClick() }
-        }
-
-    private fun hyphenInput(hintText: String): EditText =
-        EditText(this).apply {
-            hint = hintText
-            setSingleLine(true)
-            textSize = 14f
-            setTextColor(HYPHEN_TEXT)
-            setHintTextColor(HYPHEN_DIM)
-            setPadding(dp(13), 0, dp(13), 0)
-            minHeight = dp(48)
-            background = rounded(HYPHEN_CARD_2, 14, HYPHEN_HAIR)
-        }
-
-    private fun titleText(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextColor(HYPHEN_TEXT)
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
-            includeFontPadding = true
-        }
-
-    private fun bodyText(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextColor(HYPHEN_TEXT)
-            textSize = 13f
-            includeFontPadding = true
-        }
-
-    private fun captionText(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextColor(HYPHEN_DIM)
-            textSize = 12f
-            includeFontPadding = true
-        }
-
-    private fun pill(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(HYPHEN_ACCENT_INK)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            background = rounded(HYPHEN_ACCENT, 6)
-        }
-
-    private fun markBlock(width: Int, height: Int, radius: Int): View =
-        View(this).apply {
-            background = rounded(HYPHEN_SURFACE_3, radius, HYPHEN_HAIR_2)
-            layoutParams = LinearLayout.LayoutParams(width, height)
-        }
-
-    private fun signalBars(): View =
-        LinearLayout(this).apply {
-            gravity = Gravity.BOTTOM
-            val heights = listOf(7, 12, 18)
-            heights.forEach { h ->
-                addView(
-                    View(this@MainActivity).apply { background = rounded(HYPHEN_ACCENT, 1) },
-                    LinearLayout.LayoutParams(dp(3), dp(h)).apply { leftMargin = dp(2) },
-                )
-            }
-        }
-
-    private fun rounded(color: Int, radius: Int, strokeColor: Int? = null): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dp(radius).toFloat()
-            if (strokeColor != null) setStroke(dp(1), strokeColor)
-        }
-
-    private fun fullWidthParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            topMargin = top
-            bottomMargin = bottom
-        }
-
-    private fun View.withBottomMargin(bottom: Int): View =
-        apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = bottom }
-        }
-
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun systemBarInsets(insets: WindowInsets): Pair<Int, Int> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bars = insets.getInsets(WindowInsets.Type.systemBars())
-            bars.top to bars.bottom
-        } else {
-            legacySystemBarInsets(insets)
-        }
-
-    @Suppress("DEPRECATION")
-    private fun legacySystemBarInsets(insets: WindowInsets): Pair<Int, Int> =
-        insets.systemWindowInsetTop to insets.systemWindowInsetBottom
 
     private data class ActiveStateSnapshot(
         val session: ProtocolSession?,
@@ -690,9 +293,15 @@ class MainActivity : Activity() {
         return true
     }
 
+    /** Emit a structured activity event into the observable model (on the UI thread). */
+    private fun emit(event: ActivityEvent) {
+        postToUi { model.apply(event) }
+    }
+
     override fun onResume() {
         super.onResume()
-        if (::log.isInitialized) append(notificationAccessLine())
+        append(notificationAccessLine())
+        model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
     }
 
     private fun renderCdm(event: AssociationEvent) {
@@ -716,20 +325,20 @@ class MainActivity : Activity() {
             val peers = store.allPeers()
             if (peers.isEmpty()) {
                 AlertDialog.Builder(this)
-                    .setTitle("Paired devices")
-                    .setMessage("No trusted peers are stored on this phone.")
-                    .setPositiveButton("OK", null)
+                    .setTitle(R.string.dlg_peers_title)
+                    .setMessage(R.string.dlg_peers_empty_msg)
+                    .setPositiveButton(R.string.dlg_ok, null)
                     .show()
                 return
             }
             AlertDialog.Builder(this)
-                .setTitle("Paired devices")
+                .setTitle(R.string.dlg_peers_title)
                 .setItems(peers.map(::peerLabel).toTypedArray()) { _, which ->
                     confirmForgetPeer(peers[which])
                 }
-                .setMessage("Tap a device to forget it, or reset all local trust.")
-                .setPositiveButton("Reset all") { _, _ -> confirmResetPeers(peers.size) }
-                .setNegativeButton("Close", null)
+                .setMessage(R.string.dlg_peers_list_msg)
+                .setPositiveButton(R.string.dlg_peers_reset_all) { _, _ -> confirmResetPeers(peers.size) }
+                .setNegativeButton(R.string.dlg_close, null)
                 .show()
         } catch (e: Exception) {
             append("peer management failed: ${e.message}")
@@ -738,38 +347,37 @@ class MainActivity : Activity() {
 
     private fun confirmForgetPeer(peer: TrustedPeer) {
         AlertDialog.Builder(this)
-            .setTitle("Forget ${peer.displayName.ifBlank { "peer" }}?")
-            .setMessage(
-                "This removes the pinned fingerprint ${fingerprintPrefix(peer.spkiFingerprint)}. " +
-                    "Pair again before this device can reconnect.",
-            )
-            .setPositiveButton("Forget") { _, _ ->
+            .setTitle(getString(R.string.dlg_forget_title, peer.displayName.ifBlank { getString(R.string.peer_unnamed) }))
+            .setMessage(getString(R.string.dlg_forget_msg, fingerprintPrefix(peer.spkiFingerprint)))
+            .setPositiveButton(R.string.dlg_forget_confirm) { _, _ ->
                 try {
                     val removed = AndroidTrustStores.openDefault(applicationContext).remove(peer.spkiFingerprint)
                     stopCurrentSessionAfterTrustChange()
                     append("peer forgotten: ${peer.displayName.ifBlank { "unnamed" }} removed=$removed")
+                    refreshPairingState()
                 } catch (e: Exception) {
                     append("peer forget failed: ${e.message}")
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dlg_cancel, null)
             .show()
     }
 
     private fun confirmResetPeers(count: Int) {
         AlertDialog.Builder(this)
-            .setTitle("Reset paired devices?")
-            .setMessage("This removes $count trusted peer(s). Pair again before any device can reconnect.")
-            .setPositiveButton("Reset") { _, _ ->
+            .setTitle(R.string.dlg_reset_title)
+            .setMessage(getString(R.string.dlg_reset_msg, count))
+            .setPositiveButton(R.string.dlg_reset_confirm) { _, _ ->
                 try {
                     AndroidTrustStores.openDefault(applicationContext).removeAll()
                     stopCurrentSessionAfterTrustChange()
                     append("paired devices reset: $count removed")
+                    refreshPairingState()
                 } catch (e: Exception) {
                     append("peer reset failed: ${e.message}")
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dlg_cancel, null)
             .show()
     }
 
@@ -779,10 +387,11 @@ class MainActivity : Activity() {
         resumeToken = null
         lastSessionId = null
         HyphenNotificationListenerRuntime.clearNotificationOutbox()
+        emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
     }
 
     private fun peerLabel(peer: TrustedPeer): String =
-        "${peer.displayName.ifBlank { "Unnamed peer" }} (${fingerprintPrefix(peer.spkiFingerprint)})"
+        "${peer.displayName.ifBlank { getString(R.string.peer_unnamed) }} (${fingerprintPrefix(peer.spkiFingerprint)})"
 
     private fun fingerprintPrefix(fingerprint: ByteArray): String =
         fingerprint.take(6).joinToString("") { "%02x".format(it) }
@@ -865,14 +474,15 @@ class MainActivity : Activity() {
             launchWorker("hyphen-close-pairing-socket") { runCatching { socket.close() } }
         }
         AlertDialog.Builder(this)
-            .setTitle("Confirm pairing code")
-            .setMessage("Code: ${gate.sas}\n\nTrust this Mac only if it shows the same code.")
-            .setPositiveButton("Codes match — trust") { _, _ ->
+            .setTitle(R.string.dlg_sas_title)
+            .setMessage(getString(R.string.dlg_sas_msg, gate.sas))
+            .setPositiveButton(R.string.dlg_sas_confirm) { _, _ ->
                 gate.confirm()
                 append("paired — fingerprint pinned (${gate.sas})")
+                emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_paired), System.currentTimeMillis()))
                 startSteadySession(qr, socket)
             }
-            .setNegativeButton("Reject") { _, _ ->
+            .setNegativeButton(R.string.dlg_sas_reject) { _, _ ->
                 gate.reject()
                 append("pairing rejected — nothing stored")
                 closeSocket()
@@ -922,6 +532,7 @@ class MainActivity : Activity() {
                             HyphenNotificationListenerRuntime.clearNotificationOutbox()
                         }
                         append("Mac session closed")
+                        emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
                     }
                 }
                 session = ProtocolSession(
@@ -936,6 +547,7 @@ class MainActivity : Activity() {
                     onProgress = { progress ->
                         updateLastTransferProgress(progress)
                         append(transferProgressLine(progress))
+                        emit(transferProgressEvent(progress, TransferDirection.OUTGOING))
                     },
                 )
                 val install = installActiveStateAndBindOutboxIfAlive(
@@ -954,9 +566,11 @@ class MainActivity : Activity() {
                     runCatching { session.stop() }
                     return@launchWorker
                 }
-                append(
-                    "session connected to ${handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"}",
-                )
+                val peerName = handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"
+                append("session connected to $peerName")
+                emit(ActivityEvent.PeerChanged(isPaired = true, peerName = peerName))
+                emit(ActivityEvent.ConnectionChanged(ConnectionState.CONNECTED, null))
+                emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))
             } catch (e: Exception) {
                 runCatching { socket.close() }
                 append("session failed: ${e.message}")
@@ -1011,6 +625,7 @@ class MainActivity : Activity() {
                 ).handle(envelope)
                 if (dismissResultId != null) {
                     append("notification dismiss result sent: $dismissResultId")
+                    emit(ActivityEvent.NotificationActionPerformed(getString(R.string.notif_action_name), getString(R.string.notif_action_cleared), System.currentTimeMillis()))
                     return
                 }
                 val replyResultId = NotificationReplyRequestHandler(
@@ -1019,6 +634,7 @@ class MainActivity : Activity() {
                 ).handle(envelope)
                 if (replyResultId != null) {
                     append("notification reply result sent: $replyResultId")
+                    emit(ActivityEvent.NotificationActionPerformed(getString(R.string.notif_action_name), getString(R.string.notif_action_replied), System.currentTimeMillis()))
                     return
                 }
                 if (envelope.type == NotificationProtocol.TYPE_PRIVACY_POLICY) {
@@ -1048,8 +664,19 @@ class MainActivity : Activity() {
                         // Debug surface keeps no copy; drop the temp file so completed
                         // transfers do not accumulate in the storage directory.
                         val line = transferCompletedLine(event.completed)
+                        val manifest = event.completed.manifest
                         event.completed.file.delete()
                         append(line)
+                        // The receiver only reaches Completed after every chunk's
+                        // SHA-256 verified, so the feed marks it verified.
+                        emit(ActivityEvent.TransferCompleted(
+                            fileId = manifest.fileId,
+                            filename = manifest.filename,
+                            sizeBytes = manifest.sizeBytes,
+                            direction = TransferDirection.INCOMING,
+                            verified = true,
+                            atMillis = System.currentTimeMillis(),
+                        ))
                     }
                     is TransferEvent.ResumeRequested -> {
                         if (session != null) {
@@ -1062,6 +689,7 @@ class MainActivity : Activity() {
                     is TransferEvent.Cancelled -> {
                         updateLastTransferProgress(null)
                         append("transfer cancelled: ${event.cancel.fileId}")
+                        emit(ActivityEvent.TransferCancelled(event.cancel.fileId, System.currentTimeMillis()))
                     }
                     TransferEvent.Ignored -> Unit
                 }
@@ -1154,13 +782,16 @@ class MainActivity : Activity() {
             addCategory(Intent.CATEGORY_OPENABLE)
         }
         try {
+            @Suppress("DEPRECATION")
             startActivityForResult(Intent.createChooser(intent, "Send file to Mac"), REQUEST_PICK_FILE)
         } catch (e: ActivityNotFoundException) {
             append("transfer/send: no file picker available")
         }
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_PICK_FILE) return
         val uri = data?.data
@@ -1204,6 +835,18 @@ class MainActivity : Activity() {
                     chunkSizeBytes = DEFAULT_TRANSFER_CHUNK_BYTES,
                 )
                 append("transfer/send started: ${manifest.filename} (${manifest.sizeBytes} bytes)")
+                // Surface the outgoing row immediately; chunk-ack progress follows.
+                emit(ActivityEvent.TransferProgressed(
+                    fileId = manifest.fileId,
+                    filename = manifest.filename,
+                    direction = TransferDirection.OUTGOING,
+                    completedBytes = 0,
+                    totalBytes = manifest.sizeBytes,
+                    completedChunks = 0,
+                    totalChunks = manifest.chunkCount,
+                    complete = false,
+                    atMillis = System.currentTimeMillis(),
+                ))
             } catch (e: Exception) {
                 append("transfer/send failed: ${e.message}")
             }
@@ -1249,7 +892,21 @@ class MainActivity : Activity() {
         )
         updateLastTransferProgress(null)
         append("transfer cancel sent: $id (${progress.filename})")
+        emit(ActivityEvent.TransferCancelled(progress.fileId, System.currentTimeMillis()))
     }
+
+    private fun transferProgressEvent(progress: TransferProgress, direction: TransferDirection): ActivityEvent =
+        ActivityEvent.TransferProgressed(
+            fileId = progress.fileId,
+            filename = progress.filename,
+            direction = direction,
+            completedBytes = progress.completedBytes,
+            totalBytes = progress.totalBytes,
+            completedChunks = progress.completedChunks,
+            totalChunks = progress.totalChunks,
+            complete = progress.isComplete,
+            atMillis = System.currentTimeMillis(),
+        )
 
     private fun transferProgressLine(progress: TransferProgress): String =
         "transfer ${progress.filename}: ${progress.completedBytes}/${progress.totalBytes} bytes " +
@@ -1261,9 +918,9 @@ class MainActivity : Activity() {
     private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
         val isUrl = request.message.kind == TextLinkKind.URL
         AlertDialog.Builder(this)
-            .setTitle(if (isUrl) "Open link from Mac?" else "Copy text from Mac?")
+            .setTitle(if (isUrl) R.string.dlg_link_title else R.string.dlg_text_title)
             .setMessage(request.message.value)
-            .setPositiveButton(if (isUrl) "Open" else "Copy") { _, _ ->
+            .setPositiveButton(if (isUrl) R.string.dlg_link_open else R.string.dlg_text_copy) { _, _ ->
                 textReceiver.resolve(request.messageId)
                 if (isUrl) {
                     openConfirmedLink(request.message.value)
@@ -1271,7 +928,7 @@ class MainActivity : Activity() {
                     copyConfirmedText(request.message.value)
                 }
             }
-            .setNegativeButton("Cancel") { _, _ ->
+            .setNegativeButton(R.string.dlg_cancel) { _, _ ->
                 textReceiver.resolve(request.messageId)
                 append("text/link declined")
             }
@@ -1282,6 +939,7 @@ class MainActivity : Activity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Hyphen text", value))
         append("text copied from Mac")
+        emit(ActivityEvent.Text(TextKind.TEXT, TextDirection.RECEIVED, value, System.currentTimeMillis()))
     }
 
     private fun openConfirmedLink(value: String) {
@@ -1293,6 +951,7 @@ class MainActivity : Activity() {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
             append("link opened from Mac")
+            emit(ActivityEvent.Text(TextKind.URL, TextDirection.RECEIVED, value, System.currentTimeMillis()))
         } catch (e: ActivityNotFoundException) {
             append("link open failed: ${e.message}")
         }
@@ -1319,6 +978,8 @@ class MainActivity : Activity() {
             try {
                 val id = TextLinkSender(ProtocolSessionTextLinkOutbox(session)).send(message)
                 append("text/link sent: $id")
+                val kind = if (message.kind == TextLinkKind.URL) TextKind.URL else TextKind.TEXT
+                emit(ActivityEvent.Text(kind, TextDirection.SENT, message.value, System.currentTimeMillis()))
             } catch (e: Exception) {
                 append("text/link send failed: ${e.message}")
             }
@@ -1332,18 +993,10 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Enable notification mirror")
-            .setMessage(
-                "Hyphen can read Android notification titles, actions, and content so " +
-                    "it can mirror them to your paired Mac over local TLS.\n\n" +
-                    "Notifications are not sent to a cloud relay, and Hyphen does not " +
-                    "store notification history. You can switch to hidden-body mode " +
-                    "after enabling if you want less detail on the Mac.\n\n" +
-                    "Hyphen never asks for SMS or Call Log access. You can turn " +
-                    "notification access off later in Android Settings.",
-            )
-            .setPositiveButton("Open settings") { _, _ -> openNotificationSettings() }
-            .setNegativeButton("Not now") { _, _ ->
+            .setTitle(R.string.dlg_notif_onboard_title)
+            .setMessage(R.string.dlg_notif_onboard_msg)
+            .setPositiveButton(R.string.dlg_notif_open_settings) { _, _ -> openNotificationSettings() }
+            .setNegativeButton(R.string.dlg_notif_not_now) { _, _ ->
                 append("notification access: settings not opened")
             }
             .show()
@@ -1365,14 +1018,22 @@ class MainActivity : Activity() {
             "component=${status.componentName}"
     }
 
-    private fun notificationPrivacyButtonText(mode: NotificationPrivacyMode): String =
-        "通知隐私：${notificationPrivacyStatus(mode)}"
+    private fun cycleNotificationPrivacy() {
+        val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
+            NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
+            NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.EXISTS_ONLY
+            NotificationPrivacyMode.EXISTS_ONLY -> NotificationPrivacyMode.SHOW_FULL
+        }
+        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
+        model.updateNotificationPrivacyLabel(notificationPrivacyStatus(next))
+        append("notification privacy: ${notificationPrivacyStatus(next)}")
+    }
 
     private fun notificationPrivacyStatus(mode: NotificationPrivacyMode): String =
         when (mode) {
-            NotificationPrivacyMode.SHOW_FULL -> "完整"
-            NotificationPrivacyMode.HIDE_BODY -> "隐藏内容"
-            NotificationPrivacyMode.EXISTS_ONLY -> "仅提示"
+            NotificationPrivacyMode.SHOW_FULL -> getString(R.string.privacy_full)
+            NotificationPrivacyMode.HIDE_BODY -> getString(R.string.privacy_hide_body)
+            NotificationPrivacyMode.EXISTS_ONLY -> getString(R.string.privacy_exists_only)
         }
 
     private fun toggleBetaDiagnostics() {
@@ -1382,18 +1043,13 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("开启 Beta 诊断？")
-            .setMessage(
-                "Beta 诊断默认关闭。\n\n" +
-                    "仅在排查 Beta 问题时开启。本地预览和导出可能包含用于关联失败的跟踪 ID；" +
-                    "通知正文、文件名、URL 和 IP 后缀仍会脱敏。\n\n" +
-                    "Hyphen 不会自动上传诊断。导出始终由用户主动触发，也可以随时关闭此项。",
-            )
-            .setPositiveButton("开启") { _, _ ->
+            .setTitle(R.string.dlg_beta_title)
+            .setMessage(R.string.dlg_beta_msg)
+            .setPositiveButton(R.string.dlg_beta_enable) { _, _ ->
                 setBetaDiagnosticsEnabled(true)
                 append("beta diagnostics: enabled")
             }
-            .setNegativeButton("取消") { _, _ ->
+            .setNegativeButton(R.string.dlg_cancel) { _, _ ->
                 append("beta diagnostics: unchanged (off)")
             }
             .show()
@@ -1404,29 +1060,22 @@ class MainActivity : Activity() {
             .edit()
             .putBoolean(PREF_BETA_DIAGNOSTICS_ENABLED, enabled)
             .apply()
-        renderBetaDiagnosticsButton()
+        model.setBetaDiagnostics(enabled)
     }
 
     private fun betaDiagnosticsEnabled(): Boolean =
         getSharedPreferences(DIAGNOSTICS_PREFS, Context.MODE_PRIVATE)
             .getBoolean(PREF_BETA_DIAGNOSTICS_ENABLED, false)
 
-    private fun renderBetaDiagnosticsButton() {
-        betaDiagnosticsButton.text = betaDiagnosticsButtonText()
-    }
-
-    private fun betaDiagnosticsButtonText(): String =
-        "Beta 诊断：${betaDiagnosticsStatus()}"
-
     private fun betaDiagnosticsStatus(): String =
-        if (betaDiagnosticsEnabled()) "开启" else "关闭"
+        getString(if (betaDiagnosticsEnabled()) R.string.diag_beta_on else R.string.diag_beta_off)
 
     private fun previewDiagnostics() {
         val json = diagnosticsExporter().previewJson()
         AlertDialog.Builder(this)
-            .setTitle("诊断预览")
+            .setTitle(R.string.dlg_diag_preview_title)
             .setMessage(json)
-            .setPositiveButton("OK", null)
+            .setPositiveButton(R.string.dlg_ok, null)
             .show()
         append("diagnostics preview: ${diagnosticLogs.snapshot().size} event(s), beta ${betaDiagnosticsStatus()}")
     }
@@ -1464,6 +1113,10 @@ class MainActivity : Activity() {
         packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
 
     private fun startWindow() {
+        if (discoveryActive) {
+            append("discovery already running")
+            return
+        }
         val m = DiscoveryManager(
             backend = AndroidNsdBackend(applicationContext),
             scheduler = HandlerScheduler(),
@@ -1474,7 +1127,7 @@ class MainActivity : Activity() {
         )
         manager = m
         if (m.start()) {
-            button.isEnabled = false
+            discoveryActive = true
             append("discovery started (${DiscoveryManager.SERVICE_TYPE})")
         }
     }
@@ -1484,10 +1137,22 @@ class MainActivity : Activity() {
             is DiscoveryEvent.ServiceResolved ->
                 append("resolved: ${event.service.name} @ ${event.service.host}:${event.service.port}")
             is DiscoveryEvent.ServiceLost -> append("lost: ${event.name}")
-            is DiscoveryEvent.Failed -> append("failure: ${event.reason}")
+            is DiscoveryEvent.Failed -> {
+                append("failure: ${event.reason}")
+                // START_FAILED unwinds without stopDiscovery() and STOP_FAILED
+                // replaces onStopped(), so neither emits WindowEnded — clear the
+                // in-progress latch here too, or the "Find Mac" button stays a
+                // silent no-op until the app restarts. RESOLVE_FAILED /
+                // ALREADY_RUNNING leave a window running, so they don't reset it.
+                if (event.reason == DiscoveryFailure.START_FAILED ||
+                    event.reason == DiscoveryFailure.STOP_FAILED
+                ) {
+                    postToUi { discoveryActive = false }
+                }
+            }
             is DiscoveryEvent.WindowEnded -> {
                 append("window ended, resolved=${event.resolvedCount}")
-                postToUi { button.isEnabled = true }
+                postToUi { discoveryActive = false }
             }
         }
     }
@@ -1495,7 +1160,7 @@ class MainActivity : Activity() {
     private fun append(line: String) {
         postToUi {
             logBuffer.append(line)
-            if (::log.isInitialized) log.text = logBuffer.render()
+            model.setLog(logBuffer.snapshot())
         }
     }
 
@@ -1513,17 +1178,6 @@ class MainActivity : Activity() {
     }
 
     private companion object {
-        const val HYPHEN_CANVAS = 0xFF101318.toInt()
-        const val HYPHEN_CARD = 0xFF1A1D23.toInt()
-        const val HYPHEN_CARD_2 = 0xFF23262E.toInt()
-        const val HYPHEN_SURFACE_3 = 0xFF2B3038.toInt()
-        const val HYPHEN_HAIR = 0x24FFFFFF
-        const val HYPHEN_HAIR_2 = 0x33FFFFFF
-        const val HYPHEN_TEXT = 0xFFE8EAEF.toInt()
-        const val HYPHEN_DIM = 0xFF9298A3.toInt()
-        const val HYPHEN_FAINT = 0xFF646A75.toInt()
-        const val HYPHEN_ACCENT = 0xFF2BC48F.toInt()
-        const val HYPHEN_ACCENT_INK = 0xFF04140D.toInt()
         const val DIAGNOSTICS_PREFS = "dev.hyphen.android.diagnostics"
         const val PREF_BETA_DIAGNOSTICS_ENABLED = "beta_diagnostics_enabled"
         const val REQUEST_PICK_FILE = 4201

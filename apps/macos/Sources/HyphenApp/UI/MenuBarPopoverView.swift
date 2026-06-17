@@ -1,32 +1,66 @@
 import SwiftUI
+import HyphenNotifications
 
 // Menu-bar popover · Variant 3 (时间线 / Timeline — the recommended direction
 // from Section B of the design). A connection header, a filter tab row, a
 // day-grouped activity timeline, and a footer. Built on the shared palette,
 // typography, and component foundation. Every new type is `MenuBar`-prefixed
 // to avoid collisions with sibling popover modules.
+//
+// The timeline is bound to `HyphenAppModel` at runtime via `MenuBarPopoverHost`;
+// the `MenuBarTimelineDay.sample` data below is preview-only.
 
 // MARK: - Filter tabs
 
 enum MenuBarTimelineFilter: String, CaseIterable, Identifiable {
-    case all = "全部"
-    case notifications = "通知"
-    case transfers = "传输"
+    case all
+    case notifications
+    case transfers
 
     var id: String { rawValue }
+
+    /// Localized pill label (the raw value stays a stable ASCII identifier).
+    var title: String {
+        switch self {
+        case .all: return L("popover.filter.all")
+        case .notifications: return L("popover.filter.notifications")
+        case .transfers: return L("popover.filter.transfers")
+        }
+    }
+}
+
+// MARK: - Notification routing reference
+
+/// The identity a timeline notification row needs to route a reply/dismiss back
+/// through `PairingController`. `replyAction*` is the first routable reply action
+/// (RemoteInput); `nil` means the notification has no reply affordance.
+struct MenuBarNotificationRef: Equatable {
+    let sbnKey: String
+    let appName: String
+    let sender: String
+    let replyActionIndex: Int?
+    let replyActionId: String?
+
+    var canReply: Bool { replyActionIndex != nil }
 }
 
 // MARK: - Timeline model
 
 enum MenuBarTimelineKind {
     /// A mirrored notification offering a quick reply (e.g. WeChat).
-    case reply(app: MenuBarAppBadge, sender: String, body: String, time: String)
-    /// A received file with verification metadata.
-    case fileReceived(name: String, meta: String)
-    /// An outbound link / text send.
+    case reply(app: MenuBarAppBadge, sender: String, body: String, time: String, ref: MenuBarNotificationRef)
+    /// A passive mirrored notification (e.g. Gmail) — no interactive affordance.
+    case notification(app: MenuBarAppBadge, title: String, detail: String, time: String)
+    /// An incoming file. `progress` non-nil → still receiving (shows a bar).
+    case fileReceived(name: String, meta: String, time: String, progress: Double?)
+    /// An outgoing file. `progress` non-nil → still sending (shows a bar).
+    case fileSent(name: String, meta: String, time: String, progress: Double?)
+    /// An outbound text / link send.
     case linkSent(title: String, detail: String, time: String)
-    /// A passive mirrored notification (e.g. Gmail).
-    case notification(app: MenuBarAppBadge, title: String, detail: String)
+    /// An inbound text / link the user accepted.
+    case linkReceived(title: String, detail: String, time: String)
+    /// A pairing / session audit note.
+    case pairing(text: String, time: String)
 }
 
 struct MenuBarAppBadge {
@@ -48,18 +82,20 @@ struct MenuBarTimelineItem: Identifiable {
         switch kind {
         case .reply, .notification:
             return [.all, .notifications]
-        case .fileReceived, .linkSent:
+        case .fileReceived, .fileSent, .linkSent, .linkReceived:
             return [.all, .transfers]
+        case .pairing:
+            return [.all]
         }
     }
 }
 
 struct MenuBarTimelineDay: Identifiable {
-    let id: UUID
+    let id: String
     let title: String
     let items: [MenuBarTimelineItem]
 
-    init(id: UUID = UUID(), title: String, items: [MenuBarTimelineItem]) {
+    init(id: String = UUID().uuidString, title: String, items: [MenuBarTimelineItem]) {
         self.id = id
         self.title = title
         self.items = items
@@ -67,7 +103,7 @@ struct MenuBarTimelineDay: Identifiable {
 }
 
 extension MenuBarTimelineDay {
-    /// Sample timeline matching the design's Variant 3 content.
+    /// Sample timeline matching the design's Variant 3 content (preview only).
     static let sample: [MenuBarTimelineDay] = [
         MenuBarTimelineDay(
             title: "今天",
@@ -76,11 +112,17 @@ extension MenuBarTimelineDay {
                     app: MenuBarAppBadge(label: "微", tint: .hex(0x1f9d57)),
                     sender: "微信 · 张伟",
                     body: "晚上一起吃饭吗？老地方见。",
-                    time: "9:41"
+                    time: "9:41",
+                    ref: MenuBarNotificationRef(
+                        sbnKey: "sample", appName: "微信", sender: "张伟",
+                        replyActionIndex: 0, replyActionId: nil
+                    )
                 )),
                 MenuBarTimelineItem(kind: .fileReceived(
                     name: "设计稿.pdf",
-                    meta: "8.2 MB · SHA‑256 校验通过"
+                    meta: "8.2 MB · SHA‑256 校验通过",
+                    time: "9:32",
+                    progress: nil
                 )),
                 MenuBarTimelineItem(kind: .linkSent(
                     title: "链接已发送",
@@ -95,7 +137,8 @@ extension MenuBarTimelineDay {
                 MenuBarTimelineItem(kind: .notification(
                     app: MenuBarAppBadge(label: "G", tint: .hex(0xd6453f)),
                     title: "Gmail",
-                    detail: "您的收据 · Figma 订阅"
+                    detail: "您的收据 · Figma 订阅",
+                    time: "18:03"
                 )),
             ]
         ),
@@ -106,36 +149,45 @@ extension MenuBarTimelineDay {
 
 struct MenuBarPopoverView: View {
     let state: HyphenConnectionState
+    let isPaired: Bool
     let deviceName: String
     let latencyMs: Int?
     let days: [MenuBarTimelineDay]
     let onPair: () -> Void
     let onSettings: () -> Void
-    let onSend: () -> Void
-    let onReply: (String) -> Void
-    let onDismiss: (String) -> Void
+    let onSendText: (String) -> Void
+    let onSendFile: () -> Void
+    let onReply: (MenuBarNotificationRef) -> Void
+    let onDismiss: (MenuBarNotificationRef) -> Void
 
     @State private var filter: MenuBarTimelineFilter = .all
+    @State private var composing = false
+    @State private var draft = ""
+    @FocusState private var composeFocused: Bool
     @Environment(\.hyphenPalette) private var p
 
     init(
         state: HyphenConnectionState = .connected,
+        isPaired: Bool = true,
         deviceName: String = "Pixel 8 Pro",
-        latencyMs: Int? = 18,
+        latencyMs: Int? = nil,
         days: [MenuBarTimelineDay] = MenuBarTimelineDay.sample,
         onPair: @escaping () -> Void = {},
         onSettings: @escaping () -> Void = {},
-        onSend: @escaping () -> Void = {},
-        onReply: @escaping (String) -> Void = { _ in },
-        onDismiss: @escaping (String) -> Void = { _ in }
+        onSendText: @escaping (String) -> Void = { _ in },
+        onSendFile: @escaping () -> Void = {},
+        onReply: @escaping (MenuBarNotificationRef) -> Void = { _ in },
+        onDismiss: @escaping (MenuBarNotificationRef) -> Void = { _ in }
     ) {
         self.state = state
+        self.isPaired = isPaired
         self.deviceName = deviceName
         self.latencyMs = latencyMs
         self.days = days
         self.onPair = onPair
         self.onSettings = onSettings
-        self.onSend = onSend
+        self.onSendText = onSendText
+        self.onSendFile = onSendFile
         self.onReply = onReply
         self.onDismiss = onDismiss
     }
@@ -143,15 +195,24 @@ struct MenuBarPopoverView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            filterRow
-            timeline
-            footer
+            if isPaired {
+                filterRow
+                timeline
+                if composing {
+                    composeSheet
+                } else {
+                    footer
+                }
+            } else {
+                notPairedBody
+            }
         }
         .frame(width: 344)
         .background(p.surface)
         .clipShape(RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(p.hair, lineWidth: 1))
         .hyphenThemed()
+        .hyphenDynamicTypeClamp()
     }
 
     // MARK: Header
@@ -160,6 +221,7 @@ struct MenuBarPopoverView: View {
         HStack(spacing: 0) {
             HStack(spacing: 9) {
                 StatusDot(state: state)
+                    .accessibilityHidden(true)
                 Text(deviceName)
                     .font(.hyphenBody(13, weight: .semibold))
                     .foregroundColor(p.text)
@@ -169,15 +231,47 @@ struct MenuBarPopoverView: View {
                         .foregroundColor(p.dim)
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(L("popover.header.axLabel", deviceName, state.title))
             Spacer(minLength: 8)
             HStack(spacing: 7) {
                 MenuBarIconButton(glyph: "＋", kind: .accent, action: onPair)
+                    .accessibilityLabel(L("popover.pairNewDevice"))
                 MenuBarIconButton(glyph: "⚙", kind: .hairline, action: onSettings)
+                    .accessibilityLabel(L("popover.settings"))
             }
         }
         .padding(.horizontal, 15)
         .padding(.top, 12)
         .padding(.bottom, 10)
+    }
+
+    // MARK: Not-paired empty state
+
+    private var notPairedBody: some View {
+        VStack(spacing: 12) {
+            Text("⌁")
+                .font(.hyphenBody(34, weight: .regular))
+                .foregroundColor(p.faint)
+            Text(L("popover.notPaired.title"))
+                .font(.hyphenBody(14, weight: .semibold))
+                .foregroundColor(p.text)
+            Text(L("popover.notPaired.detail"))
+                .font(.hyphenBody(12))
+                .foregroundColor(p.dim)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: onPair) {
+                Text(L("popover.pairNewDevice"))
+            }
+            .buttonStyle(AccentButtonStyle(fontSize: 13))
+            .padding(.top, 2)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 6)
+        .padding(.bottom, 22)
+        .frame(maxWidth: .infinity)
+        .overlay(Hairline(), alignment: .top)
     }
 
     // MARK: Filter tabs
@@ -186,7 +280,7 @@ struct MenuBarPopoverView: View {
         HStack(spacing: 3) {
             ForEach(MenuBarTimelineFilter.allCases) { tab in
                 MenuBarFilterPill(
-                    title: tab.rawValue,
+                    title: tab.title,
                     isActive: filter == tab
                 ) { filter = tab }
             }
@@ -203,10 +297,7 @@ struct MenuBarPopoverView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if days.isEmpty {
-                    Text("暂无活动")
-                        .font(.hyphenBody(12))
-                        .foregroundColor(p.faint)
-                        .frame(maxWidth: .infinity, minHeight: 86)
+                    emptyState
                 } else {
                     ForEach(Array(days.enumerated()), id: \.element.id) { index, day in
                         Text(day.title)
@@ -233,6 +324,41 @@ struct MenuBarPopoverView: View {
         .frame(maxHeight: 330)
     }
 
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Text(emptyTitle)
+                .font(.hyphenBody(12, weight: .semibold))
+                .foregroundColor(p.dim)
+            Text(emptySubtitle)
+                .font(.hyphenBody(11))
+                .foregroundColor(p.faint)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 96)
+        .padding(.horizontal, 16)
+    }
+
+    private var emptyTitle: String {
+        switch state {
+        case .connected, .degraded: return L("popover.empty.title.idle")
+        case .reconnecting: return L("popover.empty.title.reconnecting")
+        case .discovering: return L("popover.empty.title.discovering")
+        case .sleeping: return L("popover.empty.title.sleeping")
+        case .suspended: return L("popover.empty.title.suspended")
+        }
+    }
+
+    private var emptySubtitle: String {
+        switch state {
+        case .connected: return L("popover.empty.sub.connected")
+        case .degraded: return L("popover.empty.sub.degraded")
+        case .reconnecting: return L("popover.empty.sub.reconnecting")
+        case .discovering: return L("popover.empty.sub.discovering")
+        case .sleeping: return L("popover.empty.sub.sleeping")
+        case .suspended: return L("popover.empty.sub.suspended")
+        }
+    }
+
     private var visibleDays: [MenuBarTimelineDay] {
         days.compactMap { day in
             let items = day.items.filter { $0.matches.contains(filter) }
@@ -246,22 +372,88 @@ struct MenuBarPopoverView: View {
         HStack {
             HStack(spacing: 6) {
                 Circle().fill(state.color(p)).frame(width: 7, height: 7)
-                Text(state == .connected ? "实时镜像" : state.title)
+                Text(state == .connected ? L("popover.footer.liveMirror") : state.title)
                     .font(.hyphenBody(12))
                     .foregroundColor(p.dim)
             }
             Spacer()
-            Button(action: onSend) {
-                Text("发送…")
+            Button {
+                draft = ""
+                composing = true
+                composeFocused = true
+            } label: {
+                Text(L("popover.footer.send"))
                     .font(.hyphenBody(12, weight: .semibold))
-                    .foregroundColor(p.accent)
+                    .foregroundColor(state == .connected ? p.accent : p.faint)
             }
             .buttonStyle(.plain)
+            .disabled(state != .connected)
+            .accessibilityLabel(L("popover.footer.sendAxLabel"))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(p.surface)
         .overlay(Hairline(), alignment: .top)
+    }
+
+    // MARK: Compose sheet (M-A4 — send promoted into the popover)
+
+    private var composeSheet: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L("popover.compose.sendTo", deviceName))
+                    .font(.hyphenBody(13, weight: .semibold))
+                    .foregroundColor(p.text)
+                Spacer()
+                Button {
+                    composing = false
+                    draft = ""
+                } label: {
+                    Text(L("common.cancel"))
+                        .font(.hyphenBody(12))
+                        .foregroundColor(p.dim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L("popover.compose.cancelAxLabel"))
+            }
+            TextField(L("popover.compose.placeholder"), text: $draft)
+                .textFieldStyle(.plain)
+                .font(.hyphenBody(13))
+                .foregroundColor(p.text)
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .background(p.surface2)
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(p.hair2, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .focused($composeFocused)
+                .onSubmit(submitDraft)
+            HStack(spacing: 8) {
+                Button(action: submitDraft) {
+                    Text(L("popover.compose.sendText"))
+                }
+                .buttonStyle(AccentButtonStyle(fontSize: 12))
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button {
+                    composing = false
+                    draft = ""
+                    onSendFile()
+                } label: {
+                    Text(L("popover.compose.sendFile"))
+                }
+                .buttonStyle(SecondaryButtonStyle(fontSize: 12))
+            }
+        }
+        .padding(14)
+        .background(p.surface)
+        .overlay(Hairline(), alignment: .top)
+    }
+
+    private func submitDraft() {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        composing = false
+        draft = ""
+        onSendText(trimmed)
     }
 }
 
@@ -310,6 +502,8 @@ private struct MenuBarFilterPill: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(L("popover.filter.axLabel", title))
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }
 }
 
@@ -317,23 +511,27 @@ private struct MenuBarFilterPill: View {
 
 private struct MenuBarTimelineRow: View {
     let item: MenuBarTimelineItem
-    let onReply: (String) -> Void
-    let onDismiss: (String) -> Void
+    let onReply: (MenuBarNotificationRef) -> Void
+    let onDismiss: (MenuBarNotificationRef) -> Void
     @Environment(\.hyphenPalette) private var p
 
     var body: some View {
         switch item.kind {
-        case let .reply(app, sender, body, time):
-            replyCard(app: app, sender: sender, body: body, time: time)
-        case let .fileReceived(name, meta):
+        case let .reply(app, sender, body, time, ref):
+            replyCard(app: app, sender: sender, body: body, time: time, ref: ref)
+        case let .notification(app, title, detail, time):
             simpleRow(
-                glyph: "↓",
-                glyphFg: p.accent,
-                title: name,
-                detail: meta,
-                detailMono: true,
-                trailing: { trailingLabel("显示", color: p.dim) }
+                glyphBadge: app,
+                title: title,
+                detail: detail,
+                detailMono: false,
+                trailing: { timeLabel(time) }
             )
+            .opacity(0.85)
+        case let .fileReceived(name, meta, time, progress):
+            transferRow(glyph: "↓", glyphFg: p.accent, name: name, meta: meta, time: time, progress: progress)
+        case let .fileSent(name, meta, time, progress):
+            transferRow(glyph: "↑", glyphFg: p.dim, name: name, meta: meta, time: time, progress: progress)
         case let .linkSent(title, detail, time):
             simpleRow(
                 glyph: "↑",
@@ -341,28 +539,47 @@ private struct MenuBarTimelineRow: View {
                 title: title,
                 detail: detail,
                 detailMono: true,
-                trailing: {
-                    Text(time)
-                        .font(.hyphenMono(11))
-                        .foregroundColor(p.faint)
-                }
+                trailing: { timeLabel(time) }
             )
-        case let .notification(app, title, detail):
+        case let .linkReceived(title, detail, time):
             simpleRow(
-                glyphBadge: app,
+                glyph: "↓",
+                glyphFg: p.accent,
                 title: title,
                 detail: detail,
-                detailMono: false,
-                trailing: { EmptyView() }
+                detailMono: true,
+                trailing: { timeLabel(time) }
             )
-            .opacity(0.8)
+        case let .pairing(text, time):
+            simpleRow(
+                glyph: "⌁",
+                glyphFg: p.faint,
+                title: text,
+                detail: "",
+                detailMono: false,
+                trailing: { timeLabel(time) }
+            )
+            .opacity(0.85)
         }
     }
 
+    private func timeLabel(_ time: String) -> some View {
+        Text(time)
+            .font(.hyphenMono(11))
+            .foregroundColor(p.faint)
+    }
+
     // Highlighted quick-reply card (WeChat).
-    private func replyCard(app: MenuBarAppBadge, sender: String, body: String, time: String) -> some View {
+    private func replyCard(
+        app: MenuBarAppBadge,
+        sender: String,
+        body: String,
+        time: String,
+        ref: MenuBarNotificationRef
+    ) -> some View {
         HStack(alignment: .top, spacing: 11) {
             AppGlyph(label: app.label, tint: app.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text(sender)
@@ -373,25 +590,29 @@ private struct MenuBarTimelineRow: View {
                         .font(.hyphenMono(11))
                         .foregroundColor(p.faint)
                 }
-                Text(body)
-                    .font(.hyphenBody(12))
-                    .foregroundColor(p.dim)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
+                if !body.isEmpty {
+                    Text(body)
+                        .font(.hyphenBody(12))
+                        .foregroundColor(p.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
                 HStack(spacing: 7) {
-                    Button { onReply(sender) } label: {
-                        Text("回复")
-                            .font(.hyphenBody(11, weight: .semibold))
-                            .foregroundColor(p.accentInk)
-                            .padding(.vertical, 5)
-                            .padding(.horizontal, 12)
-                            .background(p.accent)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    if ref.canReply {
+                        Button { onReply(ref) } label: {
+                            Text(L("popover.reply"))
+                                .font(.hyphenBody(11, weight: .semibold))
+                                .foregroundColor(p.accentInk)
+                                .padding(.vertical, 5)
+                                .padding(.horizontal, 12)
+                                .background(p.accent)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(L("popover.replyTo", ref.sender))
                     }
-                    .buttonStyle(.plain)
-                    Button { onDismiss(sender) } label: {
-                        Text("关闭")
+                    Button { onDismiss(ref) } label: {
+                        Text(L("popover.dismiss"))
                             .font(.hyphenBody(11, weight: .semibold))
                             .foregroundColor(p.text)
                             .padding(.vertical, 5)
@@ -399,7 +620,9 @@ private struct MenuBarTimelineRow: View {
                             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(p.hair2, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(L("popover.dismissAxLabel"))
                 }
+                .padding(.top, 8)
             }
         }
         .padding(.vertical, 9)
@@ -408,6 +631,46 @@ private struct MenuBarTimelineRow: View {
         .background(p.surface2)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.bottom, 6)
+    }
+
+    // Transfer row with optional progress bar (active) or completion meta.
+    private func transferRow(
+        glyph: String,
+        glyphFg: Color,
+        name: String,
+        meta: String,
+        time: String,
+        progress: Double?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 11) {
+                glyphTile(glyph, fg: glyphFg)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(name)
+                        .font(.hyphenBody(13, weight: .semibold))
+                        .foregroundColor(p.text)
+                    Text(meta)
+                        .font(.hyphenMono(11))
+                        .foregroundColor(p.dim)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let progress {
+                    Text("\(Int(progress * 100))%")
+                        .font(.hyphenMono(12, weight: .semibold))
+                        .foregroundColor(p.accent)
+                } else {
+                    timeLabel(time)
+                }
+            }
+            if let progress {
+                TransferProgressBar(value: progress, tint: p.accent)
+            }
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
     }
 
     // Generic single-line row with an arrow glyph tile.
@@ -454,21 +717,25 @@ private struct MenuBarTimelineRow: View {
     ) -> some View {
         HStack(spacing: 11) {
             leading
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.hyphenBody(13, weight: .semibold))
                     .foregroundColor(p.text)
-                Text(detail)
-                    .font(detailMono ? .hyphenMono(11) : .hyphenBody(12))
-                    .foregroundColor(p.dim)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(detailMono ? .hyphenMono(11) : .hyphenBody(12))
+                        .foregroundColor(p.dim)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             trailing
         }
         .padding(.vertical, 9)
         .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
     }
 
     private func glyphTile(_ glyph: String, fg: Color) -> AnyView {
@@ -480,12 +747,6 @@ private struct MenuBarTimelineRow: View {
                 .background(p.surface3)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         )
-    }
-
-    private func trailingLabel(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.hyphenBody(11, weight: .semibold))
-            .foregroundColor(color)
     }
 }
 
@@ -499,6 +760,13 @@ private struct MenuBarTimelineRow: View {
 
 #Preview("Timeline · Dark") {
     MenuBarPopoverView()
+        .padding(24)
+        .background(Color.black)
+        .environment(\.colorScheme, .dark)
+}
+
+#Preview("Not paired") {
+    MenuBarPopoverView(state: .suspended, isPaired: false, deviceName: "尚未配对", days: [])
         .padding(24)
         .background(Color.black)
         .environment(\.colorScheme, .dark)

@@ -19,7 +19,7 @@
          backups (threat model §3.3); keys are non-portable by design. -->
     <application
         android:allowBackup="false"
-        android:label="Hyphen"
+        android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity

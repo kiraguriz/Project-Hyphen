@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- English overlay (frontend UX plan B4). Mirrors every user-facing key in the
+     default zh resources; keep both files in sync when copy changes. -->
+<resources>
+    <string name="brand_tagline">Local-first · Auditable · Continuous Mac × Android link</string>
+
+    <!-- Connection header -->
+    <string name="conn_paired_fallback">Paired device</string>
+    <string name="conn_unpaired_title">Not paired</string>
+    <string name="conn_unpaired_subtitle">Scan the QR code or enter the Mac address to pair</string>
+    <string name="state_connected">Connected</string>
+    <string name="state_degraded">Unstable</string>
+    <string name="state_reconnecting">Reconnecting</string>
+    <string name="state_discovering">Searching</string>
+    <string name="state_sleeping">Asleep</string>
+    <string name="state_suspended">Suspended</string>
+    <string name="conn_subtitle_with_peer">%1$s · %2$s</string>
+
+    <!-- Timeline card -->
+    <string name="timeline_title">Timeline</string>
+    <string name="timeline_subtitle">Notifications, transfers, text, and links share one context.</string>
+    <string name="feed_today">Today</string>
+    <string name="feed_yesterday">Yesterday</string>
+    <string name="feed_date_month_day">%1$d/%2$d</string>
+    <string name="field_send_hint">Send text or a link to the Mac…</string>
+    <string name="btn_send_text">Send text / link</string>
+    <string name="btn_send_file">Send file</string>
+    <string name="btn_cancel_transfer">Cancel current transfer</string>
+
+    <!-- Empty timeline states -->
+    <string name="empty_unpaired_title">No paired device</string>
+    <string name="empty_unpaired_sub">Scan the QR code or enter an address to pair.</string>
+    <string name="empty_idle_title">No activity yet</string>
+    <string name="empty_idle_sub">Mirrored notifications, files, and links appear here.</string>
+    <string name="empty_reconnecting_title">Reconnecting…</string>
+    <string name="empty_reconnecting_sub">Restoring the link to your paired device.</string>
+    <string name="empty_discovering_title">Searching for devices…</string>
+    <string name="empty_discovering_sub">Looking for your paired Mac on the local network.</string>
+    <string name="empty_sleeping_title">Asleep</string>
+    <string name="empty_sleeping_sub">It will reconnect automatically on wake.</string>
+    <string name="empty_suspended_title">Connection suspended</string>
+    <string name="empty_suspended_sub">Paired, but there is no active session right now.</string>
+
+    <!-- Transfer rows -->
+    <string name="transfer_receiving">Receiving</string>
+    <string name="transfer_sending">Sending</string>
+    <string name="transfer_received_verified">%1$s · SHA‑256 verified</string>
+    <string name="transfer_received">%1$s · Received</string>
+    <string name="transfer_sent">%1$s · Sent</string>
+    <string name="transfer_cancelled">Cancelled</string>
+
+    <!-- Text / link rows -->
+    <string name="text_link_sent">Link sent to the Mac</string>
+    <string name="text_text_sent">Text sent to the Mac</string>
+    <string name="text_link_opened">Opened a link from the Mac</string>
+    <string name="text_text_copied">Copied text from the Mac</string>
+
+    <!-- Notification-action row -->
+    <string name="notif_action_subtitle">Performed locally at the Mac\'s request</string>
+    <string name="notif_action_name">Notification</string>
+    <string name="notif_action_cleared">Cleared</string>
+    <string name="notif_action_replied">Replied</string>
+
+    <!-- Pairing timeline notes -->
+    <string name="pairing_note_paired">Paired — fingerprint pinned</string>
+    <string name="pairing_note_connected">Connected to %1$s</string>
+
+    <!-- Connection-header accessibility -->
+    <string name="cd_connection_status">Connection status</string>
+
+    <!-- Permissions &amp; pairing card -->
+    <string name="perm_title">Permissions &amp; pairing</string>
+    <string name="perm_subtitle">QR and manual-address paths stay available when local discovery fails.</string>
+    <string name="perm_localnet_title">Local network</string>
+    <string name="perm_localnet_detail">Finds and connects to your Mac over Wi-Fi; never scans the internet.</string>
+    <string name="perm_localnet_badge">Local</string>
+    <string name="perm_btn_find_mac">Find Mac</string>
+    <string name="perm_manual_title">Manual pairing</string>
+    <string name="perm_manual_detail">Paste a host:port or hyphen://pair payload through the same verification path.</string>
+    <string name="perm_manual_hint">host:port or hyphen://pair</string>
+    <string name="perm_btn_manual_connect">Connect / parse QR</string>
+    <string name="perm_cdm_title">System association</string>
+    <string name="perm_cdm_detail">Self-managed Companion Device Manager association.</string>
+    <string name="perm_cdm_badge">CDM</string>
+    <string name="perm_btn_create_assoc">Create association</string>
+    <string name="perm_btn_list_assoc">List / remove associations</string>
+    <string name="perm_btn_manage_peers">Manage paired devices</string>
+
+    <!-- Notification-mirror card -->
+    <string name="notif_card_title">Notification mirror</string>
+    <string name="notif_card_subtitle">No notification history is stored; switch between full and hidden content.</string>
+    <string name="notif_access_title">Notification access</string>
+    <string name="notif_access_on_detail">Enabled · Hyphen can mirror notifications to the Mac.</string>
+    <string name="notif_access_off_detail">Jumps explicitly to system settings; notifications are read only after you enable it.</string>
+    <string name="notif_access_badge_on">Enabled</string>
+    <string name="notif_access_badge_off">Permission</string>
+    <string name="notif_btn_on">Enabled</string>
+    <string name="notif_btn_off">Enable notification mirror</string>
+    <string name="notif_btn_check">Check notification access</string>
+    <string name="notif_btn_privacy">Notification privacy: %1$s</string>
+    <string name="privacy_full">Full</string>
+    <string name="privacy_hide_body">Hide content</string>
+    <string name="privacy_exists_only">Existence only</string>
+
+    <!-- Diagnostics card -->
+    <string name="diag_title">Local redacted diagnostics</string>
+    <string name="diag_subtitle">Stored locally and redacted by default. No telemetry, no auto-upload.</string>
+    <string name="diag_trace_title">Trace IDs</string>
+    <string name="diag_trace_detail">Opt-in; written only to diagnostics you export yourself.</string>
+    <string name="diag_trace_badge">Auditable</string>
+    <string name="diag_btn_beta">Beta diagnostics: %1$s</string>
+    <string name="diag_beta_on">On</string>
+    <string name="diag_beta_off">Off</string>
+    <string name="diag_btn_preview">Preview diagnostics</string>
+    <string name="diag_btn_export">Export bundle</string>
+    <string name="diag_btn_delete">Delete logs</string>
+
+    <!-- Event-log card -->
+    <string name="log_title">Local event stream</string>
+    <string name="log_subtitle">Protocol, pairing, transfer, and diagnostics actions are appended here.</string>
+    <string name="log_empty">Hyphen event stream</string>
+
+    <!-- Dialogs: paired-device management -->
+    <string name="dlg_ok">OK</string>
+    <string name="dlg_cancel">Cancel</string>
+    <string name="dlg_close">Close</string>
+    <string name="peer_unnamed">Unnamed device</string>
+    <string name="dlg_peers_title">Paired devices</string>
+    <string name="dlg_peers_empty_msg">No trusted peers are stored on this phone.</string>
+    <string name="dlg_peers_list_msg">Tap a device to forget it, or reset all local trust.</string>
+    <string name="dlg_peers_reset_all">Reset all</string>
+    <string name="dlg_forget_title">Forget %1$s?</string>
+    <string name="dlg_forget_msg">This removes the pinned fingerprint %1$s. Pair again before this device can reconnect.</string>
+    <string name="dlg_forget_confirm">Forget</string>
+    <string name="dlg_reset_title">Reset paired devices?</string>
+    <string name="dlg_reset_msg">This removes %1$d trusted peer(s). Pair again before any device can reconnect.</string>
+    <string name="dlg_reset_confirm">Reset</string>
+
+    <!-- Dialogs: SAS pairing -->
+    <string name="dlg_sas_title">Confirm pairing code</string>
+    <string name="dlg_sas_msg">Code: %1$s\n\nTrust this Mac only if it shows the same code.</string>
+    <string name="dlg_sas_confirm">Codes match — trust</string>
+    <string name="dlg_sas_reject">Reject</string>
+
+    <!-- Dialogs: text / link confirmation -->
+    <string name="dlg_link_title">Open link from Mac?</string>
+    <string name="dlg_text_title">Copy text from Mac?</string>
+    <string name="dlg_link_open">Open</string>
+    <string name="dlg_text_copy">Copy</string>
+
+    <!-- Dialogs: notification onboarding -->
+    <string name="dlg_notif_onboard_title">Enable notification mirror</string>
+    <string name="dlg_notif_onboard_msg">Hyphen can read Android notification titles, actions, and content so it can mirror them to your paired Mac over local TLS.\n\nNotifications are not sent to a cloud relay, and Hyphen does not store notification history. You can switch to hidden-body mode after enabling if you want less detail on the Mac.\n\nHyphen never asks for SMS or Call Log access. You can turn notification access off later in Android Settings.</string>
+    <string name="dlg_notif_open_settings">Open settings</string>
+    <string name="dlg_notif_not_now">Not now</string>
+
+    <!-- Dialogs: beta diagnostics -->
+    <string name="dlg_beta_title">Turn on beta diagnostics?</string>
+    <string name="dlg_beta_msg">Beta diagnostics are off by default.\n\nTurn them on only while troubleshooting a beta issue. Local previews and exports may include trace IDs used to correlate failures; notification bodies, filenames, URLs, and IP suffixes stay redacted.\n\nHyphen never uploads diagnostics automatically. Exports are always user-initiated, and you can turn this off at any time.</string>
+    <string name="dlg_beta_enable">Turn on</string>
+
+    <!-- Dialogs: diagnostics preview -->
+    <string name="dlg_diag_preview_title">Diagnostics preview</string>
+</resources>

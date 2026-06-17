@@ -48,7 +48,7 @@ struct SettingsDeviceTrustCard: View {
                         // Trust and the pinned fingerprint are facts at this
                         // surface; live connection state is not plumbed here, so
                         // we don't claim "已连接".
-                        Text("已信任 · 指纹已固定")
+                        Text(L("settings.trust.status"))
                             .font(.hyphenBody(11))
                             .foregroundColor(p.accent)
                     }
@@ -58,7 +58,7 @@ struct SettingsDeviceTrustCard: View {
 
             // Pinned fingerprint box (auditable mono detail).
             VStack(alignment: .leading, spacing: 0) {
-                Text("指纹 已固定")
+                Text(L("settings.trust.fingerprintLabel"))
                 Text("SHA‑256 \(fingerprint)")
             }
             .font(.hyphenMono(11))
@@ -73,9 +73,9 @@ struct SettingsDeviceTrustCard: View {
 
             // Actions: rename (secondary) + revoke trust (red-outlined).
             HStack(spacing: 9) {
-                Button("重命名", action: onRename)
+                Button(L("settings.trust.rename"), action: onRename)
                     .buttonStyle(SettingsCompactSecondaryButtonStyle())
-                Button("撤销信任", action: onRevoke)
+                Button(L("settings.trust.revoke"), action: onRevoke)
                     .buttonStyle(SettingsRevokeButtonStyle())
             }
         }
@@ -119,10 +119,10 @@ struct SettingsDiagnosticsCard: View {
         VStack(alignment: .leading, spacing: 13) {
             // Title + privacy subtitle.
             VStack(alignment: .leading, spacing: 2) {
-                Text("诊断")
+                Text(L("settings.nav.diagnostics"))
                     .font(.hyphenTitle(14, weight: .semibold))
                     .foregroundColor(p.text)
-                Text("默认本地保存并脱敏。无遥测、不上传。")
+                Text(L("settings.diag.subtitle"))
                     .font(.hyphenBody(12))
                     .foregroundColor(p.dim)
                     .fixedSize(horizontal: false, vertical: true)
@@ -131,10 +131,10 @@ struct SettingsDiagnosticsCard: View {
             // Trace-ID opt-in row (off by default).
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("包含跟踪 ID")
+                    Text(L("settings.diag.traceTitle"))
                         .font(.hyphenBody(12, weight: .semibold))
                         .foregroundColor(p.text)
-                    Text("选择加入 · 仅用于导出")
+                    Text(L("settings.diag.traceDetail"))
                         .font(.hyphenBody(11))
                         .foregroundColor(p.faint)
                 }
@@ -160,13 +160,13 @@ struct SettingsDiagnosticsCard: View {
                     .foregroundColor(p.dim)
                 (
                     Text("peer=").foregroundColor(p.dim)
-                    + Text("[已脱敏]").foregroundColor(p.accent)
+                    + Text(L("diag.redacted")).foregroundColor(p.accent)
                     + Text(" ip=192.168.1.").foregroundColor(p.dim)
                     + Text("xxx").foregroundColor(p.accent)
                 )
                 (
                     Text("notif.body=").foregroundColor(p.dim)
-                    + Text("[已脱敏]").foregroundColor(p.accent)
+                    + Text(L("diag.redacted")).foregroundColor(p.accent)
                 )
             }
             .font(.hyphenMono(10.5))
@@ -180,9 +180,9 @@ struct SettingsDiagnosticsCard: View {
 
             // Actions: export (accent) + delete (hairline).
             HStack(spacing: 9) {
-                Button("导出诊断包", action: onExport)
+                Button(L("settings.diag.export"), action: onExport)
                     .buttonStyle(SettingsCompactAccentButtonStyle())
-                Button("删除日志", action: onDelete)
+                Button(L("settings.diag.delete"), action: onDelete)
                     .buttonStyle(SettingsHairlineButtonStyle())
             }
         }

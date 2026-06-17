@@ -1,0 +1,156 @@
+/* Default (zh-Hans) strings for the Hyphen menu-bar app. Frontend UX plan M-A6.
+   Auditable detail (fingerprints, SAS, IPs, sizes, timestamps, protocol IDs)
+   and preview/staged design fixtures are intentionally not localized.
+   Keep keys in sync with en.lproj. */
+
+/* Common */
+"common.cancel" = "取消";
+"common.ok" = "好";
+"common.notNow" = "暂不";
+
+/* Connection state (HyphenConnectionState.title) */
+"state.connected" = "已连接";
+"state.degraded" = "连接不稳定";
+"state.reconnecting" = "正在重新连接";
+"state.discovering" = "正在查找";
+"state.sleeping" = "Mac 已休眠";
+"state.suspended" = "已暂停";
+
+/* Connection peer-name fallback */
+"conn.pairedFallback" = "已配对设备";
+"conn.notPaired" = "尚未配对";
+
+/* Timeline day grouping */
+"feed.today" = "今天";
+"feed.yesterday" = "昨天";
+"feed.dateMonthDay" = "%1$d月%2$d日";
+
+/* Transfer rows */
+"transfer.receiving" = "接收中";
+"transfer.sending" = "发送中";
+"transfer.received.verified" = "%@ · SHA‑256 校验通过";
+"transfer.received" = "%@ · 已接收";
+"transfer.sent" = "%@ · 已发送";
+"transfer.cancelled" = "已取消";
+
+/* Text / link rows */
+"text.linkSent" = "链接已发送";
+"text.textSent" = "文本已发送";
+"text.linkOpened" = "已打开链接";
+"text.textCopied" = "已复制文本";
+
+/* Menu-bar popover */
+"popover.filter.all" = "全部";
+"popover.filter.notifications" = "通知";
+"popover.filter.transfers" = "传输";
+"popover.filter.axLabel" = "%@筛选";
+"popover.header.axLabel" = "%1$@，%2$@";
+"popover.pairNewDevice" = "配对新设备";
+"popover.settings" = "设置";
+"popover.notPaired.title" = "尚未配对设备";
+"popover.notPaired.detail" = "扫描二维码并核对 SAS 安全码，即可与 Android 设备建立加密连接。";
+"popover.empty.title.idle" = "暂无活动";
+"popover.empty.title.reconnecting" = "正在重新连接…";
+"popover.empty.title.discovering" = "正在查找设备…";
+"popover.empty.title.sleeping" = "Mac 已休眠";
+"popover.empty.title.suspended" = "连接已暂停";
+"popover.empty.sub.connected" = "镜像通知、文件与链接会显示在这里。";
+"popover.empty.sub.degraded" = "连接不稳定，仍在尝试同步。";
+"popover.empty.sub.reconnecting" = "正在恢复与已配对设备的连接。";
+"popover.empty.sub.discovering" = "正在局域网中查找已配对设备。";
+"popover.empty.sub.sleeping" = "唤醒后将自动重新连接。";
+"popover.empty.sub.suspended" = "已配对，但当前没有活动会话。";
+"popover.footer.liveMirror" = "实时镜像";
+"popover.footer.send" = "发送…";
+"popover.footer.sendAxLabel" = "发送文本或文件";
+"popover.compose.sendTo" = "发送到 %@";
+"popover.compose.cancelAxLabel" = "取消发送";
+"popover.compose.placeholder" = "文本或 https:// 链接";
+"popover.compose.sendText" = "发送文本/链接";
+"popover.compose.sendFile" = "发送文件…";
+"popover.reply" = "回复";
+"popover.replyTo" = "回复 %@";
+"popover.dismiss" = "关闭";
+"popover.dismissAxLabel" = "在手机上清除该通知";
+
+/* Settings window */
+"settings.nav.general" = "通用";
+"settings.nav.devices" = "设备";
+"settings.nav.notifications" = "通知隐私";
+"settings.nav.transfer" = "传输";
+"settings.nav.diagnostics" = "诊断";
+"settings.windowTitle" = "Hyphen 设置";
+"settings.device.placeholderTitle" = "尚无已配对的设备";
+"settings.device.placeholderDetail" = "点击菜单栏的「＋」配对一台 Android 设备。";
+"settings.comingSoon" = "%@设置即将提供";
+"settings.notif.title" = "通知镜像";
+"settings.notif.subtitle" = "在 Mac 上接收手机通知。不保存通知历史。";
+"settings.notif.perApp" = "逐应用隐私";
+"settings.notif.otherApps" = "其他应用";
+"settings.notif.otherAppsDetail" = "未单独设置的应用";
+"settings.trust.status" = "已信任 · 指纹已固定";
+"settings.trust.fingerprintLabel" = "指纹 已固定";
+"settings.trust.rename" = "重命名";
+"settings.trust.revoke" = "撤销信任";
+"settings.diag.subtitle" = "默认本地保存并脱敏。无遥测、不上传。";
+"settings.diag.traceTitle" = "包含跟踪 ID";
+"settings.diag.traceDetail" = "选择加入 · 仅用于导出";
+"settings.diag.export" = "导出诊断包";
+"settings.diag.delete" = "删除日志";
+
+/* Notification privacy modes */
+"privacy.full" = "完整";
+"privacy.hideBody" = "隐藏内容";
+"privacy.existsOnly" = "仅提示";
+
+/* Diagnostics redaction marker */
+"diag.redacted" = "[已脱敏]";
+
+/* Pairing window / controller */
+"pairing.waitingForPhone" = "等待手机连接…";
+"pairing.androidDevice" = "Android 设备";
+"pairing.windowTitle" = "配对新设备";
+"pairing.scanOnPhone" = "在手机上扫描";
+"pairing.confirmTitle" = "确认两台设备的校验码一致";
+"pairing.confirmDetail" = "若数字相同，即可在双方之间建立可信连接（SAS）。";
+"pairing.match" = "一致，建立信任";
+"pairing.mismatch" = "不一致";
+"pairing.step.scan" = "扫码";
+"pairing.step.verify" = "校验";
+"pairing.step.done" = "完成";
+"pairing.note.paired" = "已配对 — 指纹已固定";
+"pairing.note.connected" = "已连接到 %@";
+"pairing.status.dropped" = "配对连接已断开，请在手机上重试";
+
+/* Local-network permission dialog */
+"localnet.title" = "允许 Hyphen 在你的网络上查找设备？";
+"localnet.body1" = "Hyphen 会在你当前连接的 Wi‑Fi 上查找已配对的手机。接下来 macOS 会请求「本地网络」权限。";
+"localnet.body2" = "Hyphen 只查找你自己已配对的设备并直接连接——不会有任何数据离开你的网络。Hyphen 从不扫描互联网，也不上传任何网络信息。";
+"localnet.alt.prefix" = "也可以不授予此权限：";
+"localnet.alt.scanQR" = "扫描二维码";
+"localnet.alt.or" = "或";
+"localnet.alt.enterAddr" = "输入手机地址";
+"localnet.alt.suffix" = "同样可以配对。";
+"localnet.continue" = "继续";
+
+/* Local-network-denied banner */
+"denied.prefix" = "本地网络访问已关闭——改用二维码配对，或在";
+"denied.path" = "「系统设置 › 隐私与安全性 › 本地网络」";
+"denied.suffix" = "中启用 Hyphen。";
+
+/* Rename-device alert */
+"rename.title" = "重命名设备";
+"rename.body" = "设备重命名将在后续版本提供。";
+
+/* Menu-bar status lines */
+"menu.sendNeedsSession" = "发送需要活动会话";
+"menu.replyNeedsSession" = "回复需要活动会话";
+"menu.replyUnsupported" = "该通知不支持回复";
+"menu.dismissNeedsSession" = "清除需要活动会话";
+
+/* Notification reply composer */
+"reply.placeholder" = "回复 %@";
+"reply.title" = "回复 %@";
+"reply.body" = "仅对已测试支持 RemoteInput 的应用可用。回复在确认后发送到手机。";
+"reply.send" = "发送";
+"reply.cancelled" = "回复已取消";

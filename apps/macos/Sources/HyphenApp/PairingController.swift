@@ -40,11 +40,24 @@ final class PairingController: NSObject {
         DispatchQueue.main.async {
             self?.lastTransferProgress = progress
             self?.onStatus(Self.transferProgressLine(progress))
+            self?.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
         }
     }
     private let notificationPresenter = UserNotificationCenterPresenter()
+    // Mirrors every presented (post-scrub) notification into the activity feed
+    // while forwarding to the real system presenter. The receiver below talks to
+    // this decorator; `setReply/DismissHandler` still target `notificationPresenter`.
+    private lazy var feedNotificationPresenter = ActivityFeedNotificationPresenter(
+        wrapped: notificationPresenter,
+        onShow: { [weak self] request in
+            self?.emitActivity(.notificationPosted(request, at: Date()))
+        },
+        onRemove: { [weak self] identifier in
+            self?.emitActivity(.notificationRemoved(identifier: identifier, at: Date()))
+        }
+    )
     private lazy var notificationReceiver = NotificationMirrorReceiver(
-        presenter: notificationPresenter,
+        presenter: feedNotificationPresenter,
         replyActionsEnabled: { [weak self] in
             NotificationCapabilityGate.canPresentReplyActions(self?.activeCapabilities)
         },
@@ -54,16 +67,30 @@ final class PairingController: NSObject {
     )
     private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
+    private let onActivity: (ActivityEvent) -> Void
     private let notificationPrivacyPolicy: () -> NotificationPrivacyPolicy
 
     init(
         diagnosticLogs: LocalStructuredLogStore = LocalStructuredLogStore(),
         notificationPrivacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll },
+        onActivity: @escaping (ActivityEvent) -> Void = { _ in },
         onStatus: @escaping (String) -> Void
     ) {
         self.diagnosticLogs = diagnosticLogs
         self.notificationPrivacyPolicy = notificationPrivacyPolicy
+        self.onActivity = onActivity
         self.onStatus = onStatus
+    }
+
+    /// Emit a structured activity event to the app model on the main thread.
+    /// The model is the UI's source of truth; `onStatus` stays for the legacy
+    /// NSMenu state line.
+    private func emitActivity(_ event: ActivityEvent) {
+        if Thread.isMainThread {
+            onActivity(event)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.onActivity(event) }
+        }
     }
 
     var isActive: Bool { pairingWindow != nil }
@@ -189,8 +216,8 @@ final class PairingController: NSObject {
         // from the payload URI. SAS/peer fields fill in once a phone connects.
         pairingModel.address = "\(host):\(port)"
         pairingModel.qrPayload = payload.uriString
-        pairingModel.peerName = "等待手机连接…"
-        pairingModel.fingerprint = "等待手机连接…"
+        pairingModel.peerName = L("pairing.waitingForPhone")
+        pairingModel.fingerprint = L("pairing.waitingForPhone")
         pairingModel.sasCodes = ["··", "··", "··"]
         pairingModel.awaitingConfirmation = false
         resetPairingActions()
@@ -240,7 +267,7 @@ final class PairingController: NSObject {
         // The device-chosen name arrives with hello (M2-012); until then use a
         // neutral, accurate label. Identity is carried by the real fingerprint
         // below, not a fabricated model name.
-        pairingModel.peerName = "Android 设备"
+        pairingModel.peerName = L("pairing.androidDevice")
         pairingModel.fingerprint = Self.fingerprintLine(peerFingerprint)
         pairingModel.awaitingConfirmation = true
         pairingModel.onConfirm = { [weak self, gate] in
@@ -256,6 +283,7 @@ final class PairingController: NSObject {
                 }
                 let connection = self.takeProvisionalConnection()
                 self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
+                self.emitActivity(.pairingNote(message: L("pairing.note.paired"), at: Date()))
                 self.closePairingUI()
                 self.startSteadySession(
                     connection: connection,
@@ -359,10 +387,10 @@ final class PairingController: NSObject {
             guard let self, self.pairingModel.awaitingConfirmation else { return }
             self.pairingModel.awaitingConfirmation = false
             self.resetPairingActions()
-            self.pairingModel.peerName = "等待手机连接…"
-            self.pairingModel.fingerprint = "等待手机连接…"
+            self.pairingModel.peerName = L("pairing.waitingForPhone")
+            self.pairingModel.fingerprint = L("pairing.waitingForPhone")
             self.pairingModel.sasCodes = ["··", "··", "··"]
-            self.onStatus("配对连接已断开，请在手机上重试")
+            self.onStatus(L("pairing.status.dropped"))
         }
     }
 
@@ -416,6 +444,7 @@ final class PairingController: NSObject {
                             self?.notificationPresenter.setReplyHandler(nil)
                         }
                         self?.onStatus("Phone session closed")
+                        self?.onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
                     }
                 }
                 var config = ProtocolSession.Config()
@@ -441,6 +470,7 @@ final class PairingController: NSObject {
                             DispatchQueue.main.async {
                                 self?.lastTransferProgress = progress
                                 self?.onStatus(Self.transferProgressLine(progress))
+                                self?.onActivity(.transferProgress(progress, direction: .outgoing, at: Date()))
                             }
                         }
                     )
@@ -469,9 +499,23 @@ final class PairingController: NSObject {
                     self.syncNotificationPrivacyPolicy()
                     let name = handshake.peerDeviceName ?? "Android device"
                     self.onStatus("Connected to \(name)")
+                    self.onActivity(.peerChanged(isPaired: true, peerName: name))
+                    self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
+                    self.onActivity(.pairingNote(message: L("pairing.note.connected", name), at: Date()))
                 }
             }
         }
+    }
+
+    /// User-initiated reply from the popover timeline. Routes through the same
+    /// capability-gated path the system-notification quick reply uses.
+    func requestNotificationReply(sbnKey: String, actionIndex: Int, actionId: String?, text: String) {
+        sendNotificationReplyRequest(sbnKey: sbnKey, actionIndex: actionIndex, actionId: actionId, text: text)
+    }
+
+    /// User-initiated dismiss ("关闭") from the popover timeline.
+    func requestNotificationDismiss(sbnKey: String) {
+        sendNotificationDismissRequest(sbnKey: sbnKey)
     }
 
     private func sendNotificationDismissRequest(sbnKey: String) {
@@ -541,6 +585,12 @@ final class PairingController: NSObject {
             let id = TextLinkSender(outbox: ProtocolSessionTextLinkOutbox(session: session)).send(message)
             if let id {
                 onStatus("text/link sent: \(id)")
+                emitActivity(.text(
+                    kind: kind == .url ? .url : .text,
+                    direction: .sent,
+                    value: trimmed,
+                    at: Date()
+                ))
             } else {
                 onStatus("text/link send failed: session closed")
             }
@@ -572,6 +622,10 @@ final class PairingController: NSObject {
                 chunkSizeBytes: Self.defaultTransferChunkBytes
             )
             onStatus("transfer/send started: \(manifest.filename) (\(manifest.sizeBytes) bytes)")
+            // Surface the outgoing row immediately; chunk-ack progress follows.
+            if let progress = try? TransferProgress(manifest: manifest, completedChunks: 0) {
+                emitActivity(.transferProgress(progress, direction: .outgoing, at: Date()))
+            }
         } catch {
             onStatus("transfer/send rejected: \(error)")
         }
@@ -678,6 +732,16 @@ final class PairingController: NSObject {
                     DispatchQueue.main.async { [weak self] in
                         self?.lastTransferProgress = nil
                         self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes)")
+                        // The receiver only reaches `.completed` after every chunk's
+                        // SHA-256 verified, so the feed marks it verified.
+                        self?.onActivity(.transferCompleted(
+                            fileId: completed.manifest.fileId,
+                            filename: completed.manifest.filename,
+                            sizeBytes: completed.manifest.sizeBytes,
+                            direction: .incoming,
+                            verified: true,
+                            at: Date()
+                        ))
                     }
                 case .resumeRequested(let info):
                     let session = activeSession
@@ -693,6 +757,7 @@ final class PairingController: NSObject {
                     DispatchQueue.main.async { [weak self] in
                         self?.lastTransferProgress = nil
                         self?.onStatus("transfer cancelled: \(cancel.fileId)")
+                        self?.onActivity(.transferCancelled(fileId: cancel.fileId, at: Date()))
                     }
                 case .ignored:
                     break
@@ -863,10 +928,12 @@ final class PairingController: NSObject {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(request.message.value, forType: .string)
             onStatus("Text copied from Android")
+            emitActivity(.text(kind: .text, direction: .received, value: request.message.value, at: Date()))
         case .url:
             if let url = URL(string: request.message.value) {
                 NSWorkspace.shared.open(url)
                 onStatus("Link opened from Android")
+                emitActivity(.text(kind: .url, direction: .received, value: request.message.value, at: Date()))
             } else {
                 onStatus("Link rejected: invalid URL")
             }

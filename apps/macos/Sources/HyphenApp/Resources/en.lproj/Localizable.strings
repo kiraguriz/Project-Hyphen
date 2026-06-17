@@ -1,0 +1,154 @@
+/* English overlay for the Hyphen menu-bar app. Frontend UX plan M-A6.
+   Mirrors every key in the default zh-Hans.lproj; keep both in sync. */
+
+/* Common */
+"common.cancel" = "Cancel";
+"common.ok" = "OK";
+"common.notNow" = "Not now";
+
+/* Connection state (HyphenConnectionState.title) */
+"state.connected" = "Connected";
+"state.degraded" = "Unstable";
+"state.reconnecting" = "Reconnecting";
+"state.discovering" = "Searching";
+"state.sleeping" = "Mac is asleep";
+"state.suspended" = "Suspended";
+
+/* Connection peer-name fallback */
+"conn.pairedFallback" = "Paired device";
+"conn.notPaired" = "Not paired";
+
+/* Timeline day grouping */
+"feed.today" = "Today";
+"feed.yesterday" = "Yesterday";
+"feed.dateMonthDay" = "%1$d/%2$d";
+
+/* Transfer rows */
+"transfer.receiving" = "Receiving";
+"transfer.sending" = "Sending";
+"transfer.received.verified" = "%@ · SHA‑256 verified";
+"transfer.received" = "%@ · Received";
+"transfer.sent" = "%@ · Sent";
+"transfer.cancelled" = "Cancelled";
+
+/* Text / link rows */
+"text.linkSent" = "Link sent";
+"text.textSent" = "Text sent";
+"text.linkOpened" = "Link opened";
+"text.textCopied" = "Text copied";
+
+/* Menu-bar popover */
+"popover.filter.all" = "All";
+"popover.filter.notifications" = "Notifications";
+"popover.filter.transfers" = "Transfers";
+"popover.filter.axLabel" = "%@ filter";
+"popover.header.axLabel" = "%1$@, %2$@";
+"popover.pairNewDevice" = "Pair new device";
+"popover.settings" = "Settings";
+"popover.notPaired.title" = "No paired device";
+"popover.notPaired.detail" = "Scan the QR code and verify the SAS code to establish an encrypted connection with your Android device.";
+"popover.empty.title.idle" = "No activity yet";
+"popover.empty.title.reconnecting" = "Reconnecting…";
+"popover.empty.title.discovering" = "Searching for devices…";
+"popover.empty.title.sleeping" = "Mac is asleep";
+"popover.empty.title.suspended" = "Connection suspended";
+"popover.empty.sub.connected" = "Mirrored notifications, files, and links appear here.";
+"popover.empty.sub.degraded" = "The connection is unstable; still trying to sync.";
+"popover.empty.sub.reconnecting" = "Restoring the link to your paired device.";
+"popover.empty.sub.discovering" = "Looking for your paired device on the local network.";
+"popover.empty.sub.sleeping" = "It will reconnect automatically on wake.";
+"popover.empty.sub.suspended" = "Paired, but there is no active session right now.";
+"popover.footer.liveMirror" = "Live mirror";
+"popover.footer.send" = "Send…";
+"popover.footer.sendAxLabel" = "Send text or a file";
+"popover.compose.sendTo" = "Send to %@";
+"popover.compose.cancelAxLabel" = "Cancel sending";
+"popover.compose.placeholder" = "Text or an https:// link";
+"popover.compose.sendText" = "Send text / link";
+"popover.compose.sendFile" = "Send file…";
+"popover.reply" = "Reply";
+"popover.replyTo" = "Reply to %@";
+"popover.dismiss" = "Dismiss";
+"popover.dismissAxLabel" = "Clear this notification on the phone";
+
+/* Settings window */
+"settings.nav.general" = "General";
+"settings.nav.devices" = "Devices";
+"settings.nav.notifications" = "Notification privacy";
+"settings.nav.transfer" = "Transfer";
+"settings.nav.diagnostics" = "Diagnostics";
+"settings.windowTitle" = "Hyphen Settings";
+"settings.device.placeholderTitle" = "No paired device yet";
+"settings.device.placeholderDetail" = "Click “＋” in the menu bar to pair an Android device.";
+"settings.comingSoon" = "%@ settings coming soon";
+"settings.notif.title" = "Notification mirror";
+"settings.notif.subtitle" = "Receive phone notifications on your Mac. No notification history is stored.";
+"settings.notif.perApp" = "Per-app privacy";
+"settings.notif.otherApps" = "Other apps";
+"settings.notif.otherAppsDetail" = "Apps without a specific setting";
+"settings.trust.status" = "Trusted · fingerprint pinned";
+"settings.trust.fingerprintLabel" = "Fingerprint pinned";
+"settings.trust.rename" = "Rename";
+"settings.trust.revoke" = "Revoke trust";
+"settings.diag.subtitle" = "Stored locally and redacted by default. No telemetry, no upload.";
+"settings.diag.traceTitle" = "Include trace IDs";
+"settings.diag.traceDetail" = "Opt-in · for exports only";
+"settings.diag.export" = "Export bundle";
+"settings.diag.delete" = "Delete logs";
+
+/* Notification privacy modes */
+"privacy.full" = "Full";
+"privacy.hideBody" = "Hide content";
+"privacy.existsOnly" = "Existence only";
+
+/* Diagnostics redaction marker */
+"diag.redacted" = "[redacted]";
+
+/* Pairing window / controller */
+"pairing.waitingForPhone" = "Waiting for phone to connect…";
+"pairing.androidDevice" = "Android device";
+"pairing.windowTitle" = "Pair a new device";
+"pairing.scanOnPhone" = "Scan on your phone";
+"pairing.confirmTitle" = "Confirm the verification codes match";
+"pairing.confirmDetail" = "If the digits match, a trusted connection (SAS) is established between the two devices.";
+"pairing.match" = "They match — trust";
+"pairing.mismatch" = "They differ";
+"pairing.step.scan" = "Scan";
+"pairing.step.verify" = "Verify";
+"pairing.step.done" = "Done";
+"pairing.note.paired" = "Paired — fingerprint pinned";
+"pairing.note.connected" = "Connected to %@";
+"pairing.status.dropped" = "Pairing connection dropped — try again on your phone";
+
+/* Local-network permission dialog */
+"localnet.title" = "Let Hyphen find devices on your network?";
+"localnet.body1" = "Hyphen looks for your paired phone on the Wi‑Fi you're connected to. macOS will next ask for “Local Network” permission.";
+"localnet.body2" = "Hyphen only finds and connects to devices you have paired — no data leaves your network. Hyphen never scans the internet or uploads any network information.";
+"localnet.alt.prefix" = "You don't have to grant this — ";
+"localnet.alt.scanQR" = "scan the QR code";
+"localnet.alt.or" = " or ";
+"localnet.alt.enterAddr" = "enter the phone address";
+"localnet.alt.suffix" = " to pair instead.";
+"localnet.continue" = "Continue";
+
+/* Local-network-denied banner */
+"denied.prefix" = "Local network access is off — pair with the QR code instead, or enable Hyphen in ";
+"denied.path" = "System Settings › Privacy & Security › Local Network";
+"denied.suffix" = ".";
+
+/* Rename-device alert */
+"rename.title" = "Rename device";
+"rename.body" = "Device renaming will be available in a later version.";
+
+/* Menu-bar status lines */
+"menu.sendNeedsSession" = "Sending needs an active session";
+"menu.replyNeedsSession" = "Replying needs an active session";
+"menu.replyUnsupported" = "This notification doesn't support replies";
+"menu.dismissNeedsSession" = "Clearing needs an active session";
+
+/* Notification reply composer */
+"reply.placeholder" = "Reply to %@";
+"reply.title" = "Reply to %@";
+"reply.body" = "Available only for apps tested to support RemoteInput. Replies are sent to the phone after you confirm.";
+"reply.send" = "Send";
+"reply.cancelled" = "Reply cancelled";

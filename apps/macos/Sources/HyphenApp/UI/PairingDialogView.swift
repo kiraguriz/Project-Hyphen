@@ -42,33 +42,34 @@ struct PairingLocalNetworkDialogView: View {
                     .frame(width: 11, height: 16)
             }
 
-            Text("允许 Hyphen 在你的网络上查找设备？")
+            Text(L("localnet.title"))
                 .font(.hyphenTitle(18, weight: .semibold))
                 .tracking(-0.18)
                 .lineSpacing(18 * 0.35)
                 .foregroundColor(p.text)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Hyphen 会在你当前连接的 Wi‑Fi 上查找已配对的手机。接下来 macOS 会请求「本地网络」权限。")
+            Text(L("localnet.body1"))
                 .font(.hyphenBody(13))
                 .lineSpacing(13 * 0.65)
                 .foregroundColor(p.dim)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Hyphen 只查找你自己已配对的设备并直接连接——不会有任何数据离开你的网络。Hyphen 从不扫描互联网，也不上传任何网络信息。")
+            Text(L("localnet.body2"))
                 .font(.hyphenBody(13))
                 .lineSpacing(13 * 0.65)
                 .foregroundColor(p.dim)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Surface-2 info box: no-permission fallback.
+            // Surface-2 info box: no-permission fallback. Colored runs are kept
+            // separate so each localizes independently (spacing baked into runs).
             (
-                Text("也可以不授予此权限：")
+                Text(L("localnet.alt.prefix"))
                     .foregroundColor(p.faint)
-                + Text("扫描二维码").foregroundColor(p.text)
-                + Text("或").foregroundColor(p.faint)
-                + Text("输入手机地址").foregroundColor(p.text)
-                + Text("同样可以配对。").foregroundColor(p.faint)
+                + Text(L("localnet.alt.scanQR")).foregroundColor(p.text)
+                + Text(L("localnet.alt.or")).foregroundColor(p.faint)
+                + Text(L("localnet.alt.enterAddr")).foregroundColor(p.text)
+                + Text(L("localnet.alt.suffix")).foregroundColor(p.faint)
             )
             .font(.hyphenBody(12))
             .lineSpacing(12 * 0.6)
@@ -83,12 +84,12 @@ struct PairingLocalNetworkDialogView: View {
             HStack(spacing: 10) {
                 Spacer()
                 LocalNetworkDialogActionButton(
-                    title: "暂不",
+                    title: L("common.notNow"),
                     kind: .secondary,
                     action: onNotNow
                 )
                 LocalNetworkDialogActionButton(
-                    title: "继续",
+                    title: L("localnet.continue"),
                     kind: .accent,
                     action: onContinue
                 )
@@ -102,6 +103,7 @@ struct PairingLocalNetworkDialogView: View {
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 24)
         .hyphenThemed()
+        .hyphenDynamicTypeClamp()
     }
 }
 
@@ -210,10 +212,10 @@ struct PairingDeniedBanner: View {
                 .clipShape(Circle())
 
             (
-                Text("本地网络访问已关闭——改用二维码配对，或在")
+                Text(L("denied.prefix"))
                     .foregroundColor(p.text)
-                + Text("「系统设置 › 隐私与安全性 › 本地网络」").foregroundColor(p.dim)
-                + Text("中启用 Hyphen。").foregroundColor(p.text)
+                + Text(L("denied.path")).foregroundColor(p.dim)
+                + Text(L("denied.suffix")).foregroundColor(p.text)
             )
             .font(.hyphenBody(12))
             .lineSpacing(12 * 0.55)

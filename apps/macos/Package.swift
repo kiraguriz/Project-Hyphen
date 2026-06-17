@@ -6,6 +6,9 @@ import PackageDescription
 // session/trust responsibilities in M2.
 let package = Package(
     name: "Hyphen",
+    // Frontend UX plan M-A6 string localization: the app is Chinese-first, so
+    // zh-Hans is the default localization and en.lproj is the overlay.
+    defaultLocalization: "zh-Hans",
     platforms: [
         // Official support is macOS 15.1+; 14 is the best-effort floor
         // (plan §8.1) and the minimum SwiftPM platform we compile for.
@@ -23,7 +26,8 @@ let package = Package(
                 "HyphenText",
                 "HyphenTransport",
                 "HyphenTransfer",
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .target(name: "HyphenCore"),
         .target(
@@ -82,6 +86,10 @@ let package = Package(
         .testTarget(
             name: "HyphenPowerTests",
             dependencies: ["HyphenPower"]
+        ),
+        .testTarget(
+            name: "HyphenAppTests",
+            dependencies: ["HyphenApp"]
         ),
     ]
 )
