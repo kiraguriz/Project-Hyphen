@@ -99,17 +99,17 @@ struct SettingsDiagnosticsCard: View {
     /// returns the state actually in effect — the toggle reverts to this if the
     /// user declines, so the control can never disagree with what export does.
     var onRequestTraceIds: (Bool) -> Bool
-    @State private var includeTraceIds: Bool
+    @Binding private var includeTraceIds: Bool
 
     @Environment(\.hyphenPalette) private var p
 
     init(
-        includeTraceIds: Bool = false,
+        includeTraceIds: Binding<Bool> = .constant(false),
         onExport: @escaping () -> Void = {},
         onDelete: @escaping () -> Void = {},
         onRequestTraceIds: @escaping (Bool) -> Bool = { $0 }
     ) {
-        self._includeTraceIds = State(initialValue: includeTraceIds)
+        self._includeTraceIds = includeTraceIds
         self.onExport = onExport
         self.onDelete = onDelete
         self.onRequestTraceIds = onRequestTraceIds

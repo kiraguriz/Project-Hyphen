@@ -3,6 +3,7 @@ import SwiftUI
 import HyphenCore
 import HyphenDiagnostics
 import HyphenDiscovery
+import HyphenNotifications
 import HyphenPower
 import UniformTypeIdentifiers
 
@@ -76,6 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var statusMenu: NSMenu?
     private var settingsWindow: DesignWindowController?
+    // The settings pane is hoisted here so a window refresh (trace-ID consent,
+    // trust revoke/reset) preserves the user's current pane instead of resetting
+    // to the default. Updated via SettingsWindowView.onSelectionChange.
+    private var settingsSelection: SettingsNavSection = .notifications
+    // Cached notification-privacy policy. Built at launch and after each settings
+    // edit; the notification hot path reads this snapshot (off the main thread)
+    // instead of recomputing from UserDefaults per mirrored notification.
+    private let privacyPolicyLock = NSLock()
+    private var cachedNotificationPrivacyPolicy = NotificationPrivacyPolicy.allowAll
     // Outside-click dismissal for the popover. A global monitor only sees events
     // routed to *other* apps, so a click on the status button never reaches it —
     // which is exactly why this avoids the `.transient` race where the button
@@ -83,6 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        migrateNotificationPrivacyIfNeeded()
+        rebuildNotificationPrivacyCache()
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "⌁"
         item.button?.toolTip = "Hyphen \(HyphenCore.version) — pre-alpha"
@@ -133,13 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Left-click opens the SwiftUI Variant-3 popover; right-click / control
         // -click opens the full legacy menu so nothing is lost.
         statusMenu = menu
-        let popoverHost = NSHostingController(rootView: MenuBarPopoverView(
-            onPair: { [weak self] in self?.popover.performClose(nil); self?.beginPairing(self!.pairItem) },
-            onSettings: { [weak self] in self?.popover.performClose(nil); self?.openSettingsWindow() },
-            onSend: { [weak self] in self?.popover.performClose(nil); self?.presentSendChooser() },
-            onReply: { [weak self] _ in self?.stateItem.title = "回复需要活动会话（示例时间线）" },
-            onDismiss: { [weak self] _ in self?.stateItem.title = "清除需要活动会话（示例时间线）" }
-        ))
+        let popoverHost = NSHostingController(rootView: makeMenuBarPopoverView())
         popover.contentViewController = popoverHost
         popover.delegate = self
         item.button?.action = #selector(statusItemClicked(_:))
@@ -177,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let isSecondary = event?.type == .rightMouseUp
             || event?.modifierFlags.contains(.control) == true
         if isSecondary, let menu = statusMenu {
+            closePopover()
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
             return
         }
@@ -184,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             closePopover()
         } else {
             NSApp.activate(ignoringOtherApps: true)
+            popover.contentViewController = NSHostingController(rootView: makeMenuBarPopoverView())
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
             popoverMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.leftMouseDown, .rightMouseDown]
@@ -195,6 +204,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func closePopover() {
         popover.performClose(nil)
+    }
+
+    private func makeMenuBarPopoverView() -> MenuBarPopoverView {
+        let peer = currentTrustedPeer()
+        let hasSession = pairingController?.hasActiveSession == true
+        let state: HyphenConnectionState = peer == nil
+            ? .suspended
+            : (hasSession ? .connected : .suspended)
+        let name = peer.map { $0.displayName.isEmpty ? "已配对设备" : $0.displayName }
+            ?? "尚未配对"
+        return MenuBarPopoverView(
+            state: state,
+            deviceName: name,
+            latencyMs: nil,
+            days: [],
+            onPair: { [weak self] in
+                guard let self else { return }
+                self.closePopover()
+                self.beginPairing(self.pairItem)
+            },
+            onSettings: { [weak self] in
+                self?.closePopover()
+                self?.openSettingsWindow()
+            },
+            onSend: { [weak self] in
+                self?.closePopover()
+                self?.presentSendChooser()
+            },
+            onReply: { [weak self] _ in self?.stateItem.title = "回复需要活动会话" },
+            onDismiss: { [weak self] _ in self?.stateItem.title = "清除需要活动会话" }
+        )
     }
 
     private func openSettingsWindow() {
@@ -213,19 +253,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshSettingsWindow() {
+        guard let settingsWindow else { return }
+        settingsWindow.present { [weak settingsWindow] in
+            self.settingsView(onClose: { settingsWindow?.requestClose() })
+        }
+    }
+
     private func settingsView(onClose: @escaping () -> Void) -> SettingsWindowView {
-        let peer = (try? KeychainTrustStore().allPeers())?.first
+        let peer = currentTrustedPeer()
         return SettingsWindowView(
+            selection: settingsSelection,
+            mirroringEnabled: notificationMirroringEnabled(),
+            rows: notificationPrivacyRows(),
+            defaultMode: notificationDefaultMode(),
             deviceName: peer.map { $0.displayName.isEmpty ? "已配对设备" : $0.displayName },
-            fingerprint: peer.map { fingerprintPrefix($0.spkiFingerprint) },
+            fingerprint: peer.map { HyphenFingerprintDisplay.string(for: $0.spkiFingerprint, style: .shortPrefix) },
             includeTraceIds: betaDiagnosticsEnabled(),
             onClose: onClose,
-            onRevokeTrust: { [weak self] in self?.managePeers(self!.managePeersItem) },
+            onRevokeTrust: { [weak self] in
+                guard let self else { return }
+                self.managePeers(self.managePeersItem)
+            },
             onRenameDevice: { [weak self] in self?.presentRenameUnavailable() },
-            onExportDiagnostics: { [weak self] in self?.exportDiagnostics(self!.exportDiagnosticsItem) },
-            onDeleteDiagnostics: { [weak self] in self?.deleteDiagnostics(self!.deleteDiagnosticsItem) },
-            onRequestTraceIds: { [weak self] desired in self?.setBetaDiagnosticsWithConsent(desired) ?? false }
+            onExportDiagnostics: { [weak self] in
+                guard let self else { return }
+                self.exportDiagnostics(self.exportDiagnosticsItem)
+            },
+            onDeleteDiagnostics: { [weak self] in
+                guard let self else { return }
+                self.deleteDiagnostics(self.deleteDiagnosticsItem)
+            },
+            onRequestTraceIds: { [weak self] desired in self?.setBetaDiagnosticsWithConsent(desired) ?? false },
+            onNotificationPrivacyChange: { [weak self] enabled, defaultMode, rows in
+                self?.setNotificationPrivacy(mirroringEnabled: enabled, defaultMode: defaultMode, rows: rows)
+            },
+            onSelectionChange: { [weak self] section in self?.settingsSelection = section }
         )
+    }
+
+    private func currentTrustedPeer() -> TrustedPeer? {
+        (try? KeychainTrustStore().allPeers())?.first
+    }
+
+    private func notificationMirroringEnabled() -> Bool {
+        guard UserDefaults.standard.object(forKey: Self.notificationMirroringEnabledKey) != nil else {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: Self.notificationMirroringEnabledKey)
+    }
+
+    private func notificationDefaultMode() -> NotificationPrivacyMode {
+        guard let raw = UserDefaults.standard.string(forKey: Self.notificationDefaultModeKey),
+              let mode = NotificationPrivacyMode(rawValue: raw) else {
+            return SettingsAppPrivacyRow.defaultModeForOtherApps
+        }
+        return mode
+    }
+
+    private func storedPerPackageModes() -> [String: NotificationPrivacyMode] {
+        let raw = UserDefaults.standard.dictionary(forKey: Self.notificationPerPackageModesKey) as? [String: String] ?? [:]
+        return raw.reduce(into: [:]) { result, entry in
+            if let mode = NotificationPrivacyMode(rawValue: entry.value) {
+                result[entry.key] = mode
+            }
+        }
+    }
+
+    private func notificationPrivacyRows() -> [SettingsAppPrivacyRow] {
+        let storedModes = storedPerPackageModes()
+        return SettingsAppPrivacyRow.defaults.map { row in
+            var row = row
+            if let mode = storedModes[row.packageName] {
+                row.mode = mode
+            }
+            return row
+        }
+    }
+
+    private func setNotificationPrivacy(
+        mirroringEnabled: Bool,
+        defaultMode: NotificationPrivacyMode,
+        rows: [SettingsAppPrivacyRow]
+    ) {
+        UserDefaults.standard.set(mirroringEnabled, forKey: Self.notificationMirroringEnabledKey)
+        UserDefaults.standard.set(defaultMode.rawValue, forKey: Self.notificationDefaultModeKey)
+        let modes = Dictionary(uniqueKeysWithValues: rows.map { ($0.packageName, $0.mode.rawValue) })
+        UserDefaults.standard.set(modes, forKey: Self.notificationPerPackageModesKey)
+        rebuildNotificationPrivacyCache()
+        // Push the edited policy to a paired Android peer for source-side
+        // filtering (no-op unless a session is active and privacyPolicy was
+        // negotiated). The macOS receiver scrubber already uses the new cache.
+        pairingController?.syncNotificationPrivacyPolicy()
+    }
+
+    /// One-time migration from the unreleased single-dictionary format (which
+    /// stored the default under a "*" key) to explicit default + per-package
+    /// keys. Reads only when the new keys are absent and the old key is present.
+    private func migrateNotificationPrivacyIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Self.notificationDefaultModeKey) == nil,
+              defaults.object(forKey: Self.notificationPerPackageModesKey) == nil,
+              var legacy = defaults.dictionary(forKey: Self.legacyNotificationPrivacyModesKey) as? [String: String]
+        else { return }
+        let defaultRaw = legacy.removeValue(forKey: "*") ?? SettingsAppPrivacyRow.defaultModeForOtherApps.rawValue
+        defaults.set(defaultRaw, forKey: Self.notificationDefaultModeKey)
+        defaults.set(legacy, forKey: Self.notificationPerPackageModesKey)
+        defaults.removeObject(forKey: Self.legacyNotificationPrivacyModesKey)
+    }
+
+    private func computeNotificationPrivacyPolicy() -> NotificationPrivacyPolicy {
+        NotificationPrivacyPolicy(
+            isMirroringEnabled: notificationMirroringEnabled(),
+            defaultMode: notificationDefaultMode(),
+            perPackageModes: storedPerPackageModes()
+        )
+    }
+
+    /// Rebuild the cached policy. Called once at launch and after every settings
+    /// edit so the notification hot path reads a snapshot instead of recomputing
+    /// from `UserDefaults` (off the main thread) on every mirrored notification.
+    private func rebuildNotificationPrivacyCache() {
+        let policy = computeNotificationPrivacyPolicy()
+        privacyPolicyLock.lock()
+        cachedNotificationPrivacyPolicy = policy
+        privacyPolicyLock.unlock()
+    }
+
+    private func notificationPrivacyPolicy() -> NotificationPrivacyPolicy {
+        privacyPolicyLock.lock()
+        defer { privacyPolicyLock.unlock() }
+        return cachedNotificationPrivacyPolicy
     }
 
     private func presentRenameUnavailable() {
@@ -238,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentSendChooser() {
+        closePopover()
         let menu = NSMenu()
         menu.addItem(withTitle: "发送文件…", action: #selector(sendFile(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "发送文本 / 链接…", action: #selector(sendTextLink(_:)), keyEquivalent: "")
@@ -264,7 +423,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lnpGate.run(action: { [weak self] in
             guard let self else { return }
             if self.pairingController == nil {
-                self.pairingController = PairingController(diagnosticLogs: self.diagnosticLogs) { [weak self] status in
+                self.pairingController = PairingController(
+                    diagnosticLogs: self.diagnosticLogs,
+                    notificationPrivacyPolicy: { [weak self] in
+                        self?.notificationPrivacyPolicy() ?? .allowAll
+                    }
+                ) { [weak self] status in
                     self?.stateItem.title = status
                 }
             }
@@ -365,6 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let removed = try store.remove(fingerprint: peer.spkiFingerprint)
         pairingController?.endPairing()
         stateItem.title = "Forgot \(peer.displayName.isEmpty ? "peer" : peer.displayName) (removed=\(removed))"
+        refreshSettingsWindow()
     }
 
     private func confirmResetPeers(count: Int, store: KeychainTrustStore) {
@@ -384,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try store.removeAll()
             pairingController?.endPairing()
             stateItem.title = "Paired devices reset (\(count) removed)"
+            refreshSettingsWindow()
         } catch {
             stateItem.title = "Peer reset failed: \(error)"
         }
@@ -391,11 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func peerLabel(_ peer: TrustedPeer) -> String {
         let name = peer.displayName.isEmpty ? "Unnamed peer" : peer.displayName
-        return "\(name) (\(fingerprintPrefix(peer.spkiFingerprint)))"
-    }
-
-    private func fingerprintPrefix(_ fingerprint: Data) -> String {
-        fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()
+        return "\(name) (\(HyphenFingerprintDisplay.string(for: peer.spkiFingerprint, style: .shortPrefix)))"
     }
 
     @objc private func cancelActiveTransfer(_ sender: NSMenuItem) {
@@ -501,6 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setBetaDiagnosticsEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.betaDiagnosticsOptInKey)
         renderBetaDiagnosticsItem()
+        refreshSettingsWindow()
     }
 
     private func betaDiagnosticsEnabled() -> Bool {
@@ -583,6 +746,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static let betaDiagnosticsOptInKey = "dev.hyphen.betaDiagnostics.includeTraceIds"
+    private static let notificationMirroringEnabledKey = "dev.hyphen.notifications.mirroringEnabled"
+    private static let notificationDefaultModeKey = "dev.hyphen.notifications.defaultPrivacyMode"
+    private static let notificationPerPackageModesKey = "dev.hyphen.notifications.perPackagePrivacyModes"
+    private static let legacyNotificationPrivacyModesKey = "dev.hyphen.notifications.privacyModes"
 }
 
 extension AppDelegate: NSPopoverDelegate {

@@ -57,6 +57,13 @@ final class SasConfirmationGateTests: XCTestCase {
         XCTAssertEqual(try store.allPeers(), [])
     }
 
+    func testRejectedOutcomeIsNotTrusted() throws {
+        let gate = makeGate()
+
+        XCTAssertEqual(gate.reject(), .rejected)
+        XCTAssertNotEqual(try gate.confirm(), .trusted)
+    }
+
     func testDoubleConfirmIsIdempotent() throws {
         let gate = makeGate()
         try gate.confirm()

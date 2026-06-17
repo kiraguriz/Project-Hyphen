@@ -102,6 +102,20 @@ private struct HyphenThemedModifier: ViewModifier {
     }
 }
 
+#if canImport(AppKit)
+import AppKit
+
+extension HyphenPalette {
+    /// AppKit bridge for surfaces that must style a CALayer directly (an
+    /// NSButton-backed control such as the Local Network dialog buttons). The
+    /// SwiftUI tokens above stay the single source of truth — no parallel hex
+    /// values live in the call site.
+    func nsColor(_ keyPath: KeyPath<HyphenPalette, Color>) -> NSColor {
+        NSColor(self[keyPath: keyPath])
+    }
+}
+#endif
+
 extension Color {
     /// 0xRRGGBB literal → Color (sRGB).
     static func hex(_ value: UInt32) -> Color {

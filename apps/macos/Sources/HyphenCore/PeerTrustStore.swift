@@ -49,3 +49,28 @@ extension Data {
         self = data
     }
 }
+
+public enum HyphenFingerprintDisplayStyle {
+    case fullHex
+    case shortPrefix
+    case auditPreview
+}
+
+public enum HyphenFingerprintDisplay {
+    public static func string(
+        for fingerprint: Data,
+        style: HyphenFingerprintDisplayStyle
+    ) -> String {
+        let bytes = fingerprint.map { String(format: "%02x", $0) }
+        switch style {
+        case .fullHex:
+            return bytes.joined()
+        case .shortPrefix:
+            return bytes.prefix(6).joined()
+        case .auditPreview:
+            let head = bytes.prefix(4).joined(separator: ":")
+            let tail = bytes.suffix(1).joined()
+            return "SHA-256 · \(head):...:\(tail)"
+        }
+    }
+}

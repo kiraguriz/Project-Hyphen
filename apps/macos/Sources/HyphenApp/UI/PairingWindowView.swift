@@ -69,6 +69,7 @@ struct PairingWindowView: View {
     let peerName: String
     let fingerprint: String
     let qrPayload: String
+    let awaitingConfirmation: Bool
     var onClose: () -> Void
     var onConfirm: () -> Void
     var onReject: () -> Void
@@ -81,6 +82,7 @@ struct PairingWindowView: View {
         peerName: String = "Pixel 8 Pro",
         fingerprint: String = "SHA‑256 · 3A:9F:C2:7E:…:E2",
         qrPayload: String = "hyphen://pair?addr=192.168.1.24:7420",
+        awaitingConfirmation: Bool = true,
         onClose: @escaping () -> Void = {},
         onConfirm: @escaping () -> Void = {},
         onReject: @escaping () -> Void = {}
@@ -90,6 +92,7 @@ struct PairingWindowView: View {
         self.peerName = peerName
         self.fingerprint = fingerprint
         self.qrPayload = qrPayload
+        self.awaitingConfirmation = awaitingConfirmation
         self.onClose = onClose
         self.onConfirm = onConfirm
         self.onReject = onReject
@@ -157,9 +160,11 @@ struct PairingWindowView: View {
             HStack(spacing: 10) {
                 Button("一致，建立信任", action: onConfirm)
                     .buttonStyle(AccentButtonStyle())
+                    .disabled(!awaitingConfirmation)
                 Button("不一致", action: onReject)
                     .buttonStyle(DangerTextButtonStyle())
                     .fixedSize()
+                    .disabled(!awaitingConfirmation)
             }
         }
         .padding(22)

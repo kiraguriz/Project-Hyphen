@@ -63,12 +63,18 @@ public final class TLSEndpointListener {
         self.verifier = verifier
     }
 
-    /// - Parameter port: 0 picks an ephemeral port; read it from `state`.
+    /// - Parameters:
+    ///   - port: 0 picks an ephemeral port; read it from `state`.
+    ///   - onConnectionState: optional observer of every accepted connection's
+    ///     state transitions. `onConnection` only fires on `.ready`; this fires
+    ///     for all states (including `.failed`/`.cancelled`) so a caller can
+    ///     react to a provisional connection dropping before it is consumed.
     public func start(
         port: UInt16,
         queue: DispatchQueue,
         onState: @escaping (State) -> Void,
-        onConnection: @escaping (NWConnection) -> Void
+        onConnection: @escaping (NWConnection) -> Void,
+        onConnectionState: ((NWConnection, NWConnection.State) -> Void)? = nil
     ) throws {
         let parameters = TLSEndpoint.parameters(identity: identity, verifier: verifier, queue: queue)
         let listener = try NWListener(
@@ -93,6 +99,7 @@ public final class TLSEndpointListener {
         }
         listener.newConnectionHandler = { connection in
             connection.stateUpdateHandler = { connectionState in
+                onConnectionState?(connection, connectionState)
                 switch connectionState {
                 case .ready:
                     onConnection(connection)

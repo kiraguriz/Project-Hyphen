@@ -139,6 +139,146 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(presenter.shown[0].replyActions, [])
     }
 
+    func testGlobalPrivacyPolicySuppressesMirroring() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            privacyPolicy: { NotificationPrivacyPolicy(isMirroringEnabled: false) }
+        )
+
+        let action = try receiver.handle(
+            envelope(payload: payload(sbnKey: "0|com.chat|7|thread-123|10101", text: "secret"))
+        )
+
+        XCTAssertNil(action)
+        XCTAssertTrue(presenter.shown.isEmpty)
+    }
+
+    func testHideBodyPrivacyPolicyRemovesBodyTextAndReplyActions() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            privacyPolicy: {
+                NotificationPrivacyPolicy(perPackageModes: ["com.chat": .hideBody])
+            }
+        )
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "secret",
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
+                )
+            )
+        )
+
+        XCTAssertEqual(presenter.shown.count, 1)
+        XCTAssertEqual(presenter.shown[0].title, "Alice")
+        XCTAssertEqual(presenter.shown[0].body, "")
+        XCTAssertEqual(presenter.shown[0].packageName, "com.chat")
+        // A reply action label can leak content, so hideBody drops actions too.
+        XCTAssertEqual(presenter.shown[0].replyActions, [])
+    }
+
+    func testExistsOnlyPrivacyPolicyRemovesVisibleSourceContentAndActionsButKeepsIdentity() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            privacyPolicy: {
+                NotificationPrivacyPolicy(perPackageModes: ["com.chat": .existsOnly])
+            }
+        )
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "secret",
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
+                )
+            )
+        )
+
+        XCTAssertEqual(presenter.shown.count, 1)
+        XCTAssertEqual(presenter.shown[0].identifier, "hyphen.notification.0|com.chat|7|thread-123|10101")
+        XCTAssertEqual(presenter.shown[0].sbnKey, "0|com.chat|7|thread-123|10101")
+        XCTAssertEqual(presenter.shown[0].packageName, "Android")
+        XCTAssertEqual(presenter.shown[0].title, "Android notification")
+        XCTAssertEqual(presenter.shown[0].body, "")
+        XCTAssertNil(presenter.shown[0].category)
+        XCTAssertEqual(presenter.shown[0].replyActions, [])
+    }
+
+    func testDefaultPrivacyModeAppliesToUnknownPackages() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            privacyPolicy: {
+                NotificationPrivacyPolicy(defaultMode: .existsOnly)
+            }
+        )
+
+        _ = try receiver.handle(
+            envelope(payload: payload(sbnKey: "0|com.unknown|7|thread-123|10101", packageName: "com.unknown", text: "secret"))
+        )
+
+        XCTAssertEqual(presenter.shown.count, 1)
+        XCTAssertEqual(presenter.shown[0].title, "Android notification")
+        XCTAssertEqual(presenter.shown[0].body, "")
+        XCTAssertEqual(presenter.shown[0].packageName, "Android")
+    }
+
+    func testFullPrivacyModeKeepsReplyActionsUnderExistingCapabilityGate() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            replyActionsEnabled: { true },
+            privacyPolicy: {
+                NotificationPrivacyPolicy(perPackageModes: ["com.chat": .full])
+            }
+        )
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "secret",
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
+                )
+            )
+        )
+
+        // full mode defers reply visibility entirely to the capability gate.
+        XCTAssertEqual(
+            presenter.shown[0].replyActions,
+            [try NotificationReplyAction(actionIndex: 2, label: "Reply", actionId: "reply:1:reply:android.reply")]
+        )
+    }
+
+    func testHideBodyDropsReplyActionsEvenWhenCapabilityGateAllowsThem() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            replyActionsEnabled: { true },
+            privacyPolicy: {
+                NotificationPrivacyPolicy(perPackageModes: ["com.chat": .hideBody])
+            }
+        )
+
+        _ = try receiver.handle(
+            envelope(
+                payload: payload(
+                    sbnKey: "0|com.chat|7|thread-123|10101",
+                    text: "secret",
+                    replyActions: [["actionIndex": 2, "label": "Reply", "actionId": "reply:1:reply:android.reply"]]
+                )
+            )
+        )
+
+        XCTAssertEqual(presenter.shown[0].replyActions, [])
+    }
+
     func testRemovedClosesTheMappedMacNotificationIdentifier() throws {
         let presenter = RecordingNotificationPresenter()
         let receiver = NotificationMirrorReceiver(presenter: presenter)
@@ -401,14 +541,43 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertNil(outbox.type)
     }
 
+    func testPrivacyPolicySenderEmitsCanonicalPayloadShape() {
+        let outbox = RecordingDismissOutbox()
+        let policy = NotificationPrivacyPolicy(
+            isMirroringEnabled: true,
+            defaultMode: .existsOnly,
+            perPackageModes: [
+                "com.google.android.gm": .full,
+                "com.tencent.mm": .full,
+                "org.telegram.messenger": .hideBody,
+            ]
+        )
+
+        let id = NotificationPrivacyPolicySender(outbox: outbox).send(policy: policy)
+
+        XCTAssertEqual(id, "01JZ0000000000000000000001")
+        XCTAssertEqual(outbox.type, NotificationMirrorProtocol.typePrivacyPolicy)
+        XCTAssertEqual(outbox.capability, NotificationMirrorProtocol.capability)
+        XCTAssertEqual(outbox.requiresAck, true)
+        XCTAssertEqual(outbox.payload?["defaultMode"] as? String, "existsOnly")
+        // Per-package modes are an array of {packageName, mode}, sorted by package.
+        let perPackage = outbox.payload?["perPackageModes"] as? [[String: String]]
+        XCTAssertEqual(perPackage, [
+            ["packageName": "com.google.android.gm", "mode": "full"],
+            ["packageName": "com.tencent.mm", "mode": "full"],
+            ["packageName": "org.telegram.messenger", "mode": "hideBody"],
+        ])
+    }
+
     private func payload(
         sbnKey: String,
+        packageName: String = "com.chat",
         text: String,
         replyActions: [[String: Any]] = []
     ) -> [String: Any] {
         var payload: [String: Any] = [
             "sbnKey": sbnKey,
-            "packageName": "com.chat",
+            "packageName": packageName,
             "title": "Alice",
             "text": text,
             "category": "msg",

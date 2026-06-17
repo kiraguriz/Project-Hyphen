@@ -56,6 +56,9 @@ object SessionHandshake {
         fun notificationDismissEnabled(): Boolean =
             entries[CAPABILITY_NOTIFICATIONS]?.bool("dismiss", false) == true
 
+        fun notificationPrivacyPolicyEnabled(): Boolean =
+            entries[CAPABILITY_NOTIFICATIONS]?.bool("privacyPolicy", false) == true
+
         fun transferMaxChunkBytes(): Int? =
             ((entries[CAPABILITY_TRANSFER]?.get("maxChunkBytes") as? Json.Num)?.asLong())?.toInt()
 
@@ -69,6 +72,7 @@ object SessionHandshake {
                 result[CAPABILITY_NOTIFICATIONS] = Json.obj(
                     "reply" to Json.Str(minReply(local.string("reply", "off"), remote.string("reply", "off"))),
                     "dismiss" to Json.Bool(local.bool("dismiss", false) && remote.bool("dismiss", false)),
+                    "privacyPolicy" to Json.Bool(local.bool("privacyPolicy", false) && remote.bool("privacyPolicy", false)),
                 )
             }
             if (contains(CAPABILITY_TRANSFER) && peer.contains(CAPABILITY_TRANSFER)) {
@@ -122,6 +126,7 @@ object SessionHandshake {
                         CAPABILITY_NOTIFICATIONS to Json.obj(
                             "reply" to Json.Str("beta"),
                             "dismiss" to Json.Bool(true),
+                            "privacyPolicy" to Json.Bool(true),
                         ),
                         CAPABILITY_TRANSFER to Json.obj(
                             "resume" to Json.Bool(true),
@@ -304,6 +309,9 @@ object SessionHandshake {
                 }
                 if (options["dismiss"] != null && options["dismiss"] !is Json.Bool) {
                     throw HandshakeException("protocol/invalid-envelope", "notifications.v1.dismiss must be boolean")
+                }
+                if (options["privacyPolicy"] != null && options["privacyPolicy"] !is Json.Bool) {
+                    throw HandshakeException("protocol/invalid-envelope", "notifications.v1.privacyPolicy must be boolean")
                 }
             }
             CAPABILITY_TRANSFER -> {

@@ -1,6 +1,6 @@
 import SwiftUI
-import CoreImage
-import CoreImage.CIFilterBuiltins
+import AppKit
+import HyphenCore
 
 // Section C · macOS 配对与权限 — Local Network Permission onboarding.
 // A 1:1 port of the design handoff "Hyphen Apps.dc.html" lines 311–333:
@@ -82,12 +82,16 @@ struct PairingLocalNetworkDialogView: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                Button("暂不", action: onNotNow)
-                    .buttonStyle(SecondaryButtonStyle())
-                    .fixedSize()
-                Button("继续", action: onContinue)
-                    .buttonStyle(AccentButtonStyle())
-                    .fixedSize()
+                LocalNetworkDialogActionButton(
+                    title: "暂不",
+                    kind: .secondary,
+                    action: onNotNow
+                )
+                LocalNetworkDialogActionButton(
+                    title: "继续",
+                    kind: .accent,
+                    action: onContinue
+                )
             }
             .padding(.top, 2)
         }
@@ -98,6 +102,88 @@ struct PairingLocalNetworkDialogView: View {
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 24)
         .hyphenThemed()
+    }
+}
+
+private struct LocalNetworkDialogActionButton: NSViewRepresentable {
+    enum Kind {
+        case secondary
+        case accent
+    }
+
+    let title: String
+    let kind: Kind
+    let action: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.activate))
+        button.setButtonType(NSButton.ButtonType.momentaryPushIn)
+        button.bezelStyle = NSButton.BezelStyle.regularSquare
+        button.isBordered = false
+        button.focusRingType = NSFocusRingType.none
+        button.wantsLayer = true
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 58).isActive = true
+        button.setContentHuggingPriority(NSLayoutConstraint.Priority.required, for: NSLayoutConstraint.Orientation.horizontal)
+        button.setContentCompressionResistancePriority(
+            NSLayoutConstraint.Priority.required,
+            for: NSLayoutConstraint.Orientation.horizontal
+        )
+        applyStyle(to: button)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.title = title
+        applyStyle(to: button)
+    }
+
+    private func applyStyle(to button: NSButton) {
+        // Colors derive from the shared HyphenPalette (single source of truth);
+        // no hex literals are duplicated here.
+        let palette = HyphenPalette.forScheme(colorScheme)
+        let foreground = palette.nsColor(kind == .accent ? \.accentInk : \.text)
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: foreground
+            ]
+        )
+        button.layer?.cornerRadius = 9
+        button.layer?.masksToBounds = true
+        switch kind {
+        case .secondary:
+            button.layer?.backgroundColor = palette.nsColor(\.surface2).cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = palette.nsColor(\.hair2).cgColor
+        case .accent:
+            button.layer?.backgroundColor = palette.nsColor(\.accent).cgColor
+            button.layer?.borderWidth = 0
+            button.layer?.borderColor = nil
+        }
+        button.setAccessibilityTitle(title)
+        button.setAccessibilityLabel(title)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func activate() {
+            action()
+        }
     }
 }
 
@@ -169,8 +255,7 @@ struct PairingQRCodeView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
-                // Defensive fallback; CIFilter.qrCodeGenerator never fails for
-                // non-empty UTF-8 input, so this is effectively unreachable.
+                // Defensive fallback for the shared Core renderer so the SwiftUI view stays total.
                 Color.white
             }
         }
@@ -181,23 +266,8 @@ struct PairingQRCodeView: View {
         .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 4)
     }
 
-    private static let context = CIContext()
-
-    /// Generates the QR as a CGImage with dark modules tinted `#15171c` on a
-    /// white background. Returns nil only if the filter produced no output.
     private static func makeQRImage(from payload: String) -> CGImage? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(payload.utf8)
-        filter.correctionLevel = "M"
-        guard let output = filter.outputImage else { return nil }
-
-        // Recolor: false (modules) → #15171c, true (background) → white.
-        let colored = output.applyingFilter("CIFalseColor", parameters: [
-            "inputColor0": CIColor(red: 0x15 / 255.0, green: 0x17 / 255.0, blue: 0x1c / 255.0),
-            "inputColor1": CIColor(red: 1, green: 1, blue: 1)
-        ])
-
-        return context.createCGImage(colored, from: colored.extent)
+        QRCodeRenderer.image(for: payload)
     }
 }
 

@@ -16,6 +16,7 @@ object NotificationCapabilityGate {
         when (type) {
             NotificationProtocol.TYPE_DISMISS_REQUEST -> capabilities?.notificationDismissEnabled() == true
             NotificationProtocol.TYPE_REPLY_REQUEST -> capabilities?.notificationReplyEnabled() == true
+            NotificationProtocol.TYPE_PRIVACY_POLICY -> capabilities?.notificationPrivacyPolicyEnabled() == true
             else -> true
         }
 }

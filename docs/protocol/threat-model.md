@@ -50,6 +50,7 @@
 |---|---|---|---|
 | Notification bodies sniffed in transit | A1 | TLS 1.3 only; no plaintext mode exists | Designed |
 | Mirrored notifications visible on shared/unlocked Mac | A5 | Privacy modes: hide body per-app, "a notification exists" mode; macOS lock-screen preview settings documented in onboarding | Designed (HYP-M3-005) |
+| Hidden notification content still crosses the LAN | A1/A5 | Per-app privacy is enforced **source-side** when both peers negotiate `notifications.v1.privacyPolicy`: Android strips body/actions (`hideBody`) or all visible content (`existsOnly`) before serializing, so hidden content never leaves the phone. The macOS receiver applies the same per-app rules locally as defense-in-depth for older/unsynced peers (protocol §7.1.1) | Designed |
 | Anyone at the Mac can reply/dismiss on the phone | A5 | Documented explicitly: a paired Mac session ≈ phone notification access. Mitigations: per-feature capability toggle, per-app filters, instant peer revoke on the phone | Accepted + controls |
 | Notification history accumulates on Mac | A5 | **No persistent notification-history database**; mirror state is in-memory + OS notification center only | Frozen default (plan §7.7) |
 | Error/log strings leak notification content | A6 | Protocol rule: error `message` MUST NOT contain bodies/paths/addresses (§8); log redaction by default (HYP-M4-001) | Designed |

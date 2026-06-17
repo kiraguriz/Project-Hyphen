@@ -47,6 +47,10 @@
             },
             "dismiss": {
               "type": "boolean"
+            },
+            "privacyPolicy": {
+              "type": "boolean",
+              "description": "Source-side per-app privacy: when both peers advertise true, the Mac may send notification.privacy.policy and Android filters notification content before it crosses the LAN (negotiated additive option, ADR-0006)"
             }
           }
         },

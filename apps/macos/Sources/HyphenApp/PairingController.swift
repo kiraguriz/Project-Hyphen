@@ -20,12 +20,14 @@ final class PairingController: NSObject {
 
     private let queue = DispatchQueue(label: "hyphen-pairing")
     private var listener: TLSEndpointListener?
+    private var pairingAttemptID: UUID?
     // Section C pairing surface: the design SwiftUI window (QR + SAS) hosted in
     // a borderless window. Only the presentation changed here — the listener,
     // SAS gate, and session logic below are unchanged.
     private var pairingWindow: DesignWindowController?
     private let pairingModel = PairingWindowModel()
-    private var pendingFingerprint: Data?
+    private let provisionalLock = NSLock()
+    private var provisional = ProvisionalPairingState()
     private var provisionalConnection: NWConnection?
     private var activeSession: ProtocolSession?
     private var activeSessionToken: UUID?
@@ -45,42 +47,52 @@ final class PairingController: NSObject {
         presenter: notificationPresenter,
         replyActionsEnabled: { [weak self] in
             NotificationCapabilityGate.canPresentReplyActions(self?.activeCapabilities)
+        },
+        privacyPolicy: { [weak self] in
+            self?.notificationPrivacyPolicy() ?? .allowAll
         }
     )
     private let diagnosticLogs: LocalStructuredLogStore
     private let onStatus: (String) -> Void
+    private let notificationPrivacyPolicy: () -> NotificationPrivacyPolicy
 
     init(
         diagnosticLogs: LocalStructuredLogStore = LocalStructuredLogStore(),
+        notificationPrivacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll },
         onStatus: @escaping (String) -> Void
     ) {
         self.diagnosticLogs = diagnosticLogs
+        self.notificationPrivacyPolicy = notificationPrivacyPolicy
         self.onStatus = onStatus
     }
 
     var isActive: Bool { pairingWindow != nil }
+    var hasActiveSession: Bool { activeSession != nil }
 
     func beginPairing() {
-        guard pairingWindow == nil else {
-            pairingWindow?.present { [pairingModel, weak self] in
+        if let pairingWindow {
+            pairingWindow.present { [pairingModel, weak self] in
                 PairingWindowHost(model: pairingModel, onClose: { self?.endPairing() })
             }
+            return
+        }
+        guard listener == nil else {
+            onStatus("Pairing already starting")
             return
         }
         do {
             let deviceName = Host.current().localizedName ?? "Hyphen Mac"
             let identity = try KeychainIdentityStore().loadOrCreate(commonName: deviceName)
             let nonce = PairingNonce.random()
+            let attemptID = UUID()
+            pairingAttemptID = attemptID
+            cancelAndClearProvisionalConnection()
 
             // Provisional verifier: admit one unknown client and remember
             // its claimed fingerprint for the SAS transcript.
             let verifier = SPKIPinVerifier(isTrusted: { [weak self] fingerprint in
                 guard let self else { return false }
-                if self.pendingFingerprint == nil {
-                    self.pendingFingerprint = fingerprint
-                    return true
-                }
-                return false // one provisional peer at a time
+                return self.claimPendingFingerprint(fingerprint)
             })
 
             let listener = TLSEndpointListener(identity: identity, verifier: verifier)
@@ -91,23 +103,42 @@ final class PairingController: NSObject {
                 onState: { [weak self] state in
                     guard let self, case .listening(let port) = state else { return }
                     DispatchQueue.main.async {
-                        self.presentWindow(identity: identity, nonce: nonce, port: port, deviceName: deviceName)
+                        self.presentWindow(
+                            attemptID: attemptID,
+                            identity: identity,
+                            nonce: nonce,
+                            port: port,
+                            deviceName: deviceName
+                        )
                     }
                 },
                 onConnection: { [weak self] connection in
-                    guard let self, let peerFingerprint = self.pendingFingerprint else { return }
-                    self.provisionalConnection = connection
+                    guard let self, let peerFingerprint = self.acceptProvisionalConnection(connection) else {
+                        connection.cancel()
+                        return
+                    }
                     DispatchQueue.main.async {
                         self.presentSasConfirmation(
+                            attemptID: attemptID,
                             identity: identity,
                             nonce: nonce,
                             deviceName: deviceName,
                             peerFingerprint: peerFingerprint
                         )
                     }
+                },
+                onConnectionState: { [weak self] connection, state in
+                    switch state {
+                    case .failed, .cancelled:
+                        self?.releaseProvisionalConnection(connection)
+                    default:
+                        break
+                    }
                 }
             )
         } catch {
+            pairingAttemptID = nil
+            listener = nil
             onStatus("Pairing failed to start: \(error)")
         }
     }
@@ -121,14 +152,22 @@ final class PairingController: NSObject {
         lastTransferProgress = nil
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
-        provisionalConnection?.cancel()
-        provisionalConnection = nil
-        pendingFingerprint = nil
+        pairingAttemptID = nil
+        pairingModel.awaitingConfirmation = false
+        resetPairingActions()
+        cancelAndClearProvisionalConnection()
         pairingWindow?.close()
         pairingWindow = nil
     }
 
-    private func presentWindow(identity: DeviceIdentity, nonce: Data, port: UInt16, deviceName: String) {
+    private func presentWindow(
+        attemptID: UUID,
+        identity: DeviceIdentity,
+        nonce: Data,
+        port: UInt16,
+        deviceName: String
+    ) {
+        guard pairingAttemptID == attemptID else { return }
         guard let host = LocalIPv4.first() else {
             onStatus("Pairing needs a LAN IPv4 address — none found")
             endPairing()
@@ -154,6 +193,7 @@ final class PairingController: NSObject {
         pairingModel.fingerprint = "等待手机连接…"
         pairingModel.sasCodes = ["··", "··", "··"]
         pairingModel.awaitingConfirmation = false
+        resetPairingActions()
 
         let controller = DesignWindowController(onClosed: { [weak self] in
             // Closing the window aborts pairing; nothing was persisted unless
@@ -169,11 +209,13 @@ final class PairingController: NSObject {
     }
 
     private func presentSasConfirmation(
+        attemptID: UUID,
         identity: DeviceIdentity,
         nonce: Data,
         deviceName: String,
         peerFingerprint: Data
     ) {
+        guard pairingAttemptID == attemptID, pairingWindow != nil else { return }
         guard let transcript = PairingTranscript(
             nonce: nonce,
             macSpkiFingerprint: identity.spkiFingerprint,
@@ -201,28 +243,38 @@ final class PairingController: NSObject {
         pairingModel.peerName = "Android 设备"
         pairingModel.fingerprint = Self.fingerprintLine(peerFingerprint)
         pairingModel.awaitingConfirmation = true
-        pairingModel.onConfirm = { [weak self] in
+        pairingModel.onConfirm = { [weak self, gate] in
             guard let self else { return }
+            guard self.pairingModel.awaitingConfirmation else { return }
+            self.pairingModel.awaitingConfirmation = false
+            self.resetPairingActions()
             do {
-                try gate.confirm()
+                guard try gate.confirm() == .trusted else {
+                    self.onStatus("Pairing rejected — nothing stored")
+                    self.endPairing()
+                    return
+                }
+                let connection = self.takeProvisionalConnection()
                 self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
                 self.closePairingUI()
                 self.startSteadySession(
-                    connection: self.provisionalConnection,
+                    connection: connection,
                     deviceName: deviceName,
                     peerFingerprint: peerFingerprint
                 )
-                self.provisionalConnection = nil
-                self.pendingFingerprint = nil
             } catch {
                 self.onStatus("Trust store write failed: \(error)")
                 self.endPairing()
             }
         }
-        pairingModel.onReject = { [weak self] in
+        pairingModel.onReject = { [weak self, gate] in
+            guard let self else { return }
+            guard self.pairingModel.awaitingConfirmation else { return }
+            self.pairingModel.awaitingConfirmation = false
+            self.resetPairingActions()
             gate.reject()
-            self?.onStatus("Pairing rejected — nothing stored")
-            self?.endPairing()
+            self.onStatus("Pairing rejected — nothing stored")
+            self.endPairing()
         }
     }
 
@@ -242,17 +294,76 @@ final class PairingController: NSObject {
 
     /// "SHA‑256 · AA:BB:…:YY" preview from the pinned fingerprint bytes.
     private static func fingerprintLine(_ fingerprint: Data) -> String {
-        let hex = fingerprint.map { String(format: "%02X", $0) }
-        let head = hex.prefix(4).joined(separator: ":")
-        let tail = hex.suffix(1).joined()
-        return "SHA‑256 · \(head):…:\(tail)"
+        HyphenFingerprintDisplay.string(for: fingerprint, style: .auditPreview)
     }
 
     private func closePairingUI() {
         listener?.stop()
         listener = nil
+        pairingAttemptID = nil
+        pairingModel.awaitingConfirmation = false
+        resetPairingActions()
         pairingWindow?.close()
         pairingWindow = nil
+    }
+
+    private func resetPairingActions() {
+        pairingModel.onConfirm = {}
+        pairingModel.onReject = {}
+    }
+
+    private func claimPendingFingerprint(_ fingerprint: Data) -> Bool {
+        provisionalLock.lock()
+        defer { provisionalLock.unlock() }
+        return provisional.claimFingerprint(fingerprint)
+    }
+
+    private func acceptProvisionalConnection(_ connection: NWConnection) -> Data? {
+        provisionalLock.lock()
+        defer { provisionalLock.unlock() }
+        guard let peerFingerprint = provisional.attachConnection(ObjectIdentifier(connection)) else {
+            return nil
+        }
+        provisionalConnection = connection
+        return peerFingerprint
+    }
+
+    private func takeProvisionalConnection() -> NWConnection? {
+        provisionalLock.lock()
+        defer { provisionalLock.unlock() }
+        let connection = provisionalConnection
+        provisionalConnection = nil
+        provisional.reset()
+        return connection
+    }
+
+    private func cancelAndClearProvisionalConnection() {
+        let connection = takeProvisionalConnection()
+        connection?.cancel()
+    }
+
+    /// A provisional connection reached `.failed`/`.cancelled`. If it was the
+    /// connection we were confirming, release the slot so a retry can pair
+    /// without restarting the listener, and reset the SAS surface back to
+    /// "waiting for phone". No-op for rejected concurrent peers or the
+    /// post-confirm session connection (their ids no longer match).
+    private func releaseProvisionalConnection(_ connection: NWConnection) {
+        provisionalLock.lock()
+        let released = provisional.releaseConnection(ObjectIdentifier(connection))
+        if released {
+            provisionalConnection = nil
+        }
+        provisionalLock.unlock()
+        guard released else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.pairingModel.awaitingConfirmation else { return }
+            self.pairingModel.awaitingConfirmation = false
+            self.resetPairingActions()
+            self.pairingModel.peerName = "等待手机连接…"
+            self.pairingModel.fingerprint = "等待手机连接…"
+            self.pairingModel.sasCodes = ["··", "··", "··"]
+            self.onStatus("配对连接已断开，请在手机上重试")
+        }
     }
 
     private func startSteadySession(connection: NWConnection?, deviceName: String, peerFingerprint: Data) {
@@ -353,6 +464,9 @@ final class PairingController: NSObject {
                         self.notificationPresenter.setReplyHandler(nil)
                     }
                     session.start(replaying: handshake.leftover)
+                    // Push the current per-app privacy policy so Android filters
+                    // content source-side from the start of the session.
+                    self.syncNotificationPrivacyPolicy()
                     let name = handshake.peerDeviceName ?? "Android device"
                     self.onStatus("Connected to \(name)")
                 }
@@ -396,6 +510,19 @@ final class PairingController: NSObject {
         } else {
             onStatus("notification reply rejected")
         }
+    }
+
+    /// Push the current per-app notification privacy policy to the paired
+    /// Android peer so it can filter content source-side. No-op unless a session
+    /// is active and both peers negotiated `notifications.v1.privacyPolicy`.
+    func syncNotificationPrivacyPolicy() {
+        guard let session = activeSession,
+              activeCapabilities?.notificationPrivacyPolicyEnabled == true else {
+            return
+        }
+        _ = NotificationPrivacyPolicySender(
+            outbox: ProtocolSessionNotificationDismissOutbox(session: session)
+        ).send(policy: notificationPrivacyPolicy())
     }
 
     func sendTextLink(raw: String) {

@@ -1,4 +1,5 @@
 import SwiftUI
+import HyphenNotifications
 
 // Section E · macOS 设置与诊断 — settings window.
 // A 1:1 port of the design handoff "Hyphen Apps.dc.html" lines 506–559:
@@ -8,13 +9,8 @@ import SwiftUI
 
 // MARK: - Models
 
-/// Per-app notification privacy level shown in the settings list.
-enum SettingsPrivacyMode: CaseIterable {
-    case full        // 完整
-    case hideBody    // 隐藏内容
-    case existsOnly  // 仅提示
-
-    var label: String {
+extension NotificationPrivacyMode {
+    var settingsLabel: String {
         switch self {
         case .full: return "完整"
         case .hideBody: return "隐藏内容"
@@ -27,16 +23,21 @@ enum SettingsPrivacyMode: CaseIterable {
 struct SettingsAppPrivacyRow: Identifiable {
     let id = UUID()
     var name: String
+    var packageName: String
     var glyph: String
     var tint: Color
-    var mode: SettingsPrivacyMode
+    var mode: NotificationPrivacyMode
 
+    // Per-package rows only. The "other apps" default lives in an explicit
+    // `defaultMode` (no "*" sentinel mixed into the package list).
     static let defaults: [SettingsAppPrivacyRow] = [
-        SettingsAppPrivacyRow(name: "微信", glyph: "微", tint: .hex(0x1f9d57), mode: .full),
-        SettingsAppPrivacyRow(name: "Gmail", glyph: "G", tint: .hex(0xd6453f), mode: .full),
-        SettingsAppPrivacyRow(name: "Telegram", glyph: "T", tint: .hex(0x2f6fe0), mode: .hideBody),
-        SettingsAppPrivacyRow(name: "银行 App", glyph: "银", tint: .hex(0x5b626d), mode: .existsOnly)
+        SettingsAppPrivacyRow(name: "微信", packageName: "com.tencent.mm", glyph: "微", tint: .hex(0x1f9d57), mode: .full),
+        SettingsAppPrivacyRow(name: "Gmail", packageName: "com.google.android.gm", glyph: "G", tint: .hex(0xd6453f), mode: .full),
+        SettingsAppPrivacyRow(name: "Telegram", packageName: "org.telegram.messenger", glyph: "T", tint: .hex(0x2f6fe0), mode: .hideBody)
     ]
+
+    /// Privacy-first default for apps without an explicit per-package row.
+    static let defaultModeForOtherApps: NotificationPrivacyMode = .existsOnly
 }
 
 /// Left-sidebar navigation sections.
@@ -78,6 +79,8 @@ struct SettingsWindowView: View {
     @State private var selection: SettingsNavSection
     @State private var mirroringEnabled: Bool
     @State private var rows: [SettingsAppPrivacyRow]
+    @State private var defaultMode: NotificationPrivacyMode
+    @State private var includeTraceIds: Bool
 
     // Live wiring: the 设备 and 诊断 panes route to the real device-trust and
     // diagnostics cards. Closures default to no-ops so the window still renders
@@ -85,13 +88,14 @@ struct SettingsWindowView: View {
     // paired — the 设备 pane then shows a placeholder instead of a fake device.
     private let deviceName: String?
     private let fingerprint: String?
-    private let includeTraceIds: Bool
     private let onClose: () -> Void
     private let onRevokeTrust: () -> Void
     private let onRenameDevice: () -> Void
     private let onExportDiagnostics: () -> Void
     private let onDeleteDiagnostics: () -> Void
     private let onRequestTraceIds: (Bool) -> Bool
+    private let onNotificationPrivacyChange: (Bool, NotificationPrivacyMode, [SettingsAppPrivacyRow]) -> Void
+    private let onSelectionChange: (SettingsNavSection) -> Void
 
     @Environment(\.hyphenPalette) private var p
 
@@ -99,6 +103,7 @@ struct SettingsWindowView: View {
         selection: SettingsNavSection = .notifications,
         mirroringEnabled: Bool = true,
         rows: [SettingsAppPrivacyRow] = SettingsAppPrivacyRow.defaults,
+        defaultMode: NotificationPrivacyMode = SettingsAppPrivacyRow.defaultModeForOtherApps,
         deviceName: String? = "Pixel 8 Pro",
         fingerprint: String? = "3A:9F:C2:7E:5D:…:A1:E2",
         includeTraceIds: Bool = false,
@@ -107,20 +112,25 @@ struct SettingsWindowView: View {
         onRenameDevice: @escaping () -> Void = {},
         onExportDiagnostics: @escaping () -> Void = {},
         onDeleteDiagnostics: @escaping () -> Void = {},
-        onRequestTraceIds: @escaping (Bool) -> Bool = { $0 }
+        onRequestTraceIds: @escaping (Bool) -> Bool = { $0 },
+        onNotificationPrivacyChange: @escaping (Bool, NotificationPrivacyMode, [SettingsAppPrivacyRow]) -> Void = { _, _, _ in },
+        onSelectionChange: @escaping (SettingsNavSection) -> Void = { _ in }
     ) {
         self._selection = State(initialValue: selection)
         self._mirroringEnabled = State(initialValue: mirroringEnabled)
         self._rows = State(initialValue: rows)
+        self._defaultMode = State(initialValue: defaultMode)
+        self._includeTraceIds = State(initialValue: includeTraceIds)
         self.deviceName = deviceName
         self.fingerprint = fingerprint
-        self.includeTraceIds = includeTraceIds
         self.onClose = onClose
         self.onRevokeTrust = onRevokeTrust
         self.onRenameDevice = onRenameDevice
         self.onExportDiagnostics = onExportDiagnostics
         self.onDeleteDiagnostics = onDeleteDiagnostics
         self.onRequestTraceIds = onRequestTraceIds
+        self.onNotificationPrivacyChange = onNotificationPrivacyChange
+        self.onSelectionChange = onSelectionChange
     }
 
     var body: some View {
@@ -139,6 +149,12 @@ struct SettingsWindowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 13))
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 24)
         .hyphenThemed()
+        .onChange(of: selection) {
+            // Report the active pane so the owner can preserve it across a
+            // refresh (trace-ID consent, trust revoke/reset) instead of snapping
+            // back to the default pane.
+            onSelectionChange(selection)
+        }
     }
 
     // MARK: Pane routing
@@ -164,7 +180,7 @@ struct SettingsWindowView: View {
         case .diagnostics:
             cardPane {
                 SettingsDiagnosticsCard(
-                    includeTraceIds: includeTraceIds,
+                    includeTraceIds: $includeTraceIds,
                     onExport: onExportDiagnostics,
                     onDelete: onDeleteDiagnostics,
                     onRequestTraceIds: onRequestTraceIds
@@ -284,6 +300,9 @@ struct SettingsWindowView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(p.accent)
+                    .onChange(of: mirroringEnabled) {
+                        onNotificationPrivacyChange(mirroringEnabled, defaultMode, rows)
+                    }
             }
 
             Hairline()
@@ -298,6 +317,25 @@ struct SettingsWindowView: View {
                     appRow($row)
                 }
             }
+
+            Hairline()
+
+            // Explicit "other apps" default — replaces the old "*" sentinel row.
+            HStack(spacing: 12) {
+                AppGlyph(label: "其", tint: .hex(0x5b626d), size: 32, corner: 9)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("其他应用")
+                        .font(.hyphenBody(13, weight: .semibold))
+                        .foregroundColor(p.text)
+                    Text("未单独设置的应用")
+                        .font(.hyphenBody(11))
+                        .foregroundColor(p.faint)
+                }
+                Spacer(minLength: 0)
+                SettingsPrivacySegmentedControl(mode: $defaultMode) { mode in
+                    onNotificationPrivacyChange(mirroringEnabled, mode, rows)
+                }
+            }
         }
         .padding(.vertical, 20)
         .padding(.horizontal, 22)
@@ -310,7 +348,13 @@ struct SettingsWindowView: View {
                 .font(.hyphenBody(13, weight: .semibold))
                 .foregroundColor(p.text)
             Spacer(minLength: 0)
-            SettingsPrivacySegmentedControl(mode: row.mode)
+            SettingsPrivacySegmentedControl(mode: row.mode) { mode in
+                var updatedRows = rows
+                if let index = updatedRows.firstIndex(where: { $0.id == row.wrappedValue.id }) {
+                    updatedRows[index].mode = mode
+                }
+                onNotificationPrivacyChange(mirroringEnabled, defaultMode, updatedRows)
+            }
         }
     }
 }
@@ -321,12 +365,13 @@ struct SettingsWindowView: View {
 /// accent fill (accent-ink label); 隐藏内容 / 仅提示 selected swatches use the
 /// --text fill on a --surface label, matching the design.
 struct SettingsPrivacySegmentedControl: View {
-    @Binding var mode: SettingsPrivacyMode
+    @Binding var mode: NotificationPrivacyMode
+    var onChange: (NotificationPrivacyMode) -> Void = { _ in }
     @Environment(\.hyphenPalette) private var p
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(SettingsPrivacyMode.allCases, id: \.self) { option in
+            ForEach(NotificationPrivacyMode.allCases, id: \.self) { option in
                 segment(option)
             }
         }
@@ -336,11 +381,11 @@ struct SettingsPrivacySegmentedControl: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func segment(_ option: SettingsPrivacyMode) -> some View {
+    private func segment(_ option: NotificationPrivacyMode) -> some View {
         let selected = option == mode
         let fill: Color = option == .full ? p.accent : p.text
         let labelColor: Color = option == .full ? p.accentInk : p.surface
-        return Text(option.label)
+        return Text(option.settingsLabel)
             .font(.hyphenBody(11, weight: .semibold))
             .foregroundColor(selected ? labelColor : p.dim)
             .padding(.vertical, 5)
@@ -348,7 +393,10 @@ struct SettingsPrivacySegmentedControl: View {
             .background(selected ? fill : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
-            .onTapGesture { mode = option }
+            .onTapGesture {
+                mode = option
+                onChange(option)
+            }
     }
 }
 

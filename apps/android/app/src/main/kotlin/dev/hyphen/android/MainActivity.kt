@@ -41,6 +41,7 @@ import dev.hyphen.android.notifications.NotificationCapabilityGate
 import dev.hyphen.android.notifications.NotificationAccessController
 import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
+import dev.hyphen.android.notifications.NotificationPrivacyPolicyHandler
 import dev.hyphen.android.notifications.NotificationProtocol
 import dev.hyphen.android.notifications.NotificationReplyRequestHandler
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
@@ -156,7 +157,8 @@ class MainActivity : Activity() {
         ) {
             val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
                 NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
-                NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.SHOW_FULL
+                NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.EXISTS_ONLY
+                NotificationPrivacyMode.EXISTS_ONLY -> NotificationPrivacyMode.SHOW_FULL
             }
             HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
             notificationPrivacyButton.text = notificationPrivacyButtonText(next)
@@ -1019,6 +1021,15 @@ class MainActivity : Activity() {
                     append("notification reply result sent: $replyResultId")
                     return
                 }
+                if (envelope.type == NotificationProtocol.TYPE_PRIVACY_POLICY) {
+                    val policy = NotificationPrivacyPolicyHandler.parse(envelope.payload)
+                    HyphenNotificationListenerRuntime.setNotificationPrivacyPolicy(policy)
+                    append(
+                        "notification privacy policy applied: default=${policy.defaultMode.wire}, " +
+                            "${policy.perPackageModes.size} app overrides",
+                    )
+                    return
+                }
             }
             if (envelope.capability == TransferProtocol.CAPABILITY) {
                 if (envelope.type == TransferProtocol.TYPE_RESUME_INFO) {
@@ -1098,7 +1109,8 @@ class MainActivity : Activity() {
     private fun expectedCapability(type: String): String? =
         when (type) {
             NotificationProtocol.TYPE_DISMISS_REQUEST,
-            NotificationProtocol.TYPE_REPLY_REQUEST -> NotificationProtocol.CAPABILITY
+            NotificationProtocol.TYPE_REPLY_REQUEST,
+            NotificationProtocol.TYPE_PRIVACY_POLICY -> NotificationProtocol.CAPABILITY
             TransferProtocol.TYPE_MANIFEST,
             TransferProtocol.TYPE_CHUNK,
             TransferProtocol.TYPE_RESUME_REQUEST,
@@ -1360,6 +1372,7 @@ class MainActivity : Activity() {
         when (mode) {
             NotificationPrivacyMode.SHOW_FULL -> "完整"
             NotificationPrivacyMode.HIDE_BODY -> "隐藏内容"
+            NotificationPrivacyMode.EXISTS_ONLY -> "仅提示"
         }
 
     private fun toggleBetaDiagnostics() {

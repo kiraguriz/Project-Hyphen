@@ -48,7 +48,7 @@ object HyphenNotificationListenerRuntime {
     private val lifecycle = NotificationListenerLifecycle()
     private var eventSender: NotificationMirrorEventSender? = null
     private var dispatcher: NotificationDispatchQueue? = null
-    private var privacyMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL
+    private var privacyPolicy: NotificationPrivacyPolicy = NotificationPrivacyPolicy()
     private var canceller: NotificationCanceller? = null
     private var replier: NotificationReplier? = null
     private val activePayloads = linkedMapOf<String, NormalizedNotificationPayload>()
@@ -106,7 +106,11 @@ object HyphenNotificationListenerRuntime {
         dispatcher?.shutdown()
         outboxGeneration += 1
         dispatcher = NotificationDispatchQueue()
-        eventSender = NotificationMirrorEventSender(outbox, privacyMode, activePayloads.keys, allowReplyActions)
+        eventSender = NotificationMirrorEventSender(
+            outbox = outbox,
+            initialActiveKeys = activePayloads.keys,
+            allowReplyActions = allowReplyActions,
+        ).apply { setPrivacyPolicy(privacyPolicy) }
         submitSnapshotsIfConnectedLocked()
         submitPendingRemovalsIfConnectedLocked()
     }
@@ -119,12 +123,18 @@ object HyphenNotificationListenerRuntime {
     }
 
     fun notificationPrivacyMode(): NotificationPrivacyMode = synchronized(lifecycle) {
-        privacyMode
+        privacyPolicy.defaultMode
     }
 
     fun setNotificationPrivacyMode(mode: NotificationPrivacyMode) = synchronized(lifecycle) {
-        privacyMode = mode
+        privacyPolicy = NotificationPrivacyPolicy(defaultMode = mode)
         eventSender?.setPrivacyMode(mode)
+    }
+
+    /** Apply the full per-app policy pushed by the Mac (notification.privacy.policy). */
+    fun setNotificationPrivacyPolicy(policy: NotificationPrivacyPolicy) = synchronized(lifecycle) {
+        privacyPolicy = policy
+        eventSender?.setPrivacyPolicy(policy)
     }
 
     fun setCanceller(notificationCanceller: NotificationCanceller) = synchronized(lifecycle) {
@@ -199,7 +209,7 @@ object HyphenNotificationListenerRuntime {
         eventSender = null
         dispatcher?.shutdown()
         dispatcher = null
-        privacyMode = NotificationPrivacyMode.SHOW_FULL
+        privacyPolicy = NotificationPrivacyPolicy()
         canceller = null
         replier = null
         outboxGeneration += 1

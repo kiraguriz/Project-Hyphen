@@ -35,10 +35,16 @@ class NotificationMirrorEventSender(
 ) {
     private val activeKeys = initialActiveKeys.toCollection(linkedSetOf())
     @Volatile
-    private var privacyFilter = NotificationPrivacyFilter(initialPrivacyMode)
+    private var privacyPolicy = NotificationPrivacyPolicy(defaultMode = initialPrivacyMode)
 
+    /** Convenience for the default-only case (e.g. the local debug toggle). */
     fun setPrivacyMode(mode: NotificationPrivacyMode) {
-        privacyFilter = NotificationPrivacyFilter(mode)
+        privacyPolicy = NotificationPrivacyPolicy(defaultMode = mode)
+    }
+
+    /** Apply the full per-app policy pushed by the Mac. */
+    fun setPrivacyPolicy(policy: NotificationPrivacyPolicy) {
+        privacyPolicy = policy
     }
 
     @Synchronized
@@ -84,7 +90,7 @@ class NotificationMirrorEventSender(
     fun activeKeys(): Set<String> = activeKeys.toSet()
 
     private fun outboundPayload(payload: NormalizedNotificationPayload): NormalizedNotificationPayload {
-        val filteredPayload = privacyFilter.apply(payload)
+        val filteredPayload = privacyPolicy.apply(payload)
         return if (allowReplyActions) filteredPayload else filteredPayload.copy(replyActions = emptyList())
     }
 }

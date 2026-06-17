@@ -70,6 +70,10 @@ public enum SessionHandshake {
             entries[capabilityNotifications]?["dismiss"] as? Bool ?? false
         }
 
+        public var notificationPrivacyPolicyEnabled: Bool {
+            entries[capabilityNotifications]?["privacyPolicy"] as? Bool ?? false
+        }
+
         public var transferMaxChunkBytes: Int? {
             entries[capabilityTransfer]?["maxChunkBytes"] as? Int
         }
@@ -89,6 +93,7 @@ public enum SessionHandshake {
                         remote["reply"] as? String ?? "off"
                     ),
                     "dismiss": (local["dismiss"] as? Bool ?? false) && (remote["dismiss"] as? Bool ?? false),
+                    "privacyPolicy": (local["privacyPolicy"] as? Bool ?? false) && (remote["privacyPolicy"] as? Bool ?? false),
                 ]
             }
             if contains(capabilityTransfer), peer.contains(capabilityTransfer),
@@ -120,7 +125,7 @@ public enum SessionHandshake {
                 throw HandshakeError(code: "protocol/invalid-envelope", detail: "transfer maxChunkBytes out of range")
             }
             return NegotiatedCapabilities([
-                capabilityNotifications: ["reply": "beta", "dismiss": true],
+                capabilityNotifications: ["reply": "beta", "dismiss": true, "privacyPolicy": true],
                 capabilityTransfer: ["resume": true, "maxChunkBytes": maxTransferChunkBytes],
                 capabilityText: ["direction": "bidirectional"],
                 capabilityDiagnostics: ["redactedExport": true],
@@ -402,6 +407,9 @@ public enum SessionHandshake {
             }
             if let raw = options["dismiss"], !isBoolean(raw) {
                 throw HandshakeError(code: "protocol/invalid-envelope", detail: "notifications.v1.dismiss must be boolean")
+            }
+            if let raw = options["privacyPolicy"], !isBoolean(raw) {
+                throw HandshakeError(code: "protocol/invalid-envelope", detail: "notifications.v1.privacyPolicy must be boolean")
             }
         case capabilityTransfer:
             if let raw = options["resume"], !isBoolean(raw) {

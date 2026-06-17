@@ -125,7 +125,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
   "device": { "kind": "android", "appVersion": "0.1.0", "osVersion": "Android 16", "deviceName": "Pixel" },
   "resumeToken": null,
   "capabilities": {
-    "notifications.v1": { "reply": "beta", "dismiss": true },
+    "notifications.v1": { "reply": "beta", "dismiss": true, "privacyPolicy": true },
     "transfer.v1": { "resume": true, "maxChunkBytes": 1048576 },
     "text.v1": { "direction": "bidirectional" },
     "diagnostics.v1": { "redactedExport": true }
@@ -137,6 +137,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - The responder replies with the subset (possibly with reduced options) it accepts; that intersection is the session contract. Messages outside it → `plugin/unsupported-capability`.
 - Unknown capabilities MUST be ignored, not rejected (forward compatibility).
 - Effective transfer chunk size = min of both sides' `maxChunkBytes`. The capability schema caps `maxChunkBytes` at 2 MiB (and floors it at 1 KiB) so a base64-inflated chunk plus envelope overhead always fits the 4 MiB frame limit (§2.1).
+- `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. The intersection ANDs both sides, so a peer that omits it disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
 
 ## 7. Message catalog (v0)
 
@@ -151,6 +152,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 | `notification.removed` | A→M | yes | Key removed on Android; Mac closes its mapped notification |
 | `notification.dismiss.request` / `.result` | M→A / A→M | yes | Mac asks Android to cancel a key; result carries success or error code |
 | `notification.reply.request` / `.result` | M→A / A→M | yes | RemoteInput reply, only where capability advertises it (beta) |
+| `notification.privacy.policy` | M→A | yes | Per-app privacy policy; Android filters notification content source-side. Only when both peers negotiated `notifications.v1.privacyPolicy` |
 | `text.send` | both | yes | Text/link with `kind: "text"\|"url"`; receiver confirms before open (J4) |
 | `transfer.manifest` | both | yes | `fileId`, name, size, mime, sha256, chunk size/count (HYP-M3-010) |
 | `transfer.chunk` | both | yes | `fileId`, `chunkIndex`, base64 data, `chunkSha256` |
@@ -191,6 +193,45 @@ If negotiated `notifications.v1.reply` is `off`, Android MUST omit
 `replyActions` and macOS MUST NOT present or send Quick Reply actions. If
 negotiated `notifications.v1.dismiss` is `false`, macOS MUST NOT send
 `notification.dismiss.request`.
+
+#### 7.1.1 `notification.privacy.policy` payload
+
+When both peers negotiated `notifications.v1.privacyPolicy`, macOS MAY send the
+user's per-app privacy policy so Android filters notification content at the
+source — hidden content then never crosses the LAN. macOS MUST NOT send it when
+the option is not negotiated.
+
+```json
+{
+  "defaultMode": "existsOnly",
+  "perPackageModes": [
+    { "packageName": "com.google.android.gm", "mode": "full" },
+    { "packageName": "com.tencent.mm", "mode": "full" },
+    { "packageName": "org.telegram.messenger", "mode": "hideBody" }
+  ]
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---:|---|
+| `defaultMode` | string | yes | Mode applied to packages without an explicit entry. One of `full`, `hideBody`, `existsOnly` |
+| `perPackageModes` | array | no | Per-package overrides; each item is `{ "packageName": string, "mode": <mode> }`. Omitted/empty means default-only |
+
+Mode semantics, applied by the sender (Android) before serializing
+`notification.posted`/`updated`/snapshot payloads:
+
+- `full` — keep title, body, and reply actions (still subject to the
+  `notifications.v1.reply` gate).
+- `hideBody` — keep `packageName` and `title` for routing/recognition; omit
+  `text` and `replyActions` (a reply-action label can itself leak content).
+- `existsOnly` — keep only routing/identity fields (`sbnKey`, `packageName`,
+  `clearable`, `ongoing`) needed for update/remove correlation; omit `title`,
+  `text`, `category`, and `replyActions`.
+
+Android MUST reject a malformed policy (unknown mode, non-object per-package
+entry, blank `packageName`) with `protocol/invalid-envelope`. The macOS receiver
+applies the same per-app rules locally as defense-in-depth for older/unsynced
+peers; receiver-side `existsOnly` additionally neutralizes the displayed source.
 
 `notification.dismiss.request` is sent from macOS to Android with:
 

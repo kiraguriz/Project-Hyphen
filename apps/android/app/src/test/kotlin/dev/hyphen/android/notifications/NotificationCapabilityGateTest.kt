@@ -16,6 +16,7 @@ class NotificationCapabilityGateTest {
         assertFalse(NotificationCapabilityGate.allowReplyActions(capabilities))
         assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_DISMISS_REQUEST, capabilities))
         assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_REPLY_REQUEST, capabilities))
+        assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_PRIVACY_POLICY, capabilities))
     }
 
     @Test
@@ -25,6 +26,7 @@ class NotificationCapabilityGateTest {
                 NotificationProtocol.CAPABILITY to Json.obj(
                     "reply" to Json.Str("off"),
                     "dismiss" to Json.Bool(false),
+                    "privacyPolicy" to Json.Bool(false),
                 ),
             ),
         )
@@ -33,6 +35,7 @@ class NotificationCapabilityGateTest {
         assertFalse(NotificationCapabilityGate.allowReplyActions(capabilities))
         assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_DISMISS_REQUEST, capabilities))
         assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_REPLY_REQUEST, capabilities))
+        assertFalse(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_PRIVACY_POLICY, capabilities))
         assertTrue(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_POSTED, capabilities))
     }
 
@@ -44,5 +47,6 @@ class NotificationCapabilityGateTest {
         assertTrue(NotificationCapabilityGate.allowReplyActions(capabilities))
         assertTrue(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_DISMISS_REQUEST, capabilities))
         assertTrue(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_REPLY_REQUEST, capabilities))
+        assertTrue(NotificationCapabilityGate.allowsInboundRequest(NotificationProtocol.TYPE_PRIVACY_POLICY, capabilities))
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import HyphenNotifications
 
 // STAGED DESIGN SURFACE — defined and preview-tested, but not yet wired into a
 // runtime surface (no call site outside this file). It lands when the live
@@ -13,17 +14,10 @@ import SwiftUI
 
 // MARK: - Privacy modes
 
-/// Three privacy modes for a mirrored Android notification banner.
-enum MirrorPrivacyMode {
-    /// App + title + body + reply/dismiss actions.
-    case full
-    /// App name only with a generic "new message" line and a dismiss action.
-    case hideBody
-    /// Presence only — neutral glyph, no content.
-    case existsOnly
-
-    /// Mono caption describing the mode (shown optionally under the banner).
-    var caption: String {
+/// Mono caption describing a privacy mode (shown optionally under the banner).
+/// Uses the shared `NotificationPrivacyMode` rather than a parallel enum.
+extension NotificationPrivacyMode {
+    var bannerCaption: String {
         switch self {
         case .full: return "完整 · 应用 + 标题 + 内容"
         case .hideBody: return "隐藏内容 · 仅应用名"
@@ -60,15 +54,15 @@ private struct MirrorBannerSurface<Content: View>: View {
 
 // MARK: - Mirror banner
 
-/// A mirrored-notification banner driven by `MirrorPrivacyMode`.
+/// A mirrored-notification banner driven by `NotificationPrivacyMode`.
 struct MirrorBannerView: View {
-    var mode: MirrorPrivacyMode
+    var mode: NotificationPrivacyMode
     /// When true, renders the mono caption under the banner.
     var showCaption: Bool
 
     @Environment(\.hyphenPalette) private var p
 
-    init(mode: MirrorPrivacyMode = .full, showCaption: Bool = true) {
+    init(mode: NotificationPrivacyMode = .full, showCaption: Bool = true) {
         self.mode = mode
         self.showCaption = showCaption
     }
@@ -77,7 +71,7 @@ struct MirrorBannerView: View {
         VStack(alignment: .leading, spacing: 8) {
             banner
             if showCaption {
-                Text(mode.caption)
+                Text(mode.bannerCaption)
                     .font(.hyphenMono(11))
                     .foregroundColor(p.faint)
                     .padding(.leading, 2)

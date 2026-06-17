@@ -27,6 +27,15 @@ final class DesignWindowController {
 
     func present<Content: View>(@ViewBuilder _ content: () -> Content) {
         if let window {
+            // Swapping the hosting controller is deferred: present() is reachable
+            // from a SwiftUI action *inside* this window (e.g. the diagnostics
+            // toggle → refreshSettingsWindow). Replacing contentViewController
+            // synchronously frees the NSHostingView that is still dispatching the
+            // action → use-after-free. Building the new controller now and
+            // assigning it on the next runloop tick lets the action frame unwind
+            // before the old view is released.
+            let hosting = NSHostingController(rootView: content().fixedSize())
+            DispatchQueue.main.async { window.contentViewController = hosting }
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             return
@@ -47,6 +56,7 @@ final class DesignWindowController {
         // here so a programmatic `close()` cannot re-enter through it.
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.window != nil else { return event }
+            guard self.window?.isKeyWindow == true else { return event }
             if event.keyCode == 53 { // Escape
                 self.requestClose()
                 return nil
@@ -62,18 +72,41 @@ final class DesignWindowController {
     /// the Escape key and the window-chrome close button take. Use this for any
     /// user-initiated dismissal; `close()` alone is pure teardown.
     func requestClose() {
-        close()
-        onClosed?()
+        teardown(then: onClosed)
     }
 
     /// Pure teardown — safe to call repeatedly; never fires `onClosed`.
     func close() {
+        teardown(then: nil)
+    }
+
+    private func teardown(then completion: (() -> Void)?) {
         if let escMonitor {
             NSEvent.removeMonitor(escMonitor)
             self.escMonitor = nil
         }
-        window?.orderOut(nil)
-        window = nil
+        guard let window else {
+            // Already torn down; nothing to order out, so notify immediately.
+            completion?()
+            return
+        }
+        // Drop our strong reference now so `isVisible` reads closed and repeat
+        // calls no-op, but defer the actual order-out to the next runloop tick.
+        // teardown() is almost always called from a SwiftUI button action hosted
+        // by this very window — the chrome close button, the pairing confirm/
+        // reject buttons, or the Escape monitor. Releasing the NSHostingController
+        // synchronously frees the view that is still dispatching the action,
+        // which is a use-after-free crash. Capturing `window` in the async block
+        // keeps it (and its hosting controller) alive until the action unwinds.
+        //
+        // `onClosed` runs inside the same async block, *after* the order-out, so
+        // an owner that re-presents from `onClosed` (revoke/reset trust → refresh)
+        // does not race the still-pending teardown of the old window/monitor.
+        self.window = nil
+        DispatchQueue.main.async {
+            window.orderOut(nil)
+            completion?()
+        }
     }
 }
 
@@ -93,11 +126,27 @@ enum LocalNetworkDialog {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = false
-        w.isMovableByWindowBackground = true
+        // This dialog has no title/chrome drag handle. Marking the whole
+        // borderless NSHostingView as draggable makes SwiftUI buttons look
+        // clickable while AppKit consumes their mouse events as window drags.
+        w.isMovableByWindowBackground = false
         w.isReleasedWhenClosed = false
         w.center()
+        let escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard w.isKeyWindow else { return event }
+            if event.keyCode == 53 { // Escape
+                didContinue = false
+                NSApp.stopModal()
+                return nil
+            }
+            return event
+        }
         NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
         NSApp.runModal(for: w)
+        if let escMonitor {
+            NSEvent.removeMonitor(escMonitor)
+        }
         w.orderOut(nil)
         return didContinue
     }
@@ -130,6 +179,7 @@ struct PairingWindowHost: View {
             peerName: model.peerName,
             fingerprint: model.fingerprint,
             qrPayload: model.qrPayload,
+            awaitingConfirmation: model.awaitingConfirmation,
             onClose: onClose,
             onConfirm: { model.onConfirm() },
             onReject: { model.onReject() }

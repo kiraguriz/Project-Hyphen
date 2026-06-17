@@ -1,4 +1,5 @@
 import CoreImage
+import CoreGraphics
 import Foundation
 import Security
 
@@ -78,6 +79,8 @@ public enum PairingNonce {
 }
 
 public enum QRCodeRenderer {
+    private static let context = CIContext()
+
     /// Renders via CoreImage's built-in generator (no dependency).
     /// Error-correction M; `scale` multiplies the module size.
     public static func image(for string: String, scale: CGFloat = 8) -> CGImage? {
@@ -85,8 +88,12 @@ public enum QRCodeRenderer {
         filter.setValue(Data(string.utf8), forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
         guard let output = filter.outputImage else { return nil }
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        return CIContext().createCGImage(scaled, from: scaled.extent)
+        let colored = output.applyingFilter("CIFalseColor", parameters: [
+            "inputColor0": CIColor(red: 0x15 / 255.0, green: 0x17 / 255.0, blue: 0x1c / 255.0),
+            "inputColor1": CIColor(red: 1, green: 1, blue: 1),
+        ])
+        let scaled = colored.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return context.createCGImage(scaled, from: scaled.extent)
     }
 }
 

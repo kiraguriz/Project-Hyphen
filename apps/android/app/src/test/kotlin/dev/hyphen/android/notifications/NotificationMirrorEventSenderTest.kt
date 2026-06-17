@@ -124,6 +124,53 @@ class NotificationMirrorEventSenderTest {
     }
 
     @Test
+    fun `exists only policy sends presence only and omits all content from the wire`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox)
+        sender.setPrivacyPolicy(NotificationPrivacyPolicy(defaultMode = NotificationPrivacyMode.EXISTS_ONLY))
+
+        sender.sendPostedOrUpdated(
+            payload(
+                sbnKey = "0|com.example|7|thread-123|10101",
+                text = "secret body",
+                replyActions = listOf(NotificationReplyAction(2, "Reply", "reply:1:reply:android.reply")),
+            ),
+        )
+
+        val sent = outbox.envelopes.single()
+        // Routing/identity stays so update/remove still correlate.
+        assertEquals(Json.Str("0|com.example|7|thread-123|10101"), sent.payload["sbnKey"])
+        assertEquals(Json.Str("com.example"), sent.payload["packageName"])
+        // Everything visible is stripped before the payload crosses the LAN.
+        assertFalse(sent.payload.entries.containsKey("title"))
+        assertFalse(sent.payload.entries.containsKey("text"))
+        assertFalse(sent.payload.entries.containsKey("category"))
+        assertFalse(sent.payload.entries.containsKey("replyActions"))
+        val encoded = sent.payload.encode()
+        assertFalse(encoded.contains("secret body"))
+        assertFalse(encoded.contains("Example"))
+        assertFalse(encoded.contains("Reply"))
+    }
+
+    @Test
+    fun `per-package policy overrides the default mode at the send boundary`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox)
+        sender.setPrivacyPolicy(
+            NotificationPrivacyPolicy(
+                defaultMode = NotificationPrivacyMode.EXISTS_ONLY,
+                perPackageModes = mapOf("com.example" to NotificationPrivacyMode.SHOW_FULL),
+            ),
+        )
+
+        sender.sendPostedOrUpdated(payload("0|com.example|7|thread-123|10101", "full content"))
+
+        val sent = outbox.envelopes.single()
+        assertEquals(Json.Str("Example"), sent.payload["title"])
+        assertEquals(Json.Str("full content"), sent.payload["text"])
+    }
+
+    @Test
     fun `notification storm keeps active keys bounded and repeats become updates`() {
         val outbox = RecordingNotificationOutbox()
         val sender = NotificationMirrorEventSender(outbox)

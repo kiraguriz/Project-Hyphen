@@ -35,8 +35,13 @@ struct MenuBarAppBadge {
 }
 
 struct MenuBarTimelineItem: Identifiable {
-    let id = UUID()
+    let id: UUID
     let kind: MenuBarTimelineKind
+
+    init(id: UUID = UUID(), kind: MenuBarTimelineKind) {
+        self.id = id
+        self.kind = kind
+    }
 
     /// Which filter tabs this item belongs to.
     var matches: Set<MenuBarTimelineFilter> {
@@ -50,9 +55,15 @@ struct MenuBarTimelineItem: Identifiable {
 }
 
 struct MenuBarTimelineDay: Identifiable {
-    let id = UUID()
+    let id: UUID
     let title: String
     let items: [MenuBarTimelineItem]
+
+    init(id: UUID = UUID(), title: String, items: [MenuBarTimelineItem]) {
+        self.id = id
+        self.title = title
+        self.items = items
+    }
 }
 
 extension MenuBarTimelineDay {
@@ -96,7 +107,7 @@ extension MenuBarTimelineDay {
 struct MenuBarPopoverView: View {
     let state: HyphenConnectionState
     let deviceName: String
-    let latencyMs: Int
+    let latencyMs: Int?
     let days: [MenuBarTimelineDay]
     let onPair: () -> Void
     let onSettings: () -> Void
@@ -110,7 +121,7 @@ struct MenuBarPopoverView: View {
     init(
         state: HyphenConnectionState = .connected,
         deviceName: String = "Pixel 8 Pro",
-        latencyMs: Int = 18,
+        latencyMs: Int? = 18,
         days: [MenuBarTimelineDay] = MenuBarTimelineDay.sample,
         onPair: @escaping () -> Void = {},
         onSettings: @escaping () -> Void = {},
@@ -152,9 +163,11 @@ struct MenuBarPopoverView: View {
                 Text(deviceName)
                     .font(.hyphenBody(13, weight: .semibold))
                     .foregroundColor(p.text)
-                Text("· \(latencyMs)ms")
-                    .font(.hyphenMono(13))
-                    .foregroundColor(p.dim)
+                if let latencyMs {
+                    Text("· \(latencyMs)ms")
+                        .font(.hyphenMono(13))
+                        .foregroundColor(p.dim)
+                }
             }
             Spacer(minLength: 8)
             HStack(spacing: 7) {
@@ -186,22 +199,30 @@ struct MenuBarPopoverView: View {
     // MARK: Timeline
 
     private var timeline: some View {
-        ScrollView {
+        let days = visibleDays
+        return ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(visibleDays) { day in
-                    Text(day.title)
-                        .font(.hyphenBody(11, weight: .semibold))
+                if days.isEmpty {
+                    Text("暂无活动")
+                        .font(.hyphenBody(12))
                         .foregroundColor(p.faint)
-                        .padding(.horizontal, 8)
-                        .padding(.top, day.id == visibleDays.first?.id ? 4 : 8)
-                        .padding(.bottom, 4)
+                        .frame(maxWidth: .infinity, minHeight: 86)
+                } else {
+                    ForEach(Array(days.enumerated()), id: \.element.id) { index, day in
+                        Text(day.title)
+                            .font(.hyphenBody(11, weight: .semibold))
+                            .foregroundColor(p.faint)
+                            .padding(.horizontal, 8)
+                            .padding(.top, index == 0 ? 4 : 8)
+                            .padding(.bottom, 4)
 
-                    ForEach(day.items) { item in
-                        MenuBarTimelineRow(
-                            item: item,
-                            onReply: onReply,
-                            onDismiss: onDismiss
-                        )
+                        ForEach(day.items) { item in
+                            MenuBarTimelineRow(
+                                item: item,
+                                onReply: onReply,
+                                onDismiss: onDismiss
+                            )
+                        }
                     }
                 }
             }
@@ -215,7 +236,7 @@ struct MenuBarPopoverView: View {
     private var visibleDays: [MenuBarTimelineDay] {
         days.compactMap { day in
             let items = day.items.filter { $0.matches.contains(filter) }
-            return items.isEmpty ? nil : MenuBarTimelineDay(title: day.title, items: items)
+            return items.isEmpty ? nil : MenuBarTimelineDay(id: day.id, title: day.title, items: items)
         }
     }
 
@@ -224,8 +245,8 @@ struct MenuBarPopoverView: View {
     private var footer: some View {
         HStack {
             HStack(spacing: 6) {
-                Circle().fill(p.accent).frame(width: 7, height: 7)
-                Text("实时镜像")
+                Circle().fill(state.color(p)).frame(width: 7, height: 7)
+                Text(state == .connected ? "实时镜像" : state.title)
                     .font(.hyphenBody(12))
                     .foregroundColor(p.dim)
             }

@@ -11,6 +11,7 @@ public enum NotificationMirrorProtocol {
     public static let typeDismissResult = "notification.dismiss.result"
     public static let typeReplyRequest = "notification.reply.request"
     public static let typeReplyResult = "notification.reply.result"
+    public static let typePrivacyPolicy = "notification.privacy.policy"
 }
 
 public enum NotificationMirrorError: Error, Equatable {
@@ -43,6 +44,62 @@ public struct NotificationPresentationRequest: Equatable {
         self.body = body
         self.category = category
         self.replyActions = replyActions
+    }
+}
+
+public enum NotificationPrivacyMode: String, CaseIterable, Codable, Equatable {
+    case full
+    case hideBody
+    case existsOnly
+}
+
+public struct NotificationPrivacyPolicy: Equatable {
+    public var isMirroringEnabled: Bool
+    public var defaultMode: NotificationPrivacyMode
+    public var perPackageModes: [String: NotificationPrivacyMode]
+
+    public init(
+        isMirroringEnabled: Bool = true,
+        defaultMode: NotificationPrivacyMode = .full,
+        perPackageModes: [String: NotificationPrivacyMode] = [:]
+    ) {
+        self.isMirroringEnabled = isMirroringEnabled
+        self.defaultMode = defaultMode
+        self.perPackageModes = perPackageModes
+    }
+
+    public static let allowAll = NotificationPrivacyPolicy()
+
+    public func presentationRequest(
+        for request: NotificationPresentationRequest
+    ) -> NotificationPresentationRequest? {
+        guard isMirroringEnabled else { return nil }
+        switch perPackageModes[request.packageName] ?? defaultMode {
+        case .full:
+            return request
+        case .hideBody:
+            // Keep app + title for routing/recognition, but drop the body and
+            // the reply actions — a reply action label can itself leak content.
+            return NotificationPresentationRequest(
+                identifier: request.identifier,
+                sbnKey: request.sbnKey,
+                packageName: request.packageName,
+                title: request.title,
+                body: "",
+                category: request.category,
+                replyActions: []
+            )
+        case .existsOnly:
+            return NotificationPresentationRequest(
+                identifier: request.identifier,
+                sbnKey: request.sbnKey,
+                packageName: "Android",
+                title: "Android notification",
+                body: "",
+                category: nil,
+                replyActions: []
+            )
+        }
     }
 }
 
@@ -213,6 +270,41 @@ public final class NotificationReplySender {
     }
 }
 
+/// Sends the user's per-app notification privacy policy to a paired Android
+/// peer (Mac→Android, `notifications.v1`). Android applies it source-side so
+/// hidden content never crosses the LAN. Only call when both peers negotiated
+/// `notifications.v1.privacyPolicy`; the macOS receiver scrubber stays as
+/// defense-in-depth for older/unsynced peers.
+public final class NotificationPrivacyPolicySender {
+    private let outbox: NotificationDismissOutbox
+
+    public init(outbox: NotificationDismissOutbox) {
+        self.outbox = outbox
+    }
+
+    /// Wire shape: `{ "defaultMode": "<mode>", "perPackageModes": [ { "packageName": "..", "mode": "<mode>" } ] }`
+    /// where `<mode>` is a `NotificationPrivacyMode` raw value (full/hideBody/existsOnly).
+    public static func payload(for policy: NotificationPrivacyPolicy) -> [String: Any] {
+        let perPackage = policy.perPackageModes
+            .sorted { $0.key < $1.key }
+            .map { ["packageName": $0.key, "mode": $0.value.rawValue] }
+        return [
+            "defaultMode": policy.defaultMode.rawValue,
+            "perPackageModes": perPackage,
+        ]
+    }
+
+    @discardableResult
+    public func send(policy: NotificationPrivacyPolicy) -> String? {
+        outbox.send(
+            type: NotificationMirrorProtocol.typePrivacyPolicy,
+            capability: NotificationMirrorProtocol.capability,
+            requiresAck: true,
+            payload: Self.payload(for: policy)
+        )
+    }
+}
+
 public enum NotificationMirrorAction: Equatable {
     case shown(identifier: String, sbnKey: String)
     case removed(identifier: String, sbnKey: String)
@@ -292,13 +384,16 @@ public struct AndroidNotificationPayload: Equatable {
 public final class NotificationMirrorReceiver {
     private let presenter: NotificationPresenter
     private let replyActionsEnabled: () -> Bool
+    private let privacyPolicy: () -> NotificationPrivacyPolicy
 
     public init(
         presenter: NotificationPresenter,
-        replyActionsEnabled: @escaping () -> Bool = { true }
+        replyActionsEnabled: @escaping () -> Bool = { true },
+        privacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll }
     ) {
         self.presenter = presenter
         self.replyActionsEnabled = replyActionsEnabled
+        self.privacyPolicy = privacyPolicy
     }
 
     @discardableResult
@@ -308,6 +403,9 @@ public final class NotificationMirrorReceiver {
             try requireNotificationsCapability(envelope)
             let payload = try AndroidNotificationPayload(payload: envelope.payload)
             let request = payload.presentationRequest(replyActionsEnabled: replyActionsEnabled())
+            guard let request = privacyPolicy().presentationRequest(for: request) else {
+                return nil
+            }
             presenter.show(request)
             return .shown(identifier: request.identifier, sbnKey: payload.sbnKey)
 
