@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Hyphen · 性能与可靠性度量任务清单（统计背景）</title>
+<style>
+  :root{
+    --ink:#1c2230; --muted:#5b6675; --line:#e3e7ee; --bg:#f6f7f9;
+    --card:#ffffff; --accent:#2f6df6; --accent-soft:#eaf1ff;
+    --green:#138a52; --green-soft:#e6f5ec; --amber:#a9700f; --amber-soft:#fbf1dd;
+    --red:#b3261e; --red-soft:#fdeceb;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:980px; margin:0 auto; padding:48px 28px 96px}
+  header.top{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:28px}
+  .kicker{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:700}
+  h1{font-size:28px; margin:8px 0 6px; letter-spacing:-.01em}
+  .sub{color:var(--muted); font-size:15px; margin:0}
+  h2{font-size:20px; margin:42px 0 14px; padding-top:6px}
+  h2 .tag{font-size:12px; font-weight:600; color:var(--muted); margin-left:8px}
+  .lead{background:var(--card); border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:10px; padding:16px 20px; margin:18px 0}
+  .lead p{margin:6px 0}
+  .grid{display:grid; gap:14px}
+  .track{background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden}
+  .track-head{padding:14px 18px; display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--line); background:#fbfcfe}
+  .track-head .badge{font-size:13px; font-weight:800; color:#fff; background:var(--accent); border-radius:7px; padding:3px 10px; white-space:nowrap}
+  .track-head h3{margin:0; font-size:16px; flex:1}
+  .track-head .goal{font-size:13px; color:var(--muted)}
+  table{width:100%; border-collapse:collapse; font-size:13.5px}
+  th{ text-align:left; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:700; padding:10px 14px; border-bottom:1px solid var(--line); background:#fff}
+  td{padding:12px 14px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .tid{font-weight:800; color:var(--accent); white-space:nowrap; font-variant-numeric:tabular-nums}
+  .task-title{font-weight:600}
+  .task-desc{color:var(--muted); font-size:12.5px; margin-top:3px}
+  code{background:#f1f3f7; border:1px solid #e6e9ef; border-radius:4px; padding:1px 5px; font-size:12px; font-family:"SF Mono",ui-monospace,Menlo,monospace; color:#384}
+  .pill{display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .p-stat{background:var(--accent-soft); color:var(--accent)}
+  .d-low{background:var(--green-soft); color:var(--green)}
+  .d-mid{background:var(--amber-soft); color:var(--amber)}
+  .d-high{background:var(--red-soft); color:var(--red)}
+  ul.clean{margin:8px 0 0; padding-left:18px}
+  ul.clean li{margin:4px 0}
+  .two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+  .box{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px}
+  .box h4{margin:0 0 10px; font-size:14px}
+  .resume{font-size:13.5px}
+  .resume li{margin:7px 0}
+  .resume b{color:var(--ink)}
+  .warn{background:var(--amber-soft); border:1px solid #f0dcb4; border-radius:10px; padding:14px 18px; font-size:13.5px}
+  .warn b{color:var(--amber)}
+  .path{counter-reset:step; list-style:none; padding:0; margin:0}
+  .path li{position:relative; padding:10px 0 10px 44px; border-bottom:1px dashed var(--line)}
+  .path li:last-child{border-bottom:none}
+  .path li::before{counter-increment:step; content:counter(step); position:absolute; left:0; top:10px; width:28px; height:28px; background:var(--ink); color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px}
+  .wk{font-weight:700; color:var(--accent); font-size:12px}
+  footer{margin-top:46px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:12px}
+  .legend{display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin:10px 0 0}
+  .legend span{display:inline-flex; align-items:center; gap:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="kicker">Project Hyphen · Onboarding Brief</div>
+    <h1>性能与可靠性度量（Measurement &amp; Reliability）任务清单</h1>
+    <p class="sub">为统计学（statistics）背景的协作者划定的独立子领域 · 本地优先的 macOS ⇄ Android 配对层</p>
+  </header>
+
+  <div class="lead">
+    <p><b>为什么是这块？</b> Project Hyphen 本质是系统/网络/安全工程，没有数据科学内核。但它有一个真实且长期缺人的痛点：<b>把"性能好不好、可靠不可靠"从口头印象变成有方法论的、可复现的度量</b>。这正好是统计背景能独立认领、并产出作品集的切口。</p>
+    <p><b>定位要诚实：</b> 这更接近 <i>data / quality engineering</i>，不是 ML / 量化建模。对想做"可靠性、性能、数据工程、分析"方向的简历含金量高；对想做纯算法/ML 的，含金量中等。</p>
+    <div class="legend">
+      <span><span class="pill p-stat">统计技能</span> 真正用到统计</span>
+      <span><span class="pill d-low">易</span> 几天可上手</span>
+      <span><span class="pill d-mid">中</span> 需读代码</span>
+      <span><span class="pill d-high">难</span> 需真机/系统知识</span>
+    </div>
+  </div>
+
+  <!-- TRACK A -->
+  <h2>Track A — 传输性能基准 <span class="tag">throughput / latency 分布化</span></h2>
+  <div class="track">
+    <div class="track-head">
+      <span class="badge">A</span>
+      <h3>把传输性能变成可复现、带置信区间的基准</h3>
+      <span class="goal">对应 <code>HyphenTransfer</code> · <code>create_large_transfer_fixture.py</code></span>
+    </div>
+    <table>
+      <thead><tr><th style="width:64px">编号</th><th>任务</th><th style="width:150px">用到的统计</th><th style="width:60px">难度</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="tid">A1</td>
+          <td><div class="task-title">定义基准方法论</div><div class="task-desc">明确指标（吞吐 MB/s、端到端延迟、首字节时间）、预热轮次、重复次数、丢弃异常值规则。写成一页 methodology 文档。</div></td>
+          <td><span class="pill p-stat">实验设计</span> 采样/重复/变量控制</td>
+          <td><span class="pill d-low">易</span></td>
+        </tr>
+        <tr>
+          <td class="tid">A2</td>
+          <td><div class="task-title">构建可复现的基准 harness</div><div class="task-desc">用 <code>create_large_transfer_fixture.py</code> 生成 1 MB / 100 MB / 1 GiB 档位，跑 loopback 与真机两条路径，自动记录每轮结果为结构化数据（CSV/JSON）。</div></td>
+          <td><span class="pill p-stat">分层抽样</span> 文件大小×网络条件</td>
+          <td><span class="pill d-mid">中</span></td>
+        </tr>
+        <tr>
+          <td class="tid">A3</td>
+          <td><div class="task-title">分布与区间分析</div><div class="task-desc">不报均值，报 p50 / p95 / p99、标准差、置信区间；画延迟分布直方图与 CDF。识别长尾来源。</div></td>
+          <td><span class="pill p-stat">分位数/CI</span> bootstrap 置信区间</td>
+          <td><span class="pill d-low">易</span></td>
+        </tr>
+        <tr>
+          <td class="tid">A4</td>
+          <td><div class="task-title">性能回归门禁</div><div class="task-desc">设定"相对基线退化多少算回归"的统计阈值（而非拍脑袋的固定百分比），接入 <code>scripts/check.sh</code> 思路做 CI gate。</div></td>
+          <td><span class="pill p-stat">假设检验</span> 变化点/阈值</td>
+          <td><span class="pill d-mid">中</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- TRACK B -->
+  <h2>Track B — 可靠性矩阵 <span class="tag">投递率 / 重连 / 故障注入</span></h2>
+  <div class="track">
+    <div class="track-head">
+      <span class="badge">B</span>
+      <h3>用抽样和成功率量化"它到底有多可靠"</h3>
+      <span class="goal">对应 <code>HyphenNotifications</code> · <code>trust/pairing</code> · resume 路径</span>
+    </div>
+    <table>
+      <thead><tr><th style="width:64px">编号</th><th>任务</th><th style="width:150px">用到的统计</th><th style="width:60px">难度</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="tid">B1</td>
+          <td><div class="task-title">通知镜像投递成功率实验</div><div class="task-desc">设计 10+ app 的通知矩阵，定义"成功投递"判据，重复触发，估计每类 app 的投递率 + Wilson 置信区间，而不是"试几次都行"。</div></td>
+          <td><span class="pill p-stat">比例估计</span> Wilson 区间</td>
+          <td><span class="pill d-high">难</span> 需真机</td>
+        </tr>
+        <tr>
+          <td class="tid">B2</td>
+          <td><div class="task-title">睡眠/唤醒重连可靠性</div><div class="task-desc">配对设备反复进入睡眠再唤醒，测量重连成功率与重连耗时分布，定位失败模式。</div></td>
+          <td><span class="pill p-stat">生存/耗时分布</span></td>
+          <td><span class="pill d-high">难</span> 需真机</td>
+        </tr>
+        <tr>
+          <td class="tid">B3</td>
+          <td><div class="task-title">故障注入 + resume 正确性</div><div class="task-desc">在传输中注入断网/丢包/TLS 中断，验证 resume 后文件完整（哈希校验），统计各故障下的恢复率。</div></td>
+          <td><span class="pill p-stat">故障×恢复列联表</span></td>
+          <td><span class="pill d-mid">中</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- TRACK C -->
+  <h2>Track C — 诊断数据分析 <span class="tag">structured log → 分布 / 异常 / dashboard</span></h2>
+  <div class="track">
+    <div class="track-head">
+      <span class="badge">C</span>
+      <h3>把已有的结构化日志变成可视化与异常信号</h3>
+      <span class="goal">对应 <code>diagnostics/StructuredLog.kt</code> · <code>StructuredLog.swift</code> · <code>RedactedDiagnosticsExporter.kt</code></span>
+    </div>
+    <table>
+      <thead><tr><th style="width:64px">编号</th><th>任务</th><th style="width:150px">用到的统计</th><th style="width:60px">难度</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="tid">C1</td>
+          <td><div class="task-title">梳理可分析的指标字段</div><div class="task-desc">读现有 <code>StructuredLog</code>，列出连接、重连、传输、错误等字段，定义一份"可分析指标"清单（保持脱敏边界）。</div></td>
+          <td><span class="pill p-stat">指标设计</span></td>
+          <td><span class="pill d-mid">中</span></td>
+        </tr>
+        <tr>
+          <td class="tid">C2</td>
+          <td><div class="task-title">日志解析 + 分布/异常检测</div><div class="task-desc">用 Python(pandas) 解析脱敏导出，做连接时长、错误率的分布分析，对异常会话做简单离群检测。</div></td>
+          <td><span class="pill p-stat">离群检测</span> z-score/IQR</td>
+          <td><span class="pill d-low">易</span></td>
+        </tr>
+        <tr>
+          <td class="tid">C3</td>
+          <td><div class="task-title">本地 dashboard</div><div class="task-desc">做一个纯本地、脱敏的可视化页面（趋势、分布、Top 错误），符合"诊断本地优先"约束。</div></td>
+          <td><span class="pill p-stat">数据可视化</span></td>
+          <td><span class="pill d-low">易</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- TRACK D -->
+  <h2>Track D — 协议模糊与一致性 <span class="tag">test-vectors / 覆盖率</span></h2>
+  <div class="track">
+    <div class="track-head">
+      <span class="badge">D</span>
+      <h3>统计化地生成协议输入并量化覆盖</h3>
+      <span class="goal">对应 <code>protocol/test-vectors/</code> · <code>validate_protocol_fixtures.py</code></span>
+    </div>
+    <table>
+      <thead><tr><th style="width:64px">编号</th><th>任务</th><th style="width:150px">用到的统计</th><th style="width:60px">难度</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="tid">D1</td>
+          <td><div class="task-title">property-based / 统计化输入生成</div><div class="task-desc">基于现有 envelope / transfer-manifest schema，生成大量有效与边界输入，喂给校验器找一致性漏洞。</div></td>
+          <td><span class="pill p-stat">随机化测试</span> 采样策略</td>
+          <td><span class="pill d-mid">中</span></td>
+        </tr>
+        <tr>
+          <td class="tid">D2</td>
+          <td><div class="task-title">覆盖率统计</div><div class="task-desc">量化 test-vectors 对 schema 字段/取值空间的覆盖，找出未被测到的组合，补 fixture。</div></td>
+          <td><span class="pill p-stat">覆盖度量</span></td>
+          <td><span class="pill d-low">易</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- RESUME + BOUNDARY -->
+  <div class="two" style="margin-top:34px">
+    <div class="box">
+      <h4>📄 简历上可以怎么写</h4>
+      <ul class="resume clean">
+        <li><b>Performance benchmarking:</b> 为开源 macOS/Android 传输层设计可复现基准，用分位数与 bootstrap 置信区间刻画吞吐/延迟，建立性能回归门禁。</li>
+        <li><b>Reliability analysis:</b> 设计通知投递与重连的抽样实验，用比例估计 + Wilson 区间量化可靠性，定位失败模式。</li>
+        <li><b>Fault-injection testing:</b> 故障注入下验证断点续传正确性，统计各故障的恢复率。</li>
+        <li><b>Diagnostics analytics:</b> 解析结构化日志做分布与离群检测，构建本地可视化 dashboard。</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h4>⚠️ 必须守住的边界（项目硬约束）</h4>
+      <div class="warn" style="background:transparent;border:none;padding:0">
+        <ul class="clean" style="font-size:13px">
+          <li><b>loopback ≠ 真机证据。</b> A/B/C 的真机部分必须真机跑，不能用回环结果冒充。</li>
+          <li><b>诊断本地优先、默认脱敏。</b> 不引入遥测/上传，不碰 <code>.env</code>/密钥/私密日志。</li>
+          <li><b>区分"自动化不变量"与"现场证据"。</b> 报告里要标注哪些是测试得出、哪些是真机观测。</li>
+          <li>结论分级：confirmed / unsupported / disputed / environment-only。</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONBOARDING PATH -->
+  <h2>建议上手顺序 <span class="tag">由易到难、先出成果</span></h2>
+  <div class="box">
+    <ol class="path">
+      <li><span class="wk">第 1 步</span> · <b>C2 + C3</b>：从已有脱敏日志做分析与 dashboard。纯 Python，不碰系统代码，几天就能出第一个可展示成果，建立信心。</li>
+      <li><span class="wk">第 2 步</span> · <b>A1 → A2 → A3</b>：定方法论、搭基准 harness、做分布分析。这是整条线的核心作品集。</li>
+      <li><span class="wk">第 3 步</span> · <b>D1 + D2</b>：协议模糊与覆盖率，进一步理解 wire 行为，难度可控。</li>
+      <li><span class="wk">第 4 步</span> · <b>A4 + B3</b>：性能回归门禁与故障注入，开始接触工程集成。</li>
+      <li><span class="wk">第 5 步</span> · <b>B1 + B2</b>：真机可靠性矩阵——最难、最有分量，等前面铺垫好再上。</li>
+    </ol>
+  </div>
+
+  <footer>
+    Project Hyphen · 内部评估材料 · 任务路径基于实际代码模块（<code>HyphenTransfer</code>、<code>diagnostics/StructuredLog</code>、<code>protocol/test-vectors</code>、<code>create_large_transfer_fixture.py</code>）。<br>
+    认领前请先读 <code>docs/project_hyphen_roadmap_tracker_v0_3.md</code> 确认当前状态与阻塞，不要凭本清单假设某任务已完成或就绪。
+  </footer>
+
+</div>
+</body>
+</html>
