@@ -73,6 +73,23 @@ kotlin {
     }
 }
 
+// Surface failing test names + stack traces in CI. The repo check runs
+// `gradlew --quiet test`, which suppresses lifecycle output, so also mirror
+// failures onto the quiet log level — otherwise a failure only prints the
+// opaque "N tests completed, 1 failed" line.
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events("failed", "skipped")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
+        quiet {
+            events("failed")
+            exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        }
+    }
+}
+
 dependencies {
     val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)
