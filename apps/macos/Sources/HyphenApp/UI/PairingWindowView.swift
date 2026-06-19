@@ -69,6 +69,7 @@ struct PairingWindowView: View {
     let peerName: String
     let fingerprint: String
     let qrPayload: String
+    let manualPairingPayload: String
     let awaitingConfirmation: Bool
     var onClose: () -> Void
     var onConfirm: () -> Void
@@ -82,6 +83,7 @@ struct PairingWindowView: View {
         peerName: String = "Pixel 8 Pro",
         fingerprint: String = "SHA‑256 · 3A:9F:C2:7E:…:E2",
         qrPayload: String = "hyphen://pair?addr=192.168.1.24:7420",
+        manualPairingPayload: String = "192.168.1.24:7420?n=AbCdEfGhIjKlMnOp",
         awaitingConfirmation: Bool = true,
         onClose: @escaping () -> Void = {},
         onConfirm: @escaping () -> Void = {},
@@ -92,6 +94,7 @@ struct PairingWindowView: View {
         self.peerName = peerName
         self.fingerprint = fingerprint
         self.qrPayload = qrPayload
+        self.manualPairingPayload = manualPairingPayload
         self.awaitingConfirmation = awaitingConfirmation
         self.onClose = onClose
         self.onConfirm = onConfirm
@@ -126,6 +129,19 @@ struct PairingWindowView: View {
                 Text(address)
                     .font(.hyphenMono(11))
                     .foregroundColor(p.dim)
+            }
+            if !manualPairingPayload.isEmpty {
+                VStack(spacing: 3) {
+                    Text(L("pairing.manualEntry"))
+                        .font(.hyphenBody(11))
+                        .foregroundColor(p.faint)
+                    Text(manualPairingPayload)
+                        .font(.hyphenMono(10))
+                        .foregroundColor(p.dim)
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .frame(width: 200)

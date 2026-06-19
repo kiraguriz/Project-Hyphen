@@ -111,6 +111,7 @@
 "pairing.androidDevice" = "Android 设备";
 "pairing.windowTitle" = "配对新设备";
 "pairing.scanOnPhone" = "在手机上扫描";
+"pairing.manualEntry" = "或在手机上手动输入";
 "pairing.confirmTitle" = "确认两台设备的校验码一致";
 "pairing.confirmDetail" = "若数字相同，即可在双方之间建立可信连接（SAS）。";
 "pairing.match" = "一致，建立信任";

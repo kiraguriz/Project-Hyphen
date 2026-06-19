@@ -160,12 +160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
 
-        // Wake drives the reconnect state machine (HYP-M1-013/014);
-        // the actual connect attempt arrives with the M2 transport.
+        // Wake drives the reconnect state machine (HYP-M1-013/014) and the
+        // steady-session listener that accepts trusted-phone redials.
         let machine = ReconnectStateMachine(
             scheduler: DispatchRetryScheduler(),
-            startConnect: {
-                NSLog("hyphen-power: connect attempt (transport lands in HYP-M2-007)")
+            startConnect: { [weak self] in
+                self?.pairingController?.requestReconnect()
             },
             onState: { [weak self] state in
                 DispatchQueue.main.async {
@@ -512,7 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .waitingRetry(let attempt, let delay):
             stateItem.title = "Reconnect in \(Int(delay))s (attempt \(attempt + 1))"
         case .connecting:
-            stateItem.title = "Connecting… (no transport until M2)"
+            stateItem.title = "Connecting…"
         case .connected, .idle, .sleeping, .suspended:
             break // advertising state owns the line otherwise
         }
@@ -641,6 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func forgetPeer(_ peer: TrustedPeer, store: KeychainTrustStore) throws {
         let removed = try store.remove(fingerprint: peer.spkiFingerprint)
+        pairingController?.stopAfterTrustChange()
         pairingController?.endPairing()
         stateItem.title = "Forgot \(peer.displayName.isEmpty ? "peer" : peer.displayName) (removed=\(removed))"
         invalidateTrustedPeerCache()
@@ -663,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             try store.removeAll()
+            pairingController?.stopAfterTrustChange()
             pairingController?.endPairing()
             stateItem.title = "Paired devices reset (\(count) removed)"
             invalidateTrustedPeerCache()

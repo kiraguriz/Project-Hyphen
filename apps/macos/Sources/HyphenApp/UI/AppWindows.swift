@@ -161,6 +161,7 @@ final class PairingWindowModel: ObservableObject {
     @Published var peerName: String = L("pairing.waitingForPhone")
     @Published var fingerprint: String = L("pairing.waitingForPhone")
     @Published var qrPayload: String = ""
+    @Published var manualPairingPayload: String = ""
     @Published var awaitingConfirmation = false
 
     var onConfirm: () -> Void = {}
@@ -179,6 +180,7 @@ struct PairingWindowHost: View {
             peerName: model.peerName,
             fingerprint: model.fingerprint,
             qrPayload: model.qrPayload,
+            manualPairingPayload: model.manualPairingPayload,
             awaitingConfirmation: model.awaitingConfirmation,
             onClose: onClose,
             onConfirm: { model.onConfirm() },

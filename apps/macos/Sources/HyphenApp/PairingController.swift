@@ -14,12 +14,13 @@ import UniformTypeIdentifiers
 /// captured (protocol §2: provisional until SAS confirmation) — then
 /// displays the SAS for both-sides comparison. Trust is written through
 /// `SasConfirmationGate` only when the user confirms; reject/close
-/// persists nothing. The provisional connection is closed after the
-/// decision either way — the steady-state session arrives with M2-012/013.
+/// persists nothing. Steady-state sessions and reconnect acceptance are
+/// owned here (HYP-M2-012/013 product wiring).
 final class PairingController: NSObject {
 
     private let queue = DispatchQueue(label: "hyphen-pairing")
     private var listener: TLSEndpointListener?
+    private var steadyListener: TLSEndpointListener?
     private var pairingAttemptID: UUID?
     // Section C pairing surface: the design SwiftUI window (QR + SAS) hosted in
     // a borderless window. Only the presentation changed here — the listener,
@@ -34,6 +35,14 @@ final class PairingController: NSObject {
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
     private var activeTransferSender: TransferSender?
     private let tokenStore = ResumeTokenStore()
+    // Reconnect/trust state is touched from both `queue` (reconnect listener)
+    // and the main thread (trust revoke); `reconnectLock` guards all of it.
+    private let reconnectLock = NSLock()
+    private var rememberedPeerFingerprint: Data?
+    private var rememberedDeviceName: String?
+    private var rememberedListenPort: UInt16?
+    private var stoppedForTrustChange = false
+    private var reconnectSessionActive = false
     private let textReceiver = TextLinkReceiver()
     private var lastTransferProgress: TransferProgress?
     private lazy var transferReceiver = TransferReceiver { [weak self] progress in
@@ -129,6 +138,9 @@ final class PairingController: NSObject {
                 queue: queue,
                 onState: { [weak self] state in
                     guard let self, case .listening(let port) = state else { return }
+                    self.reconnectLock.lock()
+                    self.rememberedListenPort = port
+                    self.reconnectLock.unlock()
                     DispatchQueue.main.async {
                         self.presentWindow(
                             attemptID: attemptID,
@@ -173,6 +185,12 @@ final class PairingController: NSObject {
     func endPairing() {
         listener?.stop()
         listener = nil
+        reconnectLock.lock()
+        let steady = steadyListener
+        steadyListener = nil
+        reconnectSessionActive = false
+        reconnectLock.unlock()
+        steady?.stop()
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
@@ -216,6 +234,7 @@ final class PairingController: NSObject {
         // from the payload URI. SAS/peer fields fill in once a phone connects.
         pairingModel.address = "\(host):\(port)"
         pairingModel.qrPayload = payload.uriString
+        pairingModel.manualPairingPayload = manualPairingPayload(host: host, port: port, nonce: nonce, deviceName: deviceName)
         pairingModel.peerName = L("pairing.waitingForPhone")
         pairingModel.fingerprint = L("pairing.waitingForPhone")
         pairingModel.sasCodes = ["··", "··", "··"]
@@ -233,6 +252,93 @@ final class PairingController: NSObject {
             // and the legacy `.closable` window's behavior.
             PairingWindowHost(model: pairingModel, onClose: { self?.endPairing() })
         }
+    }
+
+    private func manualPairingPayload(host: String, port: UInt16, nonce: Data, deviceName: String) -> String {
+        var uri = "hyphen://pair?v=0&ep=\(host):\(port)&n=\(nonce.hyphenBase64URL)"
+        if let encoded = deviceName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            uri += "&dn=\(encoded)"
+        }
+        return uri
+    }
+
+    /// Wake/network reconnect entry: ensure a trusted-peer listener is accepting
+    /// Android redials (HYP-M1-014/M2-013 product wiring).
+    func requestReconnect() {
+        queue.async { [weak self] in
+            self?.startReconnectListenerIfNeeded()
+        }
+    }
+
+    func stopAfterTrustChange() {
+        reconnectLock.lock()
+        stoppedForTrustChange = true
+        rememberedPeerFingerprint = nil
+        rememberedDeviceName = nil
+        rememberedListenPort = nil
+        reconnectSessionActive = false
+        let steady = steadyListener
+        steadyListener = nil
+        reconnectLock.unlock()
+        steady?.stop()
+        activeSession?.stop()
+        activeSession = nil
+        activeSessionToken = nil
+        activeCapabilities = nil
+        activeTransferSender = nil
+        lastTransferProgress = nil
+        notificationPresenter.setDismissHandler(nil)
+        notificationPresenter.setReplyHandler(nil)
+        onStatus("Session stopped after trust change")
+        onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
+    }
+
+    private func startReconnectListenerIfNeeded() {
+        reconnectLock.lock()
+        let stopped = stoppedForTrustChange
+        let active = reconnectSessionActive
+        let peerFp = rememberedPeerFingerprint
+        let alreadyListening = steadyListener != nil
+        let listenPort = rememberedListenPort ?? 0
+        reconnectLock.unlock()
+        guard !stopped, !active, let peerFingerprint = peerFp, !alreadyListening else { return }
+        do {
+            let deviceName = Host.current().localizedName ?? "Hyphen Mac"
+            let identity = try KeychainIdentityStore().loadOrCreate(commonName: deviceName)
+            let verifier = SPKIPinVerifier(isTrusted: { $0 == peerFingerprint })
+            let acceptor = TLSEndpointListener(identity: identity, verifier: verifier)
+            reconnectLock.lock()
+            steadyListener = acceptor
+            reconnectLock.unlock()
+            try acceptor.start(
+                port: listenPort,
+                queue: queue,
+                onState: { _ in },
+                onConnection: { [weak self] connection in
+                    self?.acceptReconnect(connection: connection, deviceName: deviceName, peerFingerprint: peerFingerprint)
+                },
+                onConnectionState: { _, state in
+                    if case .failed = state { }
+                }
+            )
+            onStatus("Waiting for phone reconnect…")
+        } catch {
+            // Release the listener slot so a later wake can retry instead of
+            // being blocked forever by the `steadyListener != nil` guard.
+            reconnectLock.lock()
+            steadyListener = nil
+            reconnectLock.unlock()
+            onStatus("Reconnect listener failed: \(error)")
+        }
+    }
+
+    private func acceptReconnect(connection: NWConnection, deviceName: String, peerFingerprint: Data) {
+        reconnectLock.lock()
+        let steady = steadyListener
+        steadyListener = nil
+        reconnectLock.unlock()
+        steady?.stop()
+        startSteadySession(connection: connection, deviceName: deviceName, peerFingerprint: peerFingerprint)
     }
 
     private func presentSasConfirmation(
@@ -442,9 +548,17 @@ final class PairingController: NSObject {
                             self?.lastTransferProgress = nil
                             self?.notificationPresenter.setDismissHandler(nil)
                             self?.notificationPresenter.setReplyHandler(nil)
+                            if let self {
+                                self.reconnectLock.lock()
+                                self.reconnectSessionActive = false
+                                self.reconnectLock.unlock()
+                            }
                         }
                         self?.onStatus("Phone session closed")
                         self?.onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
+                        self?.queue.async {
+                            self?.startReconnectListenerIfNeeded()
+                        }
                     }
                 }
                 var config = ProtocolSession.Config()
@@ -498,6 +612,12 @@ final class PairingController: NSObject {
                     // content source-side from the start of the session.
                     self.syncNotificationPrivacyPolicy()
                     let name = handshake.peerDeviceName ?? "Android device"
+                    self.reconnectLock.lock()
+                    self.rememberedPeerFingerprint = peerFingerprint
+                    self.rememberedDeviceName = name
+                    self.stoppedForTrustChange = false
+                    self.reconnectSessionActive = true
+                    self.reconnectLock.unlock()
                     self.onStatus("Connected to \(name)")
                     self.onActivity(.peerChanged(isPaired: true, peerName: name))
                     self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
@@ -726,12 +846,22 @@ final class PairingController: NSObject {
                 }
                 switch try transferReceiver.handle(envelope) {
                 case .completed(let completed):
-                    // Debug surface keeps no copy; drop the temp file so completed
-                    // transfers do not accumulate in the storage directory.
-                    try? FileManager.default.removeItem(at: completed.fileURL)
+                    // Delivery is a local I/O step, not a protocol fault: handle
+                    // its failure here so a verified file is never reported as a
+                    // rejected envelope, and the received bytes are not dropped.
+                    let delivered: URL
+                    do {
+                        delivered = try deliverIncomingFile(completed)
+                    } catch {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.lastTransferProgress = nil
+                            self?.onStatus("transfer received but save failed (kept at \(completed.fileURL.path)): \(error)")
+                        }
+                        return
+                    }
                     DispatchQueue.main.async { [weak self] in
                         self?.lastTransferProgress = nil
-                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes)")
+                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)")
                         // The receiver only reaches `.completed` after every chunk's
                         // SHA-256 verified, so the feed marks it verified.
                         self?.onActivity(.transferCompleted(
@@ -895,6 +1025,19 @@ final class PairingController: NSObject {
         } catch {
             onStatus("transfer cancel failed: \(error)")
         }
+    }
+
+    private func deliverIncomingFile(_ completed: TransferCompleted) throws -> URL {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let target = downloads.appendingPathComponent(completed.manifest.filename)
+        if FileManager.default.fileExists(atPath: target.path) {
+            try FileManager.default.removeItem(at: target)
+        }
+        try FileManager.default.copyItem(at: completed.fileURL, to: target)
+        try? FileManager.default.removeItem(at: completed.fileURL)
+        return target
     }
 
     private static func transferProgressLine(_ progress: TransferProgress) -> String {

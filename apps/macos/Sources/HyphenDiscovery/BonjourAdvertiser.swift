@@ -3,8 +3,8 @@ import HyphenCore
 import Network
 
 /// Advertises `_hyphen._tcp` on the LAN (HYP-M1-011, plan §8.2).
-/// Incoming connections are refused until the M2 transport lands —
-/// advertising proves discoverability, it grants nothing (discovery ≠ trust).
+/// Incoming connections are refused at the discovery listener — pairing and
+/// steady-session acceptors are separate product paths (discovery ≠ trust).
 public final class BonjourAdvertiser {
 
     public enum State: Equatable {
@@ -39,7 +39,7 @@ public final class BonjourAdvertiser {
         }
         l.service = NWListener.Service(name: deviceName, type: serviceType)
         l.newConnectionHandler = { connection in
-            // No transport until M2 (HYP-M2-007): refuse politely.
+            // Discovery advertisement only; pairing/steady listeners own TLS accept.
             connection.cancel()
         }
         l.stateUpdateHandler = { [weak self] newState in

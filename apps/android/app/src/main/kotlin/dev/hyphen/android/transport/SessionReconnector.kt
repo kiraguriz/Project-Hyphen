@@ -19,6 +19,9 @@ class SessionReconnector(
     private val device: SessionHandshake.DeviceInfo,
     private val sessionConfig: ProtocolSession.Config = ProtocolSession.Config(),
     private val scheduler: RetryScheduler = ExecutorRetryScheduler(),
+    /** Resume token carried over from the prior session, presented on the first dial. */
+    initialResumeToken: String? = null,
+    initialPreviousSessionId: String? = null,
     private val listener: Listener,
 ) {
     companion object {
@@ -60,13 +63,15 @@ class SessionReconnector(
         fun onAck(messageId: String) {}
         fun onAckTimeout(messageId: String) {}
         fun onProtocolError(code: String, detail: String) {}
+        /** Active session closed; a retry may follow unless [stop] was called. */
+        fun onSessionLost() {}
     }
 
     private val stopped = AtomicBoolean(false)
     private val stateLock = Any()
     private var consecutiveFailures = 0
-    private var resumeToken: String? = null
-    private var lastSessionId: String? = null
+    private var resumeToken: String? = initialResumeToken
+    private var lastSessionId: String? = initialPreviousSessionId
     private var activeSession: ProtocolSession? = null
     private var connecting = false
     private var attemptInFlight = false
@@ -228,6 +233,7 @@ class SessionReconnector(
                 if (stopped.get() || connecting) null else nextRetryLocked()
             }
         }
+        listener.onSessionLost()
         retry?.schedule()
     }
 

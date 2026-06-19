@@ -11,20 +11,28 @@ sealed class ParsedEndpoint {
     abstract val host: String
     abstract val port: Int
 
-    data class Manual(override val host: String, override val port: Int) : ParsedEndpoint()
+    data class Manual(
+        override val host: String,
+        override val port: Int,
+        /** base64url pairing nonce from the Mac pairing screen (16 bytes). */
+        val nonceB64: String? = null,
+    ) : ParsedEndpoint()
 
     data class QrPayload(
         val version: Int,
         override val host: String,
         override val port: Int,
-        /** base64url, decodes to 32 bytes (SHA-256 of SPKI). */
-        val spkiFingerprintB64: String,
+        /** base64url, decodes to 32 bytes (SHA-256 of SPKI); absent for manual-IP SAS pairing. */
+        val spkiFingerprintB64: String?,
         /** base64url, decodes to 16 bytes. */
         val nonceB64: String,
         val deviceName: String?,
     ) : ParsedEndpoint() {
-        /** The Mac's pre-shared pin; length was validated at parse time. */
-        fun decodedFingerprint(): ByteArray = Base64.getUrlDecoder().decode(spkiFingerprintB64)
+        fun hasPinnedFingerprint(): Boolean = spkiFingerprintB64 != null
+
+        /** The Mac's pre-shared pin when present; manual-IP pairing omits it. */
+        fun decodedFingerprint(): ByteArray? =
+            spkiFingerprintB64?.let { Base64.getUrlDecoder().decode(it) }
 
         /** The pairing-session nonce bound into the SAS transcript. */
         fun decodedNonce(): ByteArray = Base64.getUrlDecoder().decode(nonceB64)
@@ -54,13 +62,20 @@ object EndpointParser {
     private const val FINGERPRINT_BYTES = 32
     private const val NONCE_BYTES = 16
 
-    /** Parses user-typed `host:port`. IPv6 literals are an M2 follow-up. */
+    /** Parses user-typed `host:port` or `host:port?n=<base64url nonce>`. IPv6 literals are an M2 follow-up. */
     fun parseManual(input: String): ParseResult {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return ParseResult.Rejected(RejectReason.EMPTY)
         if (trimmed.length > MAX_INPUT_LENGTH) return ParseResult.Rejected(RejectReason.TOO_LARGE)
-        val hostPort = parseHostPort(trimmed) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
-        return ParseResult.Ok(ParsedEndpoint.Manual(hostPort.first, hostPort.second))
+        val nonceB64 = trimmed.substringAfter('?', missingDelimiterValue = "")
+            .removePrefix("n=")
+            .takeIf { trimmed.contains('?') && it.isNotEmpty() }
+        val hostPortInput = trimmed.substringBefore('?')
+        val hostPort = parseHostPort(hostPortInput) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
+        if (nonceB64 != null && !isBase64UrlOfLength(nonceB64, NONCE_BYTES)) {
+            return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+        }
+        return ParseResult.Ok(ParsedEndpoint.Manual(hostPort.first, hostPort.second, nonceB64))
     }
 
     /** Parses a scanned QR payload. All of v/ep/fp/n are required (§5.1). */
@@ -83,14 +98,16 @@ object EndpointParser {
 
         val v = params["v"] ?: return ParseResult.Rejected(RejectReason.MISSING_FIELD)
         val ep = params["ep"] ?: return ParseResult.Rejected(RejectReason.MISSING_FIELD)
-        val fp = params["fp"] ?: return ParseResult.Rejected(RejectReason.MISSING_FIELD)
+        val fp = params["fp"]
         val n = params["n"] ?: return ParseResult.Rejected(RejectReason.MISSING_FIELD)
 
         val version = v.toIntOrNull() ?: return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
         if (version != SUPPORTED_VERSION) return ParseResult.Rejected(RejectReason.UNSUPPORTED_VERSION)
 
         val hostPort = parseHostPort(ep) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
-        if (!isBase64UrlOfLength(fp, FINGERPRINT_BYTES)) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+        if (fp != null && !isBase64UrlOfLength(fp, FINGERPRINT_BYTES)) {
+            return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+        }
         if (!isBase64UrlOfLength(n, NONCE_BYTES)) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
 
         val deviceName = params["dn"]?.let { urlDecodeOrNull(it) ?: return ParseResult.Rejected(RejectReason.MALFORMED_FIELD) }

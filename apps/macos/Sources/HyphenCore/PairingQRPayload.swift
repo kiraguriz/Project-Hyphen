@@ -97,7 +97,7 @@ public enum QRCodeRenderer {
     }
 }
 
-extension Data {
+public extension Data {
     /// base64url (RFC 4648 §5) without padding.
     var hyphenBase64URL: String {
         base64EncodedString()

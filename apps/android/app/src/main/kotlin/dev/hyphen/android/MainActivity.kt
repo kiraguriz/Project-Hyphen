@@ -35,7 +35,7 @@ import dev.hyphen.android.notifications.NotificationPrivacyPolicyHandler
 import dev.hyphen.android.notifications.NotificationProtocol
 import dev.hyphen.android.notifications.NotificationReplyRequestHandler
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
-import dev.hyphen.android.pairing.EndpointConnectProbe
+import dev.hyphen.android.session.ConnectionSupervisor
 import dev.hyphen.android.pairing.EndpointParser
 import dev.hyphen.android.pairing.PairingTranscript
 import dev.hyphen.android.pairing.ParseResult
@@ -90,12 +90,7 @@ class MainActivity : ComponentActivity() {
 
     private var manager: DiscoveryManager? = null
     private var discoveryActive = false
-    private val activeStateLock = Any()
-    private var activeSession: ProtocolSession? = null
-    private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
-    private var activeTransferSender: TransferSender? = null
-    private var resumeToken: String? = null
-    private var lastSessionId: String? = null
+    private val supervisor by lazy { ConnectionSupervisor.getInstance(this) }
     private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = LocalStructuredLogStore()
     private var lastTransferProgress: TransferProgress? = null
@@ -117,6 +112,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        supervisor.addListener(sessionListener)
+        supervisor.replayStateTo(sessionListener)
         refreshPairingState()
         model.setBetaDiagnostics(betaDiagnosticsEnabled())
         model.updateNotificationPrivacyLabel(notificationPrivacyStatus(HyphenNotificationListenerRuntime.notificationPrivacyMode()))
@@ -168,6 +165,21 @@ class MainActivity : ComponentActivity() {
         emit(ActivityEvent.PeerChanged(isPaired = peer != null, peerName = name))
     }
 
+    private val sessionListener = object : ConnectionSupervisor.Listener {
+        override fun onLog(line: String) = append(line)
+
+        override fun onActivityEvent(event: ActivityEvent) = emit(event)
+
+        override fun onEnvelope(envelope: Envelope, state: ConnectionSupervisor.ActiveState) {
+            handleSessionEnvelope(envelope, state)
+        }
+
+        override fun onTransferProgress(progress: TransferProgress, outgoing: Boolean) {
+            append(transferProgressLine(progress))
+            emit(transferProgressEvent(progress, if (outgoing) TransferDirection.OUTGOING else TransferDirection.INCOMING))
+        }
+    }
+
     private data class ActiveStateSnapshot(
         val session: ProtocolSession?,
         val capabilities: SessionHandshake.NegotiatedCapabilities?,
@@ -175,78 +187,18 @@ class MainActivity : ComponentActivity() {
         val lastTransferProgress: TransferProgress?,
     )
 
-    private data class ActiveSessionInstall(
-        val previousSession: ProtocolSession?,
-    )
-
-    private fun activeStateSnapshot(): ActiveStateSnapshot =
-        synchronized(activeStateLock) {
-            ActiveStateSnapshot(
-                session = activeSession,
-                capabilities = activeCapabilities,
-                transferSender = activeTransferSender,
-                lastTransferProgress = lastTransferProgress,
-            )
-        }
-
-    private fun installActiveState(
-        session: ProtocolSession,
-        capabilities: SessionHandshake.NegotiatedCapabilities,
-        transferSender: TransferSender,
-    ): ProtocolSession? =
-        synchronized(activeStateLock) {
-            val previous = activeSession
-            activeSession = session
-            activeCapabilities = capabilities
-            activeTransferSender = transferSender
-            lastTransferProgress = null
-            previous
-        }
-
-    private fun installActiveStateAndBindOutboxIfAlive(
-        session: ProtocolSession,
-        capabilities: SessionHandshake.NegotiatedCapabilities,
-        transferSender: TransferSender,
-    ): ActiveSessionInstall? =
-        synchronized(workerLock) {
-            if (activityDestroyed) return@synchronized null
-            val previous = installActiveState(session, capabilities, transferSender)
-            if (NotificationCapabilityGate.shouldBindOutbox(capabilities)) {
-                HyphenNotificationListenerRuntime.bindNotificationOutbox(
-                    outbox = ProtocolSessionNotificationOutbox(session),
-                    allowReplyActions = NotificationCapabilityGate.allowReplyActions(capabilities),
-                )
-            } else {
-                HyphenNotificationListenerRuntime.clearNotificationOutbox()
-            }
-            ActiveSessionInstall(previous)
-        }
-
-    private fun startSessionIfAlive(session: ProtocolSession): Boolean =
-        synchronized(workerLock) {
-            if (activityDestroyed) {
-                false
-            } else {
-                session.start()
-                true
-            }
-        }
-
-    private fun clearActiveStateIf(session: ProtocolSession? = null): ProtocolSession? =
-        synchronized(activeStateLock) {
-            if (session != null && activeSession !== session) return@synchronized null
-            val current = activeSession
-            activeSession = null
-            activeCapabilities = null
-            activeTransferSender = null
-            lastTransferProgress = null
-            current
-        }
+    private fun activeStateSnapshot(): ActiveStateSnapshot {
+        val state = supervisor.activeState()
+        return ActiveStateSnapshot(
+            session = state.session,
+            capabilities = state.capabilities,
+            transferSender = state.transferSender,
+            lastTransferProgress = state.lastTransferProgress,
+        )
+    }
 
     private fun updateLastTransferProgress(progress: TransferProgress?) {
-        synchronized(activeStateLock) {
-            lastTransferProgress = progress
-        }
+        supervisor.updateLastTransferProgress(progress)
     }
 
     private fun launchWorker(name: String, work: () -> Unit): Boolean {
@@ -382,12 +334,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCurrentSessionAfterTrustChange() {
-        val session = clearActiveStateIf()
-        session?.stop()
-        resumeToken = null
-        lastSessionId = null
-        HyphenNotificationListenerRuntime.clearNotificationOutbox()
-        emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
+        supervisor.stopAfterTrustChange()
     }
 
     private fun peerLabel(peer: TrustedPeer): String =
@@ -399,27 +346,29 @@ class MainActivity : ComponentActivity() {
     private fun probeManualEndpoint(raw: String) {
         val isQr = raw.trim().startsWith("hyphen://")
         val result = if (isQr) EndpointParser.parseQr(raw) else EndpointParser.parseManual(raw)
-        if (isQr && result is ParseResult.Ok) {
-            val qr = result.endpoint as ParsedEndpoint.QrPayload
-            val fpHead = qr.decodedFingerprint().take(4).joinToString("") { "%02x".format(it) }
-            append("qr parsed: v=${qr.version} dn=${qr.deviceName ?: "—"} fp=$fpHead… nonce ok")
-            startPairing(qr)
-            return
-        }
         when (val parsed = result) {
             is ParseResult.Rejected -> append("endpoint rejected: ${parsed.reason}")
-            is ParseResult.Ok -> {
-                append("probing ${parsed.endpoint.host}:${parsed.endpoint.port} …")
-                launchWorker("hyphen-endpoint-probe") {
-                    val result = EndpointConnectProbe().probe(parsed.endpoint)
-                    postToUi {
-                        when (result) {
-                            is EndpointConnectProbe.Result.Connected ->
-                                append("connected: ${result.host}:${result.port}")
-                            is EndpointConnectProbe.Result.Failed ->
-                                append("connect failed: ${result.reason}")
-                        }
+            is ParseResult.Ok -> when (val endpoint = parsed.endpoint) {
+                is ParsedEndpoint.QrPayload -> {
+                    val fpHead = endpoint.decodedFingerprint()?.take(4)?.joinToString("") { "%02x".format(it) } ?: "—"
+                    append("qr parsed: v=${endpoint.version} dn=${endpoint.deviceName ?: "—"} fp=$fpHead… nonce ok")
+                    startPairing(endpoint)
+                }
+                is ParsedEndpoint.Manual -> {
+                    if (endpoint.nonceB64 == null) {
+                        append("manual pairing needs nonce: use host:port?n=<nonce> from the Mac pairing screen")
+                        return
                     }
+                    val qr = ParsedEndpoint.QrPayload(
+                        version = 0,
+                        host = endpoint.host,
+                        port = endpoint.port,
+                        spkiFingerprintB64 = null,
+                        nonceB64 = endpoint.nonceB64,
+                        deviceName = null,
+                    )
+                    append("manual pairing: provisional TLS to ${endpoint.host}:${endpoint.port} …")
+                    startPairing(qr)
                 }
             }
         }
@@ -438,13 +387,23 @@ class MainActivity : ComponentActivity() {
             var socket: SSLSocket? = null
             try {
                 val identity = AndroidKeystoreTlsIdentity.getOrCreate()
-                val macFp = qr.decodedFingerprint()
+                val pinnedFp = qr.decodedFingerprint()
+                var observedMacFp: ByteArray? = pinnedFp
                 socket = TlsClient.connect(
                     host = qr.host,
                     port = qr.port,
                     identity = identity,
-                    isTrusted = { it.contentEquals(macFp) },
+                    isTrusted = { fp ->
+                        if (pinnedFp != null) {
+                            fp.contentEquals(pinnedFp)
+                        } else {
+                            observedMacFp = fp.copyOf()
+                            true
+                        }
+                    },
                 )
+                val macFp = observedMacFp
+                    ?: throw IllegalStateException("server fingerprint missing after provisional TLS")
                 val transcript = PairingTranscript.create(
                     nonce = qr.decodedNonce(),
                     macSpkiFingerprint = macFp,
@@ -460,7 +419,7 @@ class MainActivity : ComponentActivity() {
                 val handoffSocket = socket
                 socket = null
                 postToUi(onDropped = { runCatching { handoffSocket.close() } }) {
-                    presentSasDialog(qr, gate, handoffSocket)
+                    presentSasDialog(qr, gate, handoffSocket, macFp)
                 }
             } catch (e: Exception) {
                 runCatching { socket?.close() }
@@ -469,7 +428,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun presentSasDialog(qr: ParsedEndpoint.QrPayload, gate: SasConfirmationGate, socket: SSLSocket) {
+    private fun presentSasDialog(
+        qr: ParsedEndpoint.QrPayload,
+        gate: SasConfirmationGate,
+        socket: SSLSocket,
+        macFp: ByteArray,
+    ) {
         fun closeSocket() {
             launchWorker("hyphen-close-pairing-socket") { runCatching { socket.close() } }
         }
@@ -480,6 +444,7 @@ class MainActivity : ComponentActivity() {
                 gate.confirm()
                 append("paired — fingerprint pinned (${gate.sas})")
                 emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_paired), System.currentTimeMillis()))
+                supervisor.rememberEndpoint(qr, macFp)
                 startSteadySession(qr, socket)
             }
             .setNegativeButton(R.string.dlg_sas_reject) { _, _ ->
@@ -502,75 +467,14 @@ class MainActivity : ComponentActivity() {
                 val handshake = SessionHandshake.initiate(
                     socket = socket,
                     device = device,
-                    resumeToken = resumeToken,
-                    previousSessionId = lastSessionId,
+                    resumeToken = null,
+                    previousSessionId = null,
                 )
-                resumeToken = handshake.resumeToken
-                lastSessionId = handshake.sessionId
-                lateinit var session: ProtocolSession
-                val listener = object : ProtocolSession.Listener {
-                    override fun onLiveness(state: HeartbeatMonitor.State) {
-                        append("session liveness: $state")
-                    }
-
-                    override fun onProtocolError(code: String, detail: String) {
-                        append("session protocol error: $code $detail")
-                    }
-
-                    override fun onEnvelope(envelope: Envelope) {
-                        handleSessionEnvelope(envelope)
-                    }
-
-                    override fun onAck(messageId: String) {
-                        // Advances the outbound transfer window (chunk acks).
-                        val sender = activeStateSnapshot().transferSender
-                        runCatching { sender?.handleAck(messageId) }
-                    }
-
-                    override fun onClosed() {
-                        if (clearActiveStateIf(session) != null) {
-                            HyphenNotificationListenerRuntime.clearNotificationOutbox()
-                        }
-                        append("Mac session closed")
-                        emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
-                    }
-                }
-                session = ProtocolSession(
-                    socket = socket,
-                    sessionId = handshake.sessionId,
-                    config = ProtocolSession.Config(startingSeq = 1),
-                    listener = DiagnosticProtocolSessionListener(diagnosticLogs, listener),
-                )
-                val sender = TransferSender(
-                    ProtocolSessionTransferOutbox(session),
-                    handshake.negotiatedCapabilities,
-                    onProgress = { progress ->
-                        updateLastTransferProgress(progress)
-                        append(transferProgressLine(progress))
-                        emit(transferProgressEvent(progress, TransferDirection.OUTGOING))
-                    },
-                )
-                val install = installActiveStateAndBindOutboxIfAlive(
-                    session,
-                    handshake.negotiatedCapabilities,
-                    sender,
-                )
-                if (install == null) {
-                    clearActiveStateIf(session)
-                    runCatching { session.stop() }
-                    return@launchWorker
-                }
-                install.previousSession?.stop()
-                if (!startSessionIfAlive(session)) {
-                    clearActiveStateIf(session)
-                    runCatching { session.stop() }
-                    return@launchWorker
-                }
                 val peerName = handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"
-                append("session connected to $peerName")
-                emit(ActivityEvent.PeerChanged(isPaired = true, peerName = peerName))
-                emit(ActivityEvent.ConnectionChanged(ConnectionState.CONNECTED, null))
-                emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))
+                supervisor.adoptPairedSession(socket, handshake, peerName)
+                postToUi {
+                    emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))
+                }
             } catch (e: Exception) {
                 runCatching { socket.close() }
                 append("session failed: ${e.message}")
@@ -578,8 +482,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleSessionEnvelope(envelope: Envelope) {
-        val state = activeStateSnapshot()
+    private fun handleSessionEnvelope(
+        envelope: Envelope,
+        state: ConnectionSupervisor.ActiveState = supervisor.activeState(),
+    ) {
         val session = state.session
         try {
             if (envelope.type == Envelope.TYPE_ERROR) {
@@ -597,7 +503,7 @@ class MainActivity : ComponentActivity() {
                 append("unsupported capability reported: $id (${envelope.capability})")
                 return
             }
-            if (session != null && !isNegotiatedCapability(state, envelope.capability)) {
+            if (session != null && !isNegotiatedCapability(state.capabilities, envelope.capability)) {
                 val id = sendProtocolError(
                     session = session,
                     regarding = envelope,
@@ -607,7 +513,7 @@ class MainActivity : ComponentActivity() {
                 append("unsupported capability reported: $id (${envelope.capability})")
                 return
             }
-            if (session != null && !isNegotiatedNotificationOption(state, envelope.type)) {
+            if (session != null && !isNegotiatedNotificationOption(state.capabilities, envelope.type)) {
                 val id = sendProtocolError(
                     session = session,
                     regarding = envelope,
@@ -661,14 +567,10 @@ class MainActivity : ComponentActivity() {
                 when (val event = transferReceiver.handle(envelope)) {
                     is TransferEvent.Completed -> {
                         updateLastTransferProgress(null)
-                        // Debug surface keeps no copy; drop the temp file so completed
-                        // transfers do not accumulate in the storage directory.
-                        val line = transferCompletedLine(event.completed)
+                        val delivered = deliverIncomingFile(event.completed)
+                        val line = transferCompletedLine(event.completed, delivered)
                         val manifest = event.completed.manifest
-                        event.completed.file.delete()
                         append(line)
-                        // The receiver only reaches Completed after every chunk's
-                        // SHA-256 verified, so the feed marks it verified.
                         emit(ActivityEvent.TransferCompleted(
                             fileId = manifest.fileId,
                             filename = manifest.filename,
@@ -725,11 +627,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun isNegotiatedCapability(state: ActiveStateSnapshot, capability: String?): Boolean =
-        capability == null || state.capabilities?.contains(capability) != false
+    private fun isNegotiatedCapability(
+        capabilities: SessionHandshake.NegotiatedCapabilities?,
+        capability: String?,
+    ): Boolean =
+        capability == null || capabilities?.contains(capability) != false
 
-    private fun isNegotiatedNotificationOption(state: ActiveStateSnapshot, type: String): Boolean =
-        NotificationCapabilityGate.allowsInboundRequest(type, state.capabilities)
+    private fun isNegotiatedNotificationOption(
+        capabilities: SessionHandshake.NegotiatedCapabilities?,
+        type: String,
+    ): Boolean =
+        NotificationCapabilityGate.allowsInboundRequest(type, capabilities)
 
     private fun isPluginEnvelope(envelope: Envelope): Boolean =
         envelope.type !in setOf(Envelope.TYPE_ACK, Envelope.TYPE_HEARTBEAT, Envelope.TYPE_HELLO, Envelope.TYPE_ERROR)
@@ -912,8 +820,20 @@ class MainActivity : ComponentActivity() {
         "transfer ${progress.filename}: ${progress.completedBytes}/${progress.totalBytes} bytes " +
             "(${progress.completedChunks}/${progress.totalChunks})"
 
-    private fun transferCompletedLine(completed: TransferCompleted): String =
-        "transfer received: ${completed.manifest.filename} (${completed.file.length()} bytes)"
+    private fun deliverIncomingFile(completed: TransferCompleted): File {
+        // External app-private storage is unavailable when the volume is not
+        // mounted; fall back to internal storage so a verified file is never lost.
+        val baseDir = getExternalFilesDir(null) ?: filesDir
+        val downloads = File(baseDir, "received").apply { mkdirs() }
+        val target = File(downloads, completed.manifest.filename)
+        if (target.exists()) target.delete()
+        completed.file.copyTo(target, overwrite = true)
+        completed.file.delete()
+        return target
+    }
+
+    private fun transferCompletedLine(completed: TransferCompleted, delivered: File): String =
+        "transfer received: ${completed.manifest.filename} (${completed.manifest.sizeBytes} bytes) -> ${delivered.name}"
 
     private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
         val isUrl = request.message.kind == TextLinkKind.URL
@@ -1170,10 +1090,8 @@ class MainActivity : ComponentActivity() {
             activeWorkers.toList().also { activeWorkers.clear() }
         }
         workers.forEach { it.interrupt() }
-        val session = clearActiveStateIf()
+        supervisor.removeListener(sessionListener)
         super.onDestroy()
-        HyphenNotificationListenerRuntime.clearNotificationOutbox()
-        session?.stop()
         manager?.stop()
     }
 

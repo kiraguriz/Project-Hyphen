@@ -130,7 +130,7 @@ HYPHEN_ANDROID_KEY_PASSWORD="..." \
 
 ## 首次运行注意事项
 
-- 配对坚持 local-first：QR/manual endpoint fallback 加 SAS 确认。
+- 配对坚持 local-first：扫描 QR，或在 Mac 配对窗口复制 `host:port?n=<nonce>` / 无 `fp` 的 `hyphen://pair` 字符串，再经双方 SAS 确认。
 - mDNS/Bonjour discovery 只是便利发现路径，不等于信任。
 - 只有 pinned fingerprint 加 SAS 确认才能建立信任。
 - Android 通知镜像需要用户主动授予 Notification Listener 权限。

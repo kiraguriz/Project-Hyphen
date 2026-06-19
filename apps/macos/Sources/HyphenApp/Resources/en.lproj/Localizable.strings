@@ -109,6 +109,7 @@
 "pairing.androidDevice" = "Android device";
 "pairing.windowTitle" = "Pair a new device";
 "pairing.scanOnPhone" = "Scan on your phone";
+"pairing.manualEntry" = "Or type this on your phone";
 "pairing.confirmTitle" = "Confirm the verification codes match";
 "pairing.confirmDetail" = "If the digits match, a trusted connection (SAS) is established between the two devices.";
 "pairing.match" = "They match — trust";

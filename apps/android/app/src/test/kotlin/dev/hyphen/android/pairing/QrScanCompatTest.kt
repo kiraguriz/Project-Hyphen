@@ -63,7 +63,7 @@ class QrScanCompatTest {
         val androidFp = ByteArray(32) { 0x07 }
         val transcript = PairingTranscript.create(
             nonce = payload.decodedNonce(),
-            macSpkiFingerprint = payload.decodedFingerprint(),
+            macSpkiFingerprint = payload.decodedFingerprint()!!,
             androidSpkiFingerprint = androidFp,
             protocolVersion = "hyphen/0.3",
         )
@@ -74,7 +74,7 @@ class QrScanCompatTest {
     fun `invalid payloads stay safely rejected`() {
         val bad = mapOf(
             "scheme" to macUri().replaceFirst("hyphen://pair?", "https://pair?"),
-            "missing fp" to "hyphen://pair?v=0&ep=h:1&n=${b64url(nonce)}",
+            "missing n" to "hyphen://pair?v=0&ep=h:1&fp=${b64url(fingerprint)}",
             "wrong version" to macUri().replaceFirst("v=0", "v=9"),
             "fp not base64url" to macUri().replaceFirst("fp=", "fp=!!!"),
             "fp wrong length" to "hyphen://pair?v=0&ep=h:1&fp=${b64url(ByteArray(31))}&n=${b64url(nonce)}",
@@ -86,5 +86,7 @@ class QrScanCompatTest {
             val result = EndpointParser.parseQr(uri)
             assertTrue("$label must be rejected, got $result", result is ParseResult.Rejected)
         }
+        val manualSas = EndpointParser.parseQr("hyphen://pair?v=0&ep=h:1&n=${b64url(nonce)}")
+        assertTrue(manualSas is ParseResult.Ok)
     }
 }

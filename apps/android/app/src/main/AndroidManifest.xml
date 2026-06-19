@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- LAN sockets for discovery probes and the future TLS transport
-         (ADR-0003 §6). -->
+    <!-- LAN sockets for discovery probes and mutual-TLS transport (ADR-0003 §6). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Scoped MulticastLock during discovery windows only (ADR-0003 §6,

@@ -147,7 +147,7 @@ audit, and signing/update strategy.
 
 ## First-Run Notes
 
-- Pairing is local-first: QR/manual endpoint fallback plus SAS confirmation.
+- Pairing is local-first: QR or manual pairing string (`host:port?n=<nonce>` from the Mac pairing screen, or a `hyphen://pair` payload without `fp`) plus SAS confirmation on both sides.
 - mDNS/Bonjour discovery is a convenience path, not trust.
 - Trust comes only from pinned fingerprints plus SAS confirmation.
 - Android notification mirroring requires the user to grant Notification
