@@ -112,26 +112,25 @@ class NotificationListenerLifecycleTest {
     }
 
     @Test
-    fun `dispatch queue preserves critical removal when best-effort backlog is full`() {
+    fun `dispatch queue runs the removal sweep and coalesces repeated pokes`() {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val bestEffortRan = CountDownLatch(1)
-        val criticalRan = CountDownLatch(1)
-        val queue = NotificationDispatchQueue(capacity = 1)
+        val sweeps = AtomicInteger(0)
+        val queue = NotificationDispatchQueue(capacity = 4)
+        queue.setRemovalSweep { sweeps.incrementAndGet() }
 
+        // Occupy the single worker so the pokes pile up before it can drain them.
         assertTrue(queue.submit {
             started.countDown()
             release.await(3, TimeUnit.SECONDS)
         })
         assertTrue(started.await(1, TimeUnit.SECONDS))
-        assertTrue(queue.submit { bestEffortRan.countDown() })
-        assertTrue(queue.submitCritical(task = { criticalRan.countDown() }))
+        repeat(10) { assertTrue(queue.requestRemovalSweep()) }
 
         release.countDown()
-
-        assertTrue(criticalRan.await(1, TimeUnit.SECONDS))
-        assertFalse(bestEffortRan.await(100, TimeUnit.MILLISECONDS))
-        assertEquals(1, queue.droppedCount())
+        Thread.sleep(150)
+        // Ten pokes collapse into a single sweep run (worker was busy the whole time).
+        assertTrue(sweeps.get() in 1..2)
         queue.shutdown()
     }
 
@@ -198,93 +197,41 @@ class NotificationListenerLifecycleTest {
     }
 
     @Test
-    fun `dispatch queue hard caps size when only critical removals backlog`() {
-        val started = CountDownLatch(1)
-        val release = CountDownLatch(1)
-        val capacity = 4
-        val queue = NotificationDispatchQueue(capacity = capacity)
-        val executedKeys = java.util.Collections.synchronizedList(mutableListOf<String>())
+    fun `removal sweep delivers every distinct removal without losing any`() {
+        val keys = (0 until 50).map { "0|com.chat|$it|thread-123|10101" }
+        HyphenNotificationListenerRuntime.onConnected(keys.map { payload(it, "body-$it") })
+        val outbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(outbox)
+        assertTrue(waitForEnvelopeCount(outbox, keys.size))
 
-        assertTrue(queue.submit {
-            started.countDown()
-            release.await(3, TimeUnit.SECONDS)
-        })
-        assertTrue(started.await(1, TimeUnit.SECONDS))
+        keys.forEach { HyphenNotificationListenerRuntime.onNotificationRemoved(it) }
 
-        repeat(capacity * 2) { index ->
-            val key = "key-$index"
-            assertTrue(queue.submitCritical(task = { executedKeys += key }, coalesceKey = key))
-            assertTrue(queue.size() <= capacity)
-        }
-
-        release.countDown()
-        Thread.sleep(200)
-        assertTrue(executedKeys.size <= capacity)
-        assertTrue(queue.droppedCount() > 0 || queue.coalescedCount() >= 0)
-        queue.shutdown()
+        assertTrue(waitForEnvelopeCount(outbox, keys.size * 2))
+        val removed = outbox.envelopes.count { it.type == NotificationProtocol.TYPE_REMOVED }
+        assertEquals(keys.size, removed)
+        keys.forEach { assertFalse(HyphenNotificationListenerRuntime.isNotificationActive(it)) }
     }
 
     @Test
-    fun `dispatch queue coalesces duplicate critical removals for the same sbnKey`() {
-        val started = CountDownLatch(1)
-        val release = CountDownLatch(1)
-        val executed = AtomicInteger(0)
-        val queue = NotificationDispatchQueue(capacity = 4)
+    fun `runtime coalesces repeated removals of the same sbnKey into one send`() {
+        val key = "0|com.chat|7|thread-123|10101"
+        HyphenNotificationListenerRuntime.onConnected(listOf(payload(key, "active")))
+        val removedStarted = CountDownLatch(1)
+        val releaseRemoved = CountDownLatch(1)
+        val outbox = BlockingRemovedOutbox(removedStarted, releaseRemoved)
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(outbox)
+        assertTrue(waitForBlockingEnvelopeCount(outbox, 1))
 
-        assertTrue(queue.submit {
-            started.countDown()
-            release.await(3, TimeUnit.SECONDS)
-        })
-        assertTrue(started.await(1, TimeUnit.SECONDS))
+        // First removal triggers the sweep and blocks mid-send, so the key stays in
+        // the set; the next four removals see it already pending and coalesce.
+        repeat(5) { HyphenNotificationListenerRuntime.onNotificationRemoved(key) }
+        assertTrue(removedStarted.await(1, TimeUnit.SECONDS))
+        assertTrue(HyphenNotificationListenerRuntime.removalCoalescedCount() >= 4)
 
-        repeat(5) {
-            assertTrue(queue.submitCritical(task = { executed.incrementAndGet() }, coalesceKey = "same-key"))
-        }
-        assertTrue(queue.coalescedCount() >= 4)
-
-        release.countDown()
-        Thread.sleep(200)
-        assertEquals(1, executed.get())
-        queue.shutdown()
-    }
-
-    @Test
-    fun `evicted critical callbacks retry without livelock when queue is full`() {
-        val started = CountDownLatch(1)
-        val release = CountDownLatch(1)
-        val capacity = 2
-        val queue = NotificationDispatchQueue(capacity = capacity)
-        val retries = AtomicInteger(0)
-
-        assertTrue(queue.submit {
-            started.countDown()
-            release.await(3, TimeUnit.SECONDS)
-        })
-        assertTrue(started.await(1, TimeUnit.SECONDS))
-
-        val submitter = Executors.newSingleThreadExecutor()
-        val submitted = submitter.submit {
-            repeat(capacity * 3) { index ->
-                val key = "key-$index"
-                assertTrue(
-                    queue.submitCritical(
-                        task = { },
-                        coalesceKey = key,
-                        onEvicted = {
-                            retries.incrementAndGet()
-                            queue.submitCritical(task = { }, coalesceKey = "retry-$index")
-                        },
-                    ),
-                )
-            }
-        }
-
-        submitted.get(2, TimeUnit.SECONDS)
-        assertTrue(retries.get() > 0)
-
-        release.countDown()
-        submitter.shutdownNow()
-        queue.shutdown()
+        releaseRemoved.countDown()
+        Thread.sleep(150)
+        assertEquals(1, outbox.envelopes.count { it.type == NotificationProtocol.TYPE_REMOVED })
+        assertFalse(HyphenNotificationListenerRuntime.isNotificationActive(key))
     }
 
     @Test

@@ -55,7 +55,9 @@ object HyphenNotificationListenerRuntime {
     private var canceller: NotificationCanceller? = null
     private var replier: NotificationReplier? = null
     private val activePayloads = linkedMapOf<String, NormalizedNotificationPayload>()
+    /** Source of truth for removals not yet acked by the Mac (drained by the dispatch sweep). */
     private val pendingRemovedKeys = linkedSetOf<String>()
+    private val removalCoalesced = AtomicInteger(0)
     private var outboxGeneration = 0L
 
     fun state(): NotificationListenerConnectionState = synchronized(lifecycle) {
@@ -110,14 +112,14 @@ object HyphenNotificationListenerRuntime {
         dispatcher?.shutdown()
         outboxGeneration += 1
         privacyPolicyAwaitingRemote = requireRemotePrivacyPolicy && !remotePrivacyPolicyApplied
-        dispatcher = NotificationDispatchQueue()
+        dispatcher = NotificationDispatchQueue().apply { setRemovalSweep(::drainPendingRemovals) }
         eventSender = NotificationMirrorEventSender(
             outbox = outbox,
             initialActiveKeys = activePayloads.keys,
             allowReplyActions = allowReplyActions,
         ).apply { setPrivacyPolicy(effectivePrivacyPolicyLocked()) }
         submitSnapshotsIfConnectedLocked()
-        submitPendingRemovalsIfConnectedLocked()
+        requestRemovalSweepIfConnectedLocked()
     }
 
     fun clearNotificationOutbox() = synchronized(lifecycle) {
@@ -203,16 +205,16 @@ object HyphenNotificationListenerRuntime {
         return onNotificationRemoved(sbn.key)
     }
 
-    internal fun onNotificationRemoved(sbnKey: String): Boolean {
-        val removal = synchronized(lifecycle) {
-            if (lifecycle.state != NotificationListenerConnectionState.CONNECTED) return false
-            activePayloads.remove(sbnKey)
-            pendingRemovedKeys += sbnKey
-            val sender = eventSender ?: return false
-            val queue = dispatcher ?: return false
-            RemovalSubmission(sbnKey, sender, queue, outboxGeneration)
-        }
-        return submitRemoval(removal)
+    internal fun onNotificationRemoved(sbnKey: String): Boolean = synchronized(lifecycle) {
+        if (lifecycle.state != NotificationListenerConnectionState.CONNECTED) return false
+        activePayloads.remove(sbnKey)
+        // pendingRemovedKeys is the single source of truth; a set coalesces repeats
+        // of the same key for free and bounds memory by the live notification count.
+        if (!pendingRemovedKeys.add(sbnKey)) removalCoalesced.incrementAndGet()
+        val queue = dispatcher ?: return false
+        eventSender ?: return false
+        queue.requestRemovalSweep()
+        true
     }
 
     internal fun resetForTests() = synchronized(lifecycle) {
@@ -224,6 +226,7 @@ object HyphenNotificationListenerRuntime {
         privacyPolicy = NotificationPrivacyPolicy()
         privacyPolicyAwaitingRemote = false
         remotePrivacyPolicyApplied = false
+        removalCoalesced.set(0)
         canceller = null
         replier = null
         outboxGeneration += 1
@@ -233,6 +236,8 @@ object HyphenNotificationListenerRuntime {
     internal fun isPrivacyPolicyAwaitingRemote(): Boolean = synchronized(lifecycle) {
         privacyPolicyAwaitingRemote
     }
+
+    internal fun removalCoalescedCount(): Int = removalCoalesced.get()
 
     private fun replaceActivePayloads(payloads: Iterable<NormalizedNotificationPayload>) {
         activePayloads.clear()
@@ -269,160 +274,134 @@ object HyphenNotificationListenerRuntime {
             }
     }
 
-    private fun submitPendingRemovalsIfConnectedLocked() {
+    private fun requestRemovalSweepIfConnectedLocked() {
         if (lifecycle.state != NotificationListenerConnectionState.CONNECTED) return
-        val sender = eventSender ?: return
-        val queue = dispatcher ?: return
-        val generation = outboxGeneration
-        pendingRemovedKeys.forEach { sbnKey ->
-            submitRemoval(RemovalSubmission(sbnKey, sender, queue, generation))
-        }
+        if (pendingRemovedKeys.isEmpty()) return
+        eventSender ?: return
+        dispatcher?.requestRemovalSweep()
     }
 
-    private fun submitRemoval(removal: RemovalSubmission): Boolean {
-        val task = {
-            val sent = runCatching { removal.sender.sendRemoved(removal.sbnKey) }.isSuccess
+    /**
+     * Drains [pendingRemovedKeys] on the dispatch worker: one send per still-pending
+     * key, dropping it from the set on success and leaving it for the next poke or
+     * rebind on failure. No eviction, no re-queue, no recursion — the set bounds
+     * memory by the live notification count and coalesces repeats inherently.
+     */
+    private fun drainPendingRemovals() {
+        val (sender, generation, keys) = synchronized(lifecycle) {
+            val currentSender = eventSender ?: return
+            Triple(currentSender, outboxGeneration, pendingRemovedKeys.toList())
+        }
+        for (sbnKey in keys) {
+            val stillPending = synchronized(lifecycle) {
+                if (outboxGeneration != generation) return
+                pendingRemovedKeys.contains(sbnKey)
+            }
+            if (!stillPending) continue
+            val sent = runCatching { sender.sendRemoved(sbnKey) }.isSuccess
             if (sent) {
                 synchronized(lifecycle) {
-                    if (outboxGeneration == removal.generation) {
-                        pendingRemovedKeys.remove(removal.sbnKey)
-                    }
+                    if (outboxGeneration == generation) pendingRemovedKeys.remove(sbnKey)
                 }
             }
         }
-        val onEvicted = {
-            val shouldRetry = synchronized(lifecycle) {
-                pendingRemovedKeys.contains(removal.sbnKey) && outboxGeneration == removal.generation
-            }
-            if (shouldRetry) submitRemoval(removal)
-        }
-        return removal.queue.submitCritical(
-            task = task,
-            coalesceKey = removal.sbnKey,
-            onEvicted = onEvicted,
-        )
     }
-
-    private data class RemovalSubmission(
-        val sbnKey: String,
-        val sender: NotificationMirrorEventSender,
-        val queue: NotificationDispatchQueue,
-        val generation: Long,
-    )
 }
 
+/**
+ * Single-thread dispatcher for outbound notification-mirror traffic.
+ *
+ * Best-effort events (posted/updated/snapshot) flow through a bounded FIFO queue;
+ * when it is full the OLDEST queued event is dropped, because a newer post/update
+ * for the same key — or the next full snapshot — supersedes it.
+ *
+ * Removals are deliberately NOT queued as events. They are state owned by
+ * [HyphenNotificationListenerRuntime] (its pendingRemovedKeys set), which registers
+ * a drain via [setRemovalSweep] and pokes it with [requestRemovalSweep]. The worker
+ * coalesces pokes and runs the drain, so removals are bounded by the live
+ * notification count and are never lost, eviction-shuffled, or recursively re-queued.
+ */
 class NotificationDispatchQueue(
     private val capacity: Int = 128,
     private val dropped: AtomicInteger = AtomicInteger(0),
-    private val coalesced: AtomicInteger = AtomicInteger(0),
 ) {
     init {
         require(capacity > 0) { "capacity must be positive" }
     }
 
     private val stateLock = ReentrantLock()
-    private val notEmpty = stateLock.newCondition()
+    private val workAvailable = stateLock.newCondition()
     private val running = AtomicBoolean(true)
-    private val queue = ArrayList<QueuedTask>(capacity)
+    private val queue = ArrayList<() -> Unit>(capacity)
+    private var removalSweep: (() -> Unit)? = null
+    private var sweepRequested = false
     private val worker = Thread(::runLoop, "hyphen-notification-dispatch").apply {
         isDaemon = true
         start()
     }
 
-    fun submit(task: () -> Unit): Boolean = submit(task, critical = false, coalesceKey = null, onEvicted = null)
+    /** Register the runtime's pending-removal drain. It runs on the dispatch worker. */
+    fun setRemovalSweep(sweep: () -> Unit) = stateLock.withLock {
+        removalSweep = sweep
+    }
 
-    fun submitCritical(
-        task: () -> Unit,
-        coalesceKey: String? = null,
-        onEvicted: (() -> Unit)? = null,
-    ): Boolean = submit(task, critical = true, coalesceKey = coalesceKey, onEvicted = onEvicted)
-
-    internal fun size(): Int = stateLock.withLock { queue.size }
-
-    private fun submit(
-        task: () -> Unit,
-        critical: Boolean,
-        coalesceKey: String?,
-        onEvicted: (() -> Unit)? = null,
-    ): Boolean {
-        val pendingEvicted = mutableListOf<() -> Unit>()
-        val accepted = stateLock.withLock {
-            if (!running.get()) return@withLock false
-            if (critical && coalesceKey != null) {
-                val existing = queue.indexOfFirst { it.coalesceKey == coalesceKey }
-                if (existing >= 0) {
-                    queue[existing] = QueuedTask(task, critical = true, coalesceKey = coalesceKey, onEvicted = onEvicted)
-                    coalesced.incrementAndGet()
-                    notEmpty.signal()
-                    return@withLock true
-                }
-            }
-            while (queue.size >= capacity) {
-                if (!dropOldestLocked(pendingEvicted)) break
-            }
-            if (queue.size >= capacity) return@withLock false
-            // NB: java.util.ArrayList.addLast (SequencedCollection) only exists on
-            // Android API 35+. minSdk is 26 with no core-library desugaring, so use
-            // add(), which appends to the tail identically and is safe on all levels.
-            queue.add(QueuedTask(task, critical, coalesceKey, onEvicted))
-            notEmpty.signal()
-            true
+    /** Enqueue a best-effort event; drops the oldest queued event when at capacity. */
+    fun submit(task: () -> Unit): Boolean = stateLock.withLock {
+        if (!running.get()) return@withLock false
+        if (queue.size >= capacity) {
+            queue.removeAt(0)
+            dropped.incrementAndGet()
         }
-        pendingEvicted.forEach { callback -> runCatching { callback() } }
-        return accepted
+        queue.add(task)
+        workAvailable.signal()
+        true
+    }
+
+    /** Coalesced poke asking the worker to drain the runtime's pending removals. */
+    fun requestRemovalSweep(): Boolean = stateLock.withLock {
+        if (!running.get()) return@withLock false
+        sweepRequested = true
+        workAvailable.signal()
+        true
     }
 
     fun droppedCount(): Int = dropped.get()
 
-    fun coalescedCount(): Int = coalesced.get()
-
     fun shutdown() {
         stateLock.withLock {
             running.set(false)
-            notEmpty.signalAll()
+            workAvailable.signalAll()
         }
     }
 
     private fun runLoop() {
         while (true) {
-            val task = takeTask() ?: return
-            runCatching { task.block() }
+            val work = awaitWork() ?: return
+            work.first?.let { runCatching { it() } }
+            work.second?.let { runCatching { it() } }
         }
     }
 
-    private fun takeTask(): QueuedTask? = stateLock.withLock {
-        while (running.get() && queue.isEmpty()) {
+    private fun awaitWork(): Pair<(() -> Unit)?, (() -> Unit)?>? = stateLock.withLock {
+        while (running.get() && queue.isEmpty() && !sweepRequested) {
             try {
-                notEmpty.await(50, TimeUnit.MILLISECONDS)
+                workAvailable.await(50, TimeUnit.MILLISECONDS)
             } catch (_: InterruptedException) {
-                if (!running.get() && queue.isEmpty()) return null
             }
         }
-        if (!running.get() && queue.isEmpty()) return null
-        queue.removeAt(0)
-    }
-
-    private fun dropOldestLocked(pendingEvicted: MutableList<() -> Unit>): Boolean {
-        val iterator = queue.iterator()
-        while (iterator.hasNext()) {
-            val candidate = iterator.next()
-            if (!candidate.critical) {
-                iterator.remove()
-                dropped.incrementAndGet()
-                return true
-            }
+        // After shutdown, finish draining already-accepted best-effort work but skip
+        // the removal sweep — a rebind installs a fresh dispatcher that owns the set.
+        if (!running.get()) {
+            sweepRequested = false
+            if (queue.isEmpty()) return@withLock null
         }
-        if (queue.isEmpty()) return false
-        val evicted = queue.removeAt(0)
-        dropped.incrementAndGet()
-        evicted.onEvicted?.let(pendingEvicted::add)
-        return true
+        val task = if (queue.isNotEmpty()) queue.removeAt(0) else null
+        val sweep = if (sweepRequested) {
+            sweepRequested = false
+            removalSweep
+        } else {
+            null
+        }
+        task to sweep
     }
-
-    private data class QueuedTask(
-        val block: () -> Unit,
-        val critical: Boolean,
-        val coalesceKey: String? = null,
-        val onEvicted: (() -> Unit)? = null,
-    )
 }

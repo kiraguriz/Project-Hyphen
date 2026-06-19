@@ -73,16 +73,16 @@
 | 任务 | 状态 | 证据 |
 |---|---|---|
 | P0 消除首帧/重绑 fail-open 隐私窗口 | [x] 已实现 | `NotificationListenerLifecycle.kt` `requireRemotePrivacyPolicy` + `existsOnly` fail-closed；`ConnectionSupervisor` 传入 negotiated flag；policy 到达后 refresh |
-| P0 critical removal queue 硬上限 + sbnKey 合并 | [x] 已实现 | `NotificationDispatchQueue` hard cap、`coalesceKey`、`droppedCount`/`coalescedCount` |
-| P1 竞态与协议级测试 | [x] 已实现 | `NotificationListenerLifecycleTest` fail-closed bind/rebind/policy-refresh/queue 测试 |
+| P0 removal 有界、去重、不丢失 | [x] 已实现 | removal 建模为运行时 `pendingRemovedKeys` 状态集合,由 dispatch worker 经 `requestRemovalSweep`/`drainPendingRemovals` 排空(集合天然去重、内存按活动通知数有界);best-effort 队列保留 drop-oldest + `droppedCount`,合并计数 `removalCoalescedCount` |
+| P1 竞态与协议级测试 | [x] 已实现 | `NotificationListenerLifecycleTest` fail-closed bind/rebind/policy-refresh + removal-sweep/合并测试 |
 | P2 真实设备证据 | [ ] 仍 blocked | environment-only；见开放问题 |
 
 **代码审查跟进（2026-06-18，已修复）**：
 
 - （评估）本地 `setNotificationPrivacyMode` 曾可绕过 fail-closed → 已改为 `privacyPolicyAwaitingRemote` 时 no-op。
 - （评估）reconnect `bindNotificationOutbox` 曾重置已应用的 Mac policy → 已用 `remotePrivacyPolicyApplied` 保留。
-- （评估）critical removal 被 queue 丢弃后未重试 → 已加 `onEvicted` 重提交路径。
-- （评估）`onEvicted` 在持锁 eviction 路径内同步重入 `submitCritical` 可导致 livelock → 已改为释放 `stateLock` 后再调用 eviction 回调；单测 `evicted critical callbacks retry without livelock when queue is full`。
+- （阻断,已修复）队列 `ArrayList.addLast`（SequencedCollection,API 35+）在 minSdk 26 无 desugaring 下会 `NoSuchMethodError`,崩溃所有 Android 8–14 设备的通知分发;宿主 JDK 单测无法暴露 → 改用 `ArrayList.add`。
+- （重构,治本）removal 原本既是 `pendingRemovedKeys` 状态、又是队列中的 critical task(双事实来源),其 `onEvicted` 重试在 worker 阻塞、队列被异 key removal 占满时会同步递归重入 → StackOverflow。改为单一事实来源:removal 只存于集合,worker 经 coalesced sweep 排空,彻底消除 eviction/onEvicted/递归,并顺带消解“满载保留策略”这个开放问题。
 
 ### P0：消除首帧/重绑 fail-open 隐私窗口
 
