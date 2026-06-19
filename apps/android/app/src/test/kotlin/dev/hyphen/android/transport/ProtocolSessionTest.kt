@@ -151,10 +151,15 @@ class ProtocolSessionTest {
     fun `heartbeats keep both sides healthy`() {
         val serverListener = RecordingListener()
         val clientListener = RecordingListener()
-        connectedPair(fast, fast, serverListener, clientListener)
-        // 6+ intervals of wall time: any missing heartbeat flow would trip
-        // the watchdog (>2 intervals of silence) on that side.
-        assertTrue(!serverListener.degraded.await(500, TimeUnit.MILLISECONDS))
+        // The 80 ms `fast` interval gives a 160 ms (2-interval) silence
+        // watchdog, which a loaded CI runner can trip just from a GC/scheduling
+        // hiccup, spuriously degrading a healthy session. Use a more forgiving
+        // 300 ms interval (600 ms watchdog) for this steady-state check.
+        val steady = fast.copy(heartbeatIntervalMs = 300)
+        connectedPair(steady, steady, serverListener, clientListener)
+        // ~5 intervals of wall time with live heartbeats; neither side should
+        // trip its silence watchdog (>2 intervals == >600 ms here).
+        assertTrue(!serverListener.degraded.await(1500, TimeUnit.MILLISECONDS))
         assertTrue(!clientListener.degraded.await(1, TimeUnit.MILLISECONDS))
     }
 
