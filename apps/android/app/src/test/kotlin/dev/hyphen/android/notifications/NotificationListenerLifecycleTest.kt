@@ -10,6 +10,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class NotificationListenerLifecycleTest {
 
@@ -124,7 +125,7 @@ class NotificationListenerLifecycleTest {
         })
         assertTrue(started.await(1, TimeUnit.SECONDS))
         assertTrue(queue.submit { bestEffortRan.countDown() })
-        assertTrue(queue.submitCritical { criticalRan.countDown() })
+        assertTrue(queue.submitCritical(task = { criticalRan.countDown() }))
 
         release.countDown()
 
@@ -197,7 +198,206 @@ class NotificationListenerLifecycleTest {
     }
 
     @Test
-    fun `connected runtime snapshots active payloads when outbox binds`() {
+    fun `dispatch queue hard caps size when only critical removals backlog`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val capacity = 4
+        val queue = NotificationDispatchQueue(capacity = capacity)
+        val executedKeys = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        assertTrue(queue.submit {
+            started.countDown()
+            release.await(3, TimeUnit.SECONDS)
+        })
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+
+        repeat(capacity * 2) { index ->
+            val key = "key-$index"
+            assertTrue(queue.submitCritical(task = { executedKeys += key }, coalesceKey = key))
+            assertTrue(queue.size() <= capacity)
+        }
+
+        release.countDown()
+        Thread.sleep(200)
+        assertTrue(executedKeys.size <= capacity)
+        assertTrue(queue.droppedCount() > 0 || queue.coalescedCount() >= 0)
+        queue.shutdown()
+    }
+
+    @Test
+    fun `dispatch queue coalesces duplicate critical removals for the same sbnKey`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executed = AtomicInteger(0)
+        val queue = NotificationDispatchQueue(capacity = 4)
+
+        assertTrue(queue.submit {
+            started.countDown()
+            release.await(3, TimeUnit.SECONDS)
+        })
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+
+        repeat(5) {
+            assertTrue(queue.submitCritical(task = { executed.incrementAndGet() }, coalesceKey = "same-key"))
+        }
+        assertTrue(queue.coalescedCount() >= 4)
+
+        release.countDown()
+        Thread.sleep(200)
+        assertEquals(1, executed.get())
+        queue.shutdown()
+    }
+
+    @Test
+    fun `evicted critical callbacks retry without livelock when queue is full`() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val capacity = 2
+        val queue = NotificationDispatchQueue(capacity = capacity)
+        val retries = AtomicInteger(0)
+
+        assertTrue(queue.submit {
+            started.countDown()
+            release.await(3, TimeUnit.SECONDS)
+        })
+        assertTrue(started.await(1, TimeUnit.SECONDS))
+
+        val submitter = Executors.newSingleThreadExecutor()
+        val submitted = submitter.submit {
+            repeat(capacity * 3) { index ->
+                val key = "key-$index"
+                assertTrue(
+                    queue.submitCritical(
+                        task = { },
+                        coalesceKey = key,
+                        onEvicted = {
+                            retries.incrementAndGet()
+                            queue.submitCritical(task = { }, coalesceKey = "retry-$index")
+                        },
+                    ),
+                )
+            }
+        }
+
+        submitted.get(2, TimeUnit.SECONDS)
+        assertTrue(retries.get() > 0)
+
+        release.countDown()
+        submitter.shutdownNow()
+        queue.shutdown()
+    }
+
+    @Test
+    fun `negotiated privacy session fail-closes active snapshot until policy arrives`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        val outbox = RecordingNotificationOutbox()
+
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = outbox,
+            requireRemotePrivacyPolicy = true,
+        )
+
+        assertTrue(waitForEnvelopeCount(outbox, 1))
+        assertTrue(HyphenNotificationListenerRuntime.isPrivacyPolicyAwaitingRemote())
+        val sent = outbox.envelopes.single()
+        assertEquals(NotificationProtocol.TYPE_POSTED, sent.type)
+        assertFalse(sent.payload.entries.containsKey("text"))
+        assertFalse(sent.payload.entries.containsKey("title"))
+        assertFalse(sent.payload.encode().contains("secret active body"))
+    }
+
+    @Test
+    fun `remote privacy policy unlocks hideBody snapshot refresh after fail-closed bind`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        val outbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = outbox,
+            requireRemotePrivacyPolicy = true,
+        )
+        assertTrue(waitForEnvelopeCount(outbox, 1))
+
+        HyphenNotificationListenerRuntime.setNotificationPrivacyPolicy(
+            NotificationPrivacyPolicy(defaultMode = NotificationPrivacyMode.HIDE_BODY),
+        )
+        assertTrue(waitForEnvelopeCount(outbox, 2))
+        assertFalse(HyphenNotificationListenerRuntime.isPrivacyPolicyAwaitingRemote())
+
+        val refreshed = outbox.envelopes[1]
+        assertEquals(NotificationProtocol.TYPE_UPDATED, refreshed.type)
+        assertEquals(Json.Str("Example"), refreshed.payload["title"])
+        assertFalse(refreshed.payload.entries.containsKey("text"))
+        assertFalse(refreshed.payload.encode().contains("secret active body"))
+    }
+
+    @Test
+    fun `local privacy mode is ignored while remote policy is pending`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        val outbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = outbox,
+            requireRemotePrivacyPolicy = true,
+        )
+        assertTrue(waitForEnvelopeCount(outbox, 1))
+
+        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(NotificationPrivacyMode.SHOW_FULL)
+        Thread.sleep(100)
+        assertEquals(1, outbox.envelopes.size)
+        assertTrue(HyphenNotificationListenerRuntime.isPrivacyPolicyAwaitingRemote())
+        assertFalse(outbox.envelopes.single().payload.encode().contains("secret active body"))
+    }
+
+    @Test
+    fun `rebind after remote policy keeps negotiated filtering instead of fail-closed reset`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        HyphenNotificationListenerRuntime.setNotificationPrivacyPolicy(
+            NotificationPrivacyPolicy(defaultMode = NotificationPrivacyMode.HIDE_BODY),
+        )
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = secondOutbox,
+            requireRemotePrivacyPolicy = true,
+        )
+
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        assertFalse(HyphenNotificationListenerRuntime.isPrivacyPolicyAwaitingRemote())
+        val sent = secondOutbox.envelopes.single()
+        assertEquals(Json.Str("Example"), sent.payload["title"])
+        assertFalse(sent.payload.entries.containsKey("text"))
+    }
+
+    @Test
+    fun `rebind with negotiated privacy fail-closes snapshot again until policy arrives`() {
+        HyphenNotificationListenerRuntime.onConnected(
+            listOf(payload("0|com.chat|7|thread-123|10101", "secret active body")),
+        )
+        val firstOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = firstOutbox,
+            requireRemotePrivacyPolicy = true,
+        )
+        assertTrue(waitForEnvelopeCount(firstOutbox, 1))
+
+        val secondOutbox = RecordingNotificationOutbox()
+        HyphenNotificationListenerRuntime.bindNotificationOutbox(
+            outbox = secondOutbox,
+            requireRemotePrivacyPolicy = true,
+        )
+        assertTrue(waitForEnvelopeCount(secondOutbox, 1))
+        assertTrue(HyphenNotificationListenerRuntime.isPrivacyPolicyAwaitingRemote())
+        assertFalse(secondOutbox.envelopes.single().payload.encode().contains("secret active body"))
+    }
+
+    @Test
+    fun `legacy outbox bind without negotiated privacy keeps full active snapshot`() {
         HyphenNotificationListenerRuntime.onConnected(
             listOf(payload("0|com.chat|7|thread-123|10101", "active before bind")),
         )

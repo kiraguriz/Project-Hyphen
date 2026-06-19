@@ -394,6 +394,7 @@ class ConnectionSupervisor private constructor(
             HyphenNotificationListenerRuntime.bindNotificationOutbox(
                 outbox = ProtocolSessionNotificationOutbox(session),
                 allowReplyActions = NotificationCapabilityGate.allowReplyActions(capabilities),
+                requireRemotePrivacyPolicy = capabilities.notificationPrivacyPolicyEnabled(),
             )
         } else {
             HyphenNotificationListenerRuntime.clearNotificationOutbox()

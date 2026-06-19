@@ -68,6 +68,22 @@
 
 ## 修复计划
 
+### 实施清单（2026-06-18）
+
+| 任务 | 状态 | 证据 |
+|---|---|---|
+| P0 消除首帧/重绑 fail-open 隐私窗口 | [x] 已实现 | `NotificationListenerLifecycle.kt` `requireRemotePrivacyPolicy` + `existsOnly` fail-closed；`ConnectionSupervisor` 传入 negotiated flag；policy 到达后 refresh |
+| P0 critical removal queue 硬上限 + sbnKey 合并 | [x] 已实现 | `NotificationDispatchQueue` hard cap、`coalesceKey`、`droppedCount`/`coalescedCount` |
+| P1 竞态与协议级测试 | [x] 已实现 | `NotificationListenerLifecycleTest` fail-closed bind/rebind/policy-refresh/queue 测试 |
+| P2 真实设备证据 | [ ] 仍 blocked | environment-only；见开放问题 |
+
+**代码审查跟进（2026-06-18，已修复）**：
+
+- （评估）本地 `setNotificationPrivacyMode` 曾可绕过 fail-closed → 已改为 `privacyPolicyAwaitingRemote` 时 no-op。
+- （评估）reconnect `bindNotificationOutbox` 曾重置已应用的 Mac policy → 已用 `remotePrivacyPolicyApplied` 保留。
+- （评估）critical removal 被 queue 丢弃后未重试 → 已加 `onEvicted` 重提交路径。
+- （评估）`onEvicted` 在持锁 eviction 路径内同步重入 `submitCritical` 可导致 livelock → 已改为释放 `stateLock` 后再调用 eviction 回调；单测 `evicted critical callbacks retry without livelock when queue is full`。
+
 ### P0：消除首帧/重绑 fail-open 隐私窗口
 
 可能触及文件：

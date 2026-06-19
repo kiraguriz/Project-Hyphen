@@ -18,8 +18,9 @@ enum class NotificationPrivacyMode(val wire: String) {
  * Per-app notification privacy applied at the SOURCE (before a payload crosses
  * the LAN), so hidden content never leaves the phone. The Mac pushes this policy
  * over `notification.privacy.policy` once both peers negotiate
- * `notifications.v1.privacyPolicy`; until then the macOS receiver scrubber is the
- * only enforcement (defense-in-depth).
+ * `notifications.v1.privacyPolicy`. Until Android applies that policy, negotiated
+ * sessions fail closed with `existsOnly` at the source; legacy peers without the
+ * option keep `SHOW_FULL` and rely on the macOS receiver scrubber (defense-in-depth).
  *
  * Filtering rules mirror the macOS receiver:
  * - SHOW_FULL: unchanged.

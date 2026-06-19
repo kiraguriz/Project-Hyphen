@@ -1,7 +1,7 @@
 package dev.hyphen.android.notifications
 
 import android.service.notification.StatusBarNotification
-import java.util.ArrayDeque
+import java.util.ArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -49,6 +49,9 @@ object HyphenNotificationListenerRuntime {
     private var eventSender: NotificationMirrorEventSender? = null
     private var dispatcher: NotificationDispatchQueue? = null
     private var privacyPolicy: NotificationPrivacyPolicy = NotificationPrivacyPolicy()
+    /** Fail-closed until Mac `notification.privacy.policy` is applied (negotiated sessions only). */
+    private var privacyPolicyAwaitingRemote: Boolean = false
+    private var remotePrivacyPolicyApplied: Boolean = false
     private var canceller: NotificationCanceller? = null
     private var replier: NotificationReplier? = null
     private val activePayloads = linkedMapOf<String, NormalizedNotificationPayload>()
@@ -102,15 +105,17 @@ object HyphenNotificationListenerRuntime {
     fun bindNotificationOutbox(
         outbox: NotificationOutbox,
         allowReplyActions: Boolean = true,
+        requireRemotePrivacyPolicy: Boolean = false,
     ) = synchronized(lifecycle) {
         dispatcher?.shutdown()
         outboxGeneration += 1
+        privacyPolicyAwaitingRemote = requireRemotePrivacyPolicy && !remotePrivacyPolicyApplied
         dispatcher = NotificationDispatchQueue()
         eventSender = NotificationMirrorEventSender(
             outbox = outbox,
             initialActiveKeys = activePayloads.keys,
             allowReplyActions = allowReplyActions,
-        ).apply { setPrivacyPolicy(privacyPolicy) }
+        ).apply { setPrivacyPolicy(effectivePrivacyPolicyLocked()) }
         submitSnapshotsIfConnectedLocked()
         submitPendingRemovalsIfConnectedLocked()
     }
@@ -120,6 +125,8 @@ object HyphenNotificationListenerRuntime {
         dispatcher?.shutdown()
         dispatcher = null
         outboxGeneration += 1
+        remotePrivacyPolicyApplied = false
+        privacyPolicyAwaitingRemote = false
     }
 
     fun notificationPrivacyMode(): NotificationPrivacyMode = synchronized(lifecycle) {
@@ -127,14 +134,19 @@ object HyphenNotificationListenerRuntime {
     }
 
     fun setNotificationPrivacyMode(mode: NotificationPrivacyMode) = synchronized(lifecycle) {
+        if (privacyPolicyAwaitingRemote) return@synchronized
         privacyPolicy = NotificationPrivacyPolicy(defaultMode = mode)
-        eventSender?.setPrivacyMode(mode)
+        eventSender?.setPrivacyPolicy(privacyPolicy)
+        refreshActiveSnapshotsAfterPolicyApplyLocked()
     }
 
     /** Apply the full per-app policy pushed by the Mac (notification.privacy.policy). */
     fun setNotificationPrivacyPolicy(policy: NotificationPrivacyPolicy) = synchronized(lifecycle) {
         privacyPolicy = policy
+        remotePrivacyPolicyApplied = true
+        privacyPolicyAwaitingRemote = false
         eventSender?.setPrivacyPolicy(policy)
+        refreshActiveSnapshotsAfterPolicyApplyLocked()
     }
 
     fun setCanceller(notificationCanceller: NotificationCanceller) = synchronized(lifecycle) {
@@ -210,10 +222,16 @@ object HyphenNotificationListenerRuntime {
         dispatcher?.shutdown()
         dispatcher = null
         privacyPolicy = NotificationPrivacyPolicy()
+        privacyPolicyAwaitingRemote = false
+        remotePrivacyPolicyApplied = false
         canceller = null
         replier = null
         outboxGeneration += 1
         lifecycle.onDestroyed()
+    }
+
+    internal fun isPrivacyPolicyAwaitingRemote(): Boolean = synchronized(lifecycle) {
+        privacyPolicyAwaitingRemote
     }
 
     private fun replaceActivePayloads(payloads: Iterable<NormalizedNotificationPayload>) {
@@ -221,6 +239,13 @@ object HyphenNotificationListenerRuntime {
         pendingRemovedKeys.clear()
         payloads.forEach { payload -> activePayloads[payload.sbnKey] = payload }
     }
+
+    private fun effectivePrivacyPolicyLocked(): NotificationPrivacyPolicy =
+        if (privacyPolicyAwaitingRemote) {
+            NotificationPrivacyPolicy(defaultMode = NotificationPrivacyMode.EXISTS_ONLY)
+        } else {
+            privacyPolicy
+        }
 
     private fun submitSnapshotsIfConnectedLocked() {
         if (lifecycle.state != NotificationListenerConnectionState.CONNECTED) return
@@ -230,6 +255,17 @@ object HyphenNotificationListenerRuntime {
             .filterNot { payload -> pendingRemovedKeys.contains(payload.sbnKey) }
             .forEach { payload ->
                 queue.submit { runCatching { sender.sendSnapshot(payload) } }
+            }
+    }
+
+    private fun refreshActiveSnapshotsAfterPolicyApplyLocked() {
+        if (lifecycle.state != NotificationListenerConnectionState.CONNECTED) return
+        val sender = eventSender ?: return
+        val queue = dispatcher ?: return
+        activePayloads.values
+            .filterNot { payload -> pendingRemovedKeys.contains(payload.sbnKey) }
+            .forEach { payload ->
+                queue.submit { runCatching { sender.sendPostedOrUpdated(payload) } }
             }
     }
 
@@ -243,8 +279,8 @@ object HyphenNotificationListenerRuntime {
         }
     }
 
-    private fun submitRemoval(removal: RemovalSubmission): Boolean =
-        removal.queue.submitCritical {
+    private fun submitRemoval(removal: RemovalSubmission): Boolean {
+        val task = {
             val sent = runCatching { removal.sender.sendRemoved(removal.sbnKey) }.isSuccess
             if (sent) {
                 synchronized(lifecycle) {
@@ -254,6 +290,18 @@ object HyphenNotificationListenerRuntime {
                 }
             }
         }
+        val onEvicted = {
+            val shouldRetry = synchronized(lifecycle) {
+                pendingRemovedKeys.contains(removal.sbnKey) && outboxGeneration == removal.generation
+            }
+            if (shouldRetry) submitRemoval(removal)
+        }
+        return removal.queue.submitCritical(
+            task = task,
+            coalesceKey = removal.sbnKey,
+            onEvicted = onEvicted,
+        )
+    }
 
     private data class RemovalSubmission(
         val sbnKey: String,
@@ -266,6 +314,7 @@ object HyphenNotificationListenerRuntime {
 class NotificationDispatchQueue(
     private val capacity: Int = 128,
     private val dropped: AtomicInteger = AtomicInteger(0),
+    private val coalesced: AtomicInteger = AtomicInteger(0),
 ) {
     init {
         require(capacity > 0) { "capacity must be positive" }
@@ -274,31 +323,58 @@ class NotificationDispatchQueue(
     private val stateLock = ReentrantLock()
     private val notEmpty = stateLock.newCondition()
     private val running = AtomicBoolean(true)
-    private val queue = ArrayDeque<QueuedTask>(capacity)
+    private val queue = ArrayList<QueuedTask>(capacity)
     private val worker = Thread(::runLoop, "hyphen-notification-dispatch").apply {
         isDaemon = true
         start()
     }
 
-    fun submit(task: () -> Unit): Boolean = submit(task, critical = false)
+    fun submit(task: () -> Unit): Boolean = submit(task, critical = false, coalesceKey = null, onEvicted = null)
 
-    fun submitCritical(task: () -> Unit): Boolean = submit(task, critical = true)
+    fun submitCritical(
+        task: () -> Unit,
+        coalesceKey: String? = null,
+        onEvicted: (() -> Unit)? = null,
+    ): Boolean = submit(task, critical = true, coalesceKey = coalesceKey, onEvicted = onEvicted)
 
-    private fun submit(task: () -> Unit, critical: Boolean): Boolean {
-        stateLock.withLock {
-            if (!running.get()) return false
-            if (!critical && bestEffortCountLocked() >= capacity) {
-                dropOldestBestEffortLocked()
-            } else if (critical && queue.size >= capacity) {
-                dropOldestBestEffortLocked()
+    internal fun size(): Int = stateLock.withLock { queue.size }
+
+    private fun submit(
+        task: () -> Unit,
+        critical: Boolean,
+        coalesceKey: String?,
+        onEvicted: (() -> Unit)? = null,
+    ): Boolean {
+        val pendingEvicted = mutableListOf<() -> Unit>()
+        val accepted = stateLock.withLock {
+            if (!running.get()) return@withLock false
+            if (critical && coalesceKey != null) {
+                val existing = queue.indexOfFirst { it.coalesceKey == coalesceKey }
+                if (existing >= 0) {
+                    queue[existing] = QueuedTask(task, critical = true, coalesceKey = coalesceKey, onEvicted = onEvicted)
+                    coalesced.incrementAndGet()
+                    notEmpty.signal()
+                    return@withLock true
+                }
             }
-            queue.addLast(QueuedTask(task, critical))
+            while (queue.size >= capacity) {
+                if (!dropOldestLocked(pendingEvicted)) break
+            }
+            if (queue.size >= capacity) return@withLock false
+            // NB: java.util.ArrayList.addLast (SequencedCollection) only exists on
+            // Android API 35+. minSdk is 26 with no core-library desugaring, so use
+            // add(), which appends to the tail identically and is safe on all levels.
+            queue.add(QueuedTask(task, critical, coalesceKey, onEvicted))
             notEmpty.signal()
-            return true
+            true
         }
+        pendingEvicted.forEach { callback -> runCatching { callback() } }
+        return accepted
     }
 
     fun droppedCount(): Int = dropped.get()
+
+    fun coalescedCount(): Int = coalesced.get()
 
     fun shutdown() {
         stateLock.withLock {
@@ -323,24 +399,30 @@ class NotificationDispatchQueue(
             }
         }
         if (!running.get() && queue.isEmpty()) return null
-        queue.removeFirst()
+        queue.removeAt(0)
     }
 
-    private fun bestEffortCountLocked(): Int = queue.count { !it.critical }
-
-    private fun dropOldestBestEffortLocked() {
+    private fun dropOldestLocked(pendingEvicted: MutableList<() -> Unit>): Boolean {
         val iterator = queue.iterator()
         while (iterator.hasNext()) {
-            if (!iterator.next().critical) {
+            val candidate = iterator.next()
+            if (!candidate.critical) {
                 iterator.remove()
                 dropped.incrementAndGet()
-                return
+                return true
             }
         }
+        if (queue.isEmpty()) return false
+        val evicted = queue.removeAt(0)
+        dropped.incrementAndGet()
+        evicted.onEvicted?.let(pendingEvicted::add)
+        return true
     }
 
     private data class QueuedTask(
         val block: () -> Unit,
         val critical: Boolean,
+        val coalesceKey: String? = null,
+        val onEvicted: (() -> Unit)? = null,
     )
 }

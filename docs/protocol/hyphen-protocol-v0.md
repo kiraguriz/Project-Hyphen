@@ -137,7 +137,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - The responder replies with the subset (possibly with reduced options) it accepts; that intersection is the session contract. Messages outside it → `plugin/unsupported-capability`.
 - Unknown capabilities MUST be ignored, not rejected (forward compatibility).
 - Effective transfer chunk size = min of both sides' `maxChunkBytes`. The capability schema caps `maxChunkBytes` at 2 MiB (and floors it at 1 KiB) so a base64-inflated chunk plus envelope overhead always fits the 4 MiB frame limit (§2.1).
-- `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. The intersection ANDs both sides, so a peer that omits it disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
+- `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. Until Android applies the first policy envelope, Android MUST fail closed with `existsOnly` scrubbing on outbound notification payloads. The intersection ANDs both sides, so a peer that omits it disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
 
 ## 7. Message catalog (v0)
 
@@ -198,7 +198,11 @@ negotiated `notifications.v1.dismiss` is `false`, macOS MUST NOT send
 
 When both peers negotiated `notifications.v1.privacyPolicy`, macOS MAY send the
 user's per-app privacy policy so Android filters notification content at the
-source — hidden content then never crosses the LAN. macOS MUST NOT send it when
+source. **Until Android has applied that policy**, Android MUST fail closed and
+emit only `existsOnly`-scrubbed `notification.posted`/`updated`/snapshot payloads
+(routing fields only). After the policy is applied — or when the option is not
+negotiated — filtering follows the mode table below; hidden content then never
+crosses the LAN under the active mode. macOS MUST NOT send the policy envelope when
 the option is not negotiated.
 
 ```json
