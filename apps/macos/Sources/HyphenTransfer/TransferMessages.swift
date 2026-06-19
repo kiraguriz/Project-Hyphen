@@ -15,6 +15,38 @@ public enum TransferProtocol {
     public static let maxV0TransferChunkCount = 1_048_576
 }
 
+/// Per-session transfer resource ceilings; fail closed when exceeded.
+public struct TransferResourceLimits: Equatable {
+    public let maxConcurrentTransfers: Int
+    public let maxStagingBytes: Int64
+    public let maxCompletedEntries: Int
+    public let maxSenderRegistrySize: Int
+    public let maxOutstandingMessages: Int
+    public let maxOutstandingBytes: Int64
+
+    public init(
+        maxConcurrentTransfers: Int = 4,
+        maxStagingBytes: Int64 = 256 * 1024 * 1024,
+        maxCompletedEntries: Int = 64,
+        maxSenderRegistrySize: Int = 16,
+        maxOutstandingMessages: Int = 64,
+        maxOutstandingBytes: Int64 = 32 * 1024 * 1024
+    ) {
+        precondition(maxConcurrentTransfers > 0)
+        precondition(maxStagingBytes >= 0)
+        precondition(maxCompletedEntries > 0)
+        precondition(maxSenderRegistrySize > 0)
+        precondition(maxOutstandingMessages > 0)
+        precondition(maxOutstandingBytes >= 0)
+        self.maxConcurrentTransfers = maxConcurrentTransfers
+        self.maxStagingBytes = maxStagingBytes
+        self.maxCompletedEntries = maxCompletedEntries
+        self.maxSenderRegistrySize = maxSenderRegistrySize
+        self.maxOutstandingMessages = maxOutstandingMessages
+        self.maxOutstandingBytes = maxOutstandingBytes
+    }
+}
+
 public enum TransferError: Error, Equatable {
     case invalidPayload(String)
     case io(String)
@@ -140,7 +172,7 @@ public extension TransferByteSource {
 }
 
 public final class FileTransferByteSource: TransferByteSource {
-    private let fileURL: URL
+    public let fileURL: URL
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -159,8 +191,15 @@ public final class FileTransferByteSource: TransferByteSource {
 }
 
 public protocol TransferStorage {
-    func prepare(manifest: TransferManifest) throws -> URL
+    func prepare(manifest: TransferManifest, reuseExisting: Bool) throws -> URL
     func discard(fileId: String)
+    func partFile(fileId: String) -> URL?
+}
+
+public extension TransferStorage {
+    func prepare(manifest: TransferManifest) throws -> URL {
+        try prepare(manifest: manifest, reuseExisting: false)
+    }
 }
 
 public final class FileTransferStorage: TransferStorage {
@@ -170,9 +209,16 @@ public final class FileTransferStorage: TransferStorage {
         self.root = root
     }
 
-    public func prepare(manifest: TransferManifest) throws -> URL {
+    public func partFile(fileId: String) -> URL? {
+        root.appendingPathComponent("\(fileId).part")
+    }
+
+    public func prepare(manifest: TransferManifest, reuseExisting: Bool) throws -> URL {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
-        let url = root.appendingPathComponent("\(manifest.fileId).part")
+        let url = partFile(fileId: manifest.fileId)!
+        if reuseExisting, FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
@@ -305,16 +351,26 @@ public struct TransferCancel: Equatable {
 public struct TransferProgress: Equatable {
     public let fileId: String
     public let filename: String
+    /// Primary UI progress: contiguous acked chunks (sender) or verified chunks (receiver).
     public let completedChunks: Int
     public let totalChunks: Int
     public let completedBytes: Int64
     public let totalBytes: Int64
+    /// Sender debug: chunks queued/sent but not necessarily acked.
+    public let sentChunks: Int?
+    /// Receiver debug: total unique chunks received, including out-of-order.
+    public let receivedChunks: Int?
 
     public var isComplete: Bool {
         completedChunks == totalChunks
     }
 
-    public init(manifest: TransferManifest, completedChunks: Int) throws {
+    public init(
+        manifest: TransferManifest,
+        completedChunks: Int,
+        sentChunks: Int? = nil,
+        receivedChunks: Int? = nil
+    ) throws {
         guard (0...manifest.chunkCount).contains(completedChunks) else {
             throw TransferError.invalidPayload("completedChunks out of range")
         }
@@ -322,11 +378,19 @@ public struct TransferProgress: Equatable {
         self.filename = manifest.filename
         self.completedChunks = completedChunks
         self.totalChunks = manifest.chunkCount
-        self.completedBytes = min(
-            manifest.sizeBytes,
-            Int64(completedChunks) * Int64(manifest.chunkSizeBytes)
-        )
+        self.completedBytes = Self.contiguousCompletedBytes(manifest: manifest, contiguousChunks: completedChunks)
         self.totalBytes = manifest.sizeBytes
+        self.sentChunks = sentChunks
+        self.receivedChunks = receivedChunks
+    }
+
+    private static func contiguousCompletedBytes(manifest: TransferManifest, contiguousChunks: Int) -> Int64 {
+        if contiguousChunks <= 0 { return 0 }
+        if contiguousChunks >= manifest.chunkCount { return manifest.sizeBytes }
+        return min(
+            manifest.sizeBytes,
+            Int64(contiguousChunks) * Int64(manifest.chunkSizeBytes)
+        )
     }
 }
 
@@ -358,11 +422,22 @@ public final class ProtocolSessionTransferOutbox: TransferOutbox {
     }
 }
 
+public struct TransferSessionBinding: Equatable {
+    public let peerFingerprint: Data
+    public let sessionId: String
+
+    public init(peerFingerprint: Data, sessionId: String) {
+        self.peerFingerprint = peerFingerprint
+        self.sessionId = sessionId
+    }
+}
+
 public final class TransferSender {
     private let outbox: TransferOutbox
     private let negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities?
     private let onProgress: (TransferProgress) -> Void
     private let outstandingWindow: Int
+    private let limits: TransferResourceLimits
     private struct RegisteredTransfer {
         let manifest: TransferManifest
         let source: TransferByteSource
@@ -373,33 +448,69 @@ public final class TransferSender {
         var stream: InputStream?
         var nextIndex: Int
         var outstanding: [String: Int] = [:]
+        var acked: [Bool]
+        var highestContiguousAcked = -1
+        var outstandingBytes: Int64 = 0
 
         init(manifest: TransferManifest, source: TransferByteSource, stream: InputStream, nextIndex: Int) {
             self.manifest = manifest
             self.source = source
             self.stream = stream
             self.nextIndex = nextIndex
+            self.acked = Array(repeating: false, count: manifest.chunkCount)
         }
 
         func closeStream() {
             stream?.close()
             stream = nil
         }
+
+        func markAcked(chunkIndex: Int) -> Int {
+            guard chunkIndex >= 0, chunkIndex < acked.count, !acked[chunkIndex] else {
+                return highestContiguousAcked + 1
+            }
+            acked[chunkIndex] = true
+            if chunkIndex == highestContiguousAcked + 1 {
+                highestContiguousAcked = chunkIndex
+                while highestContiguousAcked + 1 < acked.count, acked[highestContiguousAcked + 1] {
+                    highestContiguousAcked += 1
+                }
+            }
+            return highestContiguousAcked + 1
+        }
     }
     private var registered: [String: RegisteredTransfer] = [:]
     private var activeSends: [String: ActiveSend] = [:]
+    private var tombstones: [String: TerminalOutcome] = [:]
+    private var frozen = false
+    private var sessionBinding: TransferSessionBinding?
+    private let checkpointStore: TransferCheckpointStore?
 
     public init(
         outbox: TransferOutbox,
         negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities? = nil,
         outstandingWindow: Int = 8,
+        limits: TransferResourceLimits = TransferResourceLimits(),
+        checkpointStore: TransferCheckpointStore? = nil,
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) {
         precondition(outstandingWindow > 0, "outstandingWindow must be positive")
         self.outbox = outbox
         self.negotiatedCapabilities = negotiatedCapabilities
         self.outstandingWindow = outstandingWindow
+        self.limits = limits
+        self.checkpointStore = checkpointStore
         self.onProgress = onProgress
+    }
+
+    public func bindSession(peerFingerprint: Data, sessionId: String) {
+        sessionBinding = TransferSessionBinding(peerFingerprint: peerFingerprint, sessionId: sessionId)
+        checkpointStore?.purgeExpired()
+        restoreOutboundCheckpoints(peerFingerprint: peerFingerprint)
+    }
+
+    public func invalidatePeerCheckpoints(_ peerFingerprint: Data) {
+        checkpointStore?.invalidatePeer(peerFingerprint)
     }
 
     deinit {
@@ -414,8 +525,14 @@ public final class TransferSender {
         chunkSizeBytes: Int,
         fileId: String = "f_\(Ulid.generate())"
     ) throws -> TransferManifest {
+        if frozen {
+            throw TransferError.invalidPayload("plugin/transfer-cancelled")
+        }
         if negotiatedCapabilities?.contains(TransferProtocol.capability) == false {
             throw TransferError.invalidPayload("plugin/unsupported-capability")
+        }
+        if registered.count >= limits.maxSenderRegistrySize, registered[fileId] == nil {
+            throw TransferError.invalidPayload("plugin/transfer-quota-exceeded")
         }
         let effectiveChunkSize = min(
             chunkSizeBytes,
@@ -428,14 +545,16 @@ public final class TransferSender {
             chunkSizeBytes: effectiveChunkSize,
             fileId: fileId
         )
+        tombstones.removeValue(forKey: manifest.fileId)
         registered[manifest.fileId] = RegisteredTransfer(manifest: manifest, source: source)
+        try persistOutboundCheckpoint(manifest: manifest, source: source, fromChunkIndex: 0)
         outbox.send(
             type: TransferProtocol.typeManifest,
             capability: TransferProtocol.capability,
             requiresAck: true,
             payload: manifest.payload
         )
-        onProgress(try TransferProgress(manifest: manifest, completedChunks: 0))
+        onProgress(try TransferProgress(manifest: manifest, completedChunks: 0, sentChunks: 0))
         try sendRemaining(fileId: manifest.fileId, fromChunkIndex: 0)
         return manifest
     }
@@ -451,6 +570,12 @@ public final class TransferSender {
         fileId: String,
         fromChunkIndex: Int
     ) throws {
+        if frozen {
+            throw TransferError.invalidPayload("plugin/transfer-cancelled")
+        }
+        guard !isTerminal(fileId: fileId) else {
+            throw TransferError.invalidPayload("transfer is terminal")
+        }
         guard let transfer = registered[fileId] else {
             throw TransferError.invalidPayload("unknown outbound fileId")
         }
@@ -465,7 +590,7 @@ public final class TransferSender {
         activeSends[fileId]?.closeStream()
         if fromChunkIndex == manifest.chunkCount {
             activeSends.removeValue(forKey: fileId)
-            onProgress(try TransferProgress(manifest: manifest, completedChunks: manifest.chunkCount))
+            try reportProgress(manifest: manifest, completedChunks: manifest.chunkCount, sentChunks: manifest.chunkCount)
             return
         }
         let stream = try source.openStream()
@@ -481,6 +606,7 @@ public final class TransferSender {
     }
 
     public func handleResumeInfo(_ info: TransferResumeInfo) throws {
+        if frozen || isTerminal(fileId: info.fileId) { return }
         if info.needsManifest {
             guard let transfer = registered[info.fileId] else {
                 throw TransferError.invalidPayload("unknown outbound fileId")
@@ -491,19 +617,55 @@ public final class TransferSender {
                 requiresAck: true,
                 payload: transfer.manifest.payload
             )
-            onProgress(try TransferProgress(manifest: transfer.manifest, completedChunks: 0))
+            try reportProgress(manifest: transfer.manifest, completedChunks: 0, sentChunks: 0)
         }
         try sendRemaining(fileId: info.fileId, fromChunkIndex: info.nextChunkIndex)
     }
 
     public func handleAck(_ messageId: String) throws {
+        if frozen { return }
         guard let fileId = activeSends.first(where: { $0.value.outstanding[messageId] != nil })?.key,
               let active = activeSends[fileId]
         else {
             return
         }
-        active.outstanding.removeValue(forKey: messageId)
+        guard !isTerminal(fileId: fileId) else { return }
+        guard let chunkIndex = active.outstanding.removeValue(forKey: messageId) else { return }
+        active.outstandingBytes -= Int64(active.manifest.expectedChunkBytes(chunkIndex))
+        let completedChunks = active.markAcked(chunkIndex: chunkIndex)
+        try reportProgress(manifest: active.manifest, completedChunks: completedChunks, sentChunks: active.nextIndex)
         try pumpChunks(fileId: fileId)
+    }
+
+    /// ACK timeout aborts the affected transfer and releases sender resources.
+    public func handleAckTimeout(_ messageId: String) {
+        if frozen { return }
+        guard let fileId = activeSends.first(where: { $0.value.outstanding[messageId] != nil })?.key,
+              let active = activeSends.removeValue(forKey: fileId)
+        else {
+            return
+        }
+        active.closeStream()
+        registered.removeValue(forKey: fileId)
+        checkpointStore?.delete(fileId: fileId)
+        recordTombstone(fileId: fileId, outcome: .cancelled)
+    }
+
+    @discardableResult
+    public func cancel(fileId: String, discard: Bool = false) throws -> String? {
+        activeSends.removeValue(forKey: fileId)?.closeStream()
+        registered.removeValue(forKey: fileId)
+        checkpointStore?.delete(fileId: fileId)
+        recordTombstone(fileId: fileId, outcome: .cancelled)
+        return try sendCancel(TransferCancel(fileId: fileId, discard: discard))
+    }
+
+    /// Clears in-flight outbound state when the transport session ends.
+    public func recycleSession() {
+        frozen = true
+        activeSends.values.forEach { $0.closeStream() }
+        activeSends.removeAll()
+        registered.removeAll()
     }
 
     @discardableResult
@@ -537,34 +699,128 @@ public final class TransferSender {
     }
 
     private func pumpChunks(fileId: String) throws {
-        guard let active = activeSends[fileId] else { return }
-        while active.outstanding.count < outstandingWindow && active.nextIndex < active.manifest.chunkCount {
+        guard !frozen, let active = activeSends[fileId] else { return }
+        while active.nextIndex < active.manifest.chunkCount {
+            if active.outstanding.count >= min(outstandingWindow, limits.maxOutstandingMessages) { break }
             guard let stream = active.stream else { break }
             let index = active.nextIndex
+            let chunkBytes = active.manifest.expectedChunkBytes(index)
+            if active.outstandingBytes + Int64(chunkBytes) > limits.maxOutstandingBytes { break }
             let chunk = try TransferChunk(
                 fileId: active.manifest.fileId,
                 chunkIndex: index,
-                data: try readNextChunk(stream, maxBytes: active.manifest.expectedChunkBytes(index))
+                data: try readNextChunk(stream, maxBytes: chunkBytes)
             )
-            let messageId = outbox.send(
+            guard let messageId = outbox.send(
                 type: TransferProtocol.typeChunk,
                 capability: TransferProtocol.capability,
                 requiresAck: true,
                 payload: chunk.payload
-            )
-            if let messageId {
-                active.outstanding[messageId] = index
+            ) else {
+                break
             }
+            active.outstanding[messageId] = index
+            active.outstandingBytes += Int64(chunkBytes)
             active.nextIndex += 1
-            onProgress(try TransferProgress(manifest: active.manifest, completedChunks: index + 1))
         }
         if active.nextIndex == active.manifest.chunkCount {
             active.closeStream()
             if active.outstanding.isEmpty {
                 activeSends.removeValue(forKey: fileId)
+                registered.removeValue(forKey: fileId)
+                checkpointStore?.delete(fileId: fileId)
+                recordTombstone(fileId: fileId, outcome: .completed)
+            }
+        } else {
+            try persistOutboundCheckpoint(
+                manifest: active.manifest,
+                source: registered[fileId]?.source,
+                fromChunkIndex: active.nextIndex
+            )
+        }
+    }
+
+    private func persistOutboundCheckpoint(
+        manifest: TransferManifest,
+        source: TransferByteSource?,
+        fromChunkIndex: Int
+    ) throws {
+        guard let checkpointStore, let sessionBinding else { return }
+        let sourcePath = (source as? FileTransferByteSource)?.fileURL.path
+        if sourcePath == nil, fromChunkIndex > 0 {
+            checkpointStore.delete(fileId: manifest.fileId)
+            return
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try checkpointStore.save(
+            TransferCheckpointStore.Record(
+                fileId: manifest.fileId,
+                manifest: manifest,
+                peerFingerprintHex: sessionBinding.peerFingerprint.hexLower(),
+                sessionId: sessionBinding.sessionId,
+                nextChunkIndex: fromChunkIndex,
+                receivedRanges: outboundRanges(fromChunkIndex: fromChunkIndex, chunkCount: manifest.chunkCount),
+                updatedAtMs: now,
+                expiresAtMs: now + TransferCheckpointStore.defaultTTLMs,
+                direction: .outbound,
+                outboundSourcePath: sourcePath
+            )
+        )
+    }
+
+    private func restoreOutboundCheckpoints(peerFingerprint: Data) {
+        guard let checkpointStore, let sessionBinding else { return }
+        for record in checkpointStore.loadActive(for: peerFingerprint, direction: .outbound) {
+            guard record.sessionId == sessionBinding.sessionId else { continue }
+            guard let path = record.outboundSourcePath,
+                  FileManager.default.fileExists(atPath: path) else {
+                checkpointStore.delete(fileId: record.fileId)
+                continue
+            }
+            let source = FileTransferByteSource(fileURL: URL(fileURLWithPath: path))
+            guard source.sizeBytes == record.manifest.sizeBytes else {
+                checkpointStore.delete(fileId: record.fileId)
+                continue
+            }
+            registered[record.fileId] = RegisteredTransfer(manifest: record.manifest, source: source)
+        }
+    }
+
+    private func outboundRanges(fromChunkIndex: Int, chunkCount: Int) -> [Range<Int>] {
+        guard fromChunkIndex > 0, fromChunkIndex < chunkCount else { return [] }
+        return [0..<fromChunkIndex]
+    }
+
+    private func reportProgress(manifest: TransferManifest, completedChunks: Int, sentChunks: Int) throws {
+        onProgress(try TransferProgress(
+            manifest: manifest,
+            completedChunks: completedChunks,
+            sentChunks: sentChunks
+        ))
+    }
+
+    private func isTerminal(fileId: String) -> Bool {
+        tombstones[fileId] != nil
+    }
+
+    private func recordTombstone(fileId: String, outcome: TerminalOutcome) {
+        tombstones[fileId] = outcome
+        while tombstones.count > limits.maxCompletedEntries {
+            if let oldest = tombstones.keys.first {
+                tombstones.removeValue(forKey: oldest)
             }
         }
     }
+}
+
+private enum TerminalOutcome {
+    case completed
+    case cancelled
+}
+
+private struct ReceiverTombstone {
+    let manifest: TransferManifest
+    let outcome: TerminalOutcome
 }
 
 public struct TransferCompleted: Equatable {
@@ -582,23 +838,77 @@ public enum TransferEvent: Equatable {
 
 public final class TransferReceiver {
     private var states: [String: TransferState] = [:]
-    private var completed: [String: TransferCompleted] = [:]
+    private var tombstones: [String: ReceiverTombstone] = [:]
     private let storage: TransferStorage
+    private let limits: TransferResourceLimits
+    private let checkpointStore: TransferCheckpointStore?
     private let onProgress: (TransferProgress) -> Void
+    private var frozen = false
+    private var sessionBinding: TransferSessionBinding?
 
     public init(
         storage: TransferStorage = FileTransferStorage(),
+        limits: TransferResourceLimits = TransferResourceLimits(),
+        checkpointStore: TransferCheckpointStore? = nil,
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) {
         self.storage = storage
+        self.limits = limits
+        self.checkpointStore = checkpointStore
         self.onProgress = onProgress
+    }
+
+    public func bindSession(peerFingerprint: Data, sessionId: String) {
+        // A new session re-arms a receiver that was frozen by recycleSession; the
+        // receiver is a long-lived singleton, so without this it would reject every
+        // transfer after the first disconnect.
+        frozen = false
+        sessionBinding = TransferSessionBinding(peerFingerprint: peerFingerprint, sessionId: sessionId)
+        checkpointStore?.purgeExpired()
+        restorePersistedInboundCheckpoints(peerFingerprint: peerFingerprint)
+    }
+
+    public func invalidatePeerCheckpoints(_ peerFingerprint: Data) {
+        checkpointStore?.invalidatePeer(peerFingerprint)
+    }
+
+    private func activeStagingBytes() -> Int64 {
+        states.values.reduce(0) { $0 + $1.manifest.sizeBytes }
+    }
+
+    private func ensureReceiveQuota(manifest: TransferManifest) throws {
+        if frozen {
+            throw TransferError.invalidPayload("plugin/transfer-cancelled")
+        }
+        if states.count >= limits.maxConcurrentTransfers {
+            throw TransferError.invalidPayload("plugin/transfer-quota-exceeded")
+        }
+        if tombstones.count >= limits.maxCompletedEntries {
+            throw TransferError.invalidPayload("plugin/transfer-quota-exceeded")
+        }
+        if activeStagingBytes() + manifest.sizeBytes > limits.maxStagingBytes {
+            throw TransferError.invalidPayload("plugin/disk-full")
+        }
     }
 
     public func checkpoint(fileId: String) -> TransferResumeInfo? {
         if let state = states[fileId] {
             return try? state.checkpoint()
         }
-        return completedCheckpoint(fileId: fileId)
+        guard let tombstone = tombstones[fileId] else { return nil }
+        switch tombstone.outcome {
+        case .completed:
+            return try? TransferResumeInfo(fileId: fileId, nextChunkIndex: tombstone.manifest.chunkCount)
+        case .cancelled:
+            return nil
+        }
+    }
+
+    /// Drops active partial receives when the transport session ends.
+    public func recycleSession() {
+        frozen = true
+        states.values.forEach { $0.close() }
+        states.removeAll()
     }
 
     public func handle(_ envelope: Envelope) throws -> TransferEvent {
@@ -614,38 +924,52 @@ public final class TransferReceiver {
                 if let completed = try completeIfReady(existing) { return .completed(completed) }
                 return .ignored
             }
-            if let existing = completed[manifest.fileId] {
+            if let existing = tombstones[manifest.fileId] {
                 guard existing.manifest == manifest else {
-                    throw TransferError.invalidPayload("manifest does not match completed transfer")
+                    throw TransferError.invalidPayload("manifest does not match terminal transfer")
                 }
                 return .ignored
             }
+            try ensureReceiveQuota(manifest: manifest)
             let state = try TransferState(manifest: manifest, fileURL: storage.prepare(manifest: manifest))
             states[manifest.fileId] = state
+            try persistInboundCheckpoint(state)
             onProgress(try TransferProgress(manifest: manifest, completedChunks: 0))
             if let completed = try completeIfReady(state) { return .completed(completed) }
             return .ignored
         case TransferProtocol.typeChunk:
             let chunk = try TransferChunk(payload: envelope.payload)
+            if frozen {
+                throw TransferError.invalidPayload("plugin/transfer-cancelled")
+            }
             guard let state = states[chunk.fileId] else {
                 throw TransferError.invalidPayload("unknown fileId")
             }
             try state.accept(chunk)
             onProgress(try state.progress())
+            try persistInboundCheckpoint(state)
             if let completed = try completeIfReady(state) { return .completed(completed) }
             return .ignored
         case TransferProtocol.typeResumeRequest:
             let request = try TransferResumeRequest(payload: envelope.payload)
             return .resumeRequested(
                 try states[request.fileId]?.checkpoint()
-                    ?? completedCheckpoint(fileId: request.fileId)
+                    ?? checkpoint(fileId: request.fileId)
                     ?? TransferResumeInfo(fileId: request.fileId, nextChunkIndex: 0, needsManifest: true)
             )
         case TransferProtocol.typeCancel:
             let cancel = try TransferCancel(payload: envelope.payload)
+            let state = states.removeValue(forKey: cancel.fileId)
+            state?.close()
             if cancel.discard {
-                states.removeValue(forKey: cancel.fileId)?.close()
                 storage.discard(fileId: cancel.fileId)
+                checkpointStore?.delete(fileId: cancel.fileId)
+            }
+            if let state {
+                recordTombstone(
+                    fileId: cancel.fileId,
+                    tombstone: ReceiverTombstone(manifest: state.manifest, outcome: .cancelled)
+                )
             }
             return .cancelled(cancel)
         default:
@@ -665,14 +989,72 @@ public final class TransferReceiver {
             throw TransferError.invalidPayload("file sha256 mismatch")
         }
         states.removeValue(forKey: state.manifest.fileId)
+        checkpointStore?.delete(fileId: state.manifest.fileId)
         let done = TransferCompleted(manifest: state.manifest, fileURL: fileURL, sha256: digest)
-        completed[state.manifest.fileId] = done
+        recordTombstone(
+            fileId: state.manifest.fileId,
+            tombstone: ReceiverTombstone(manifest: state.manifest, outcome: .completed)
+        )
         return done
     }
 
-    private func completedCheckpoint(fileId: String) -> TransferResumeInfo? {
-        guard let completed = completed[fileId] else { return nil }
-        return try? TransferResumeInfo(fileId: fileId, nextChunkIndex: completed.manifest.chunkCount)
+    private func recordTombstone(fileId: String, tombstone: ReceiverTombstone) {
+        tombstones[fileId] = tombstone
+        while tombstones.count > limits.maxCompletedEntries {
+            if let oldest = tombstones.keys.first {
+                tombstones.removeValue(forKey: oldest)
+            }
+        }
+    }
+
+    private func persistInboundCheckpoint(_ state: TransferState) throws {
+        guard let checkpointStore, let sessionBinding else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try checkpointStore.save(
+            TransferCheckpointStore.Record(
+                fileId: state.manifest.fileId,
+                manifest: state.manifest,
+                peerFingerprintHex: sessionBinding.peerFingerprint.hexLower(),
+                sessionId: sessionBinding.sessionId,
+                nextChunkIndex: try state.checkpoint().nextChunkIndex,
+                // Persist only the contiguous prefix (O(1)); resume drives from
+                // nextChunkIndex, so storing the full received bitmap here would
+                // re-introduce an O(n) scan on every chunk.
+                receivedRanges: state.contiguousReceivedRanges(),
+                updatedAtMs: now,
+                expiresAtMs: now + TransferCheckpointStore.defaultTTLMs
+            )
+        )
+    }
+
+    private func restorePersistedInboundCheckpoints(peerFingerprint: Data) {
+        guard let checkpointStore else { return }
+        let fileStorage = storage as? FileTransferStorage
+        for record in checkpointStore.loadActive(for: peerFingerprint, direction: .inbound) {
+            if states[record.fileId] != nil || tombstones[record.fileId] != nil { continue }
+            guard let partURL = fileStorage?.partFile(fileId: record.fileId),
+                  FileManager.default.fileExists(atPath: partURL.path) else {
+                checkpointStore.delete(fileId: record.fileId)
+                continue
+            }
+            // Fail closed: restored checkpoints must respect the same concurrency
+            // and staging-byte ceilings as live manifests. Over-quota records stay
+            // on disk for a later session or TTL purge rather than reloading.
+            if states.count >= limits.maxConcurrentTransfers { continue }
+            if activeStagingBytes() + record.manifest.sizeBytes > limits.maxStagingBytes { continue }
+            do {
+                let state = try TransferState.restore(
+                    manifest: record.manifest,
+                    fileURL: partURL,
+                    ranges: record.receivedRanges
+                )
+                states[record.fileId] = state
+                onProgress(try state.progress())
+            } catch {
+                checkpointStore.delete(fileId: record.fileId)
+                storage.discard(fileId: record.fileId)
+            }
+        }
     }
 }
 
@@ -681,11 +1063,58 @@ private final class TransferState {
     private let fileURL: URL
     private var received: [Bool]
     private var handle: FileHandle?
+    private(set) var receivedCount = 0
+    private(set) var highestContiguousIndex = -1
+    private(set) var receivedBytes: Int64 = 0
 
     init(manifest: TransferManifest, fileURL: URL) throws {
         self.manifest = manifest
         self.fileURL = fileURL
         self.received = Array(repeating: false, count: manifest.chunkCount)
+    }
+
+    static func restore(
+        manifest: TransferManifest,
+        fileURL: URL,
+        ranges: [Range<Int>]
+    ) throws -> TransferState {
+        var received = Array(repeating: false, count: manifest.chunkCount)
+        for range in ranges {
+            for index in range {
+                guard received.indices.contains(index) else {
+                    throw TransferError.invalidPayload("received range out of bounds")
+                }
+                received[index] = true
+            }
+        }
+        let state = try TransferState(manifest: manifest, fileURL: fileURL)
+        state.received = received
+        state.recomputeDerivedState()
+        return state
+    }
+
+    func receivedRanges() -> [Range<Int>] {
+        compactReceivedRanges(received)
+    }
+
+    /// O(1) contiguous-prefix range used for durable checkpoints.
+    func contiguousReceivedRanges() -> [Range<Int>] {
+        highestContiguousIndex < 0 ? [] : [0..<(highestContiguousIndex + 1)]
+    }
+
+    private func recomputeDerivedState() {
+        receivedCount = 0
+        receivedBytes = 0
+        highestContiguousIndex = -1
+        for index in received.indices where received[index] {
+            receivedCount += 1
+            receivedBytes += Int64(manifest.expectedChunkBytes(index))
+        }
+        var next = 0
+        while next < received.count, received[next] {
+            highestContiguousIndex = next
+            next += 1
+        }
     }
 
     deinit {
@@ -699,10 +1128,19 @@ private final class TransferState {
         guard chunk.data.count == manifest.expectedChunkBytes(chunk.chunkIndex) else {
             throw TransferError.invalidPayload("chunk size mismatch")
         }
+        if received[chunk.chunkIndex] { return }
         let writer = try openHandle()
         try writer.seek(toOffset: UInt64(Int64(chunk.chunkIndex) * Int64(manifest.chunkSizeBytes)))
         try writer.write(contentsOf: chunk.data)
         received[chunk.chunkIndex] = true
+        receivedCount += 1
+        receivedBytes += Int64(chunk.data.count)
+        if chunk.chunkIndex == highestContiguousIndex + 1 {
+            highestContiguousIndex = chunk.chunkIndex
+            while highestContiguousIndex + 1 < received.count, received[highestContiguousIndex + 1] {
+                highestContiguousIndex += 1
+            }
+        }
     }
 
     /// Releases the long-lived write handle so the file can be read back (final
@@ -720,26 +1158,42 @@ private final class TransferState {
     }
 
     func fileIfComplete() -> URL? {
-        for chunk in received {
-            guard chunk else { return nil }
-        }
-        return fileURL
+        receivedCount == manifest.chunkCount ? fileURL : nil
     }
 
     func checkpoint() throws -> TransferResumeInfo {
-        var next = 0
-        while next < received.count && received[next] {
-            next += 1
-        }
-        return try TransferResumeInfo(fileId: manifest.fileId, nextChunkIndex: next)
+        try TransferResumeInfo(fileId: manifest.fileId, nextChunkIndex: highestContiguousIndex + 1)
     }
 
     func progress() throws -> TransferProgress {
-        var completed = 0
-        while completed < received.count && received[completed] {
-            completed += 1
+        try TransferProgress(
+            manifest: manifest,
+            completedChunks: highestContiguousIndex + 1,
+            receivedChunks: receivedCount
+        )
+    }
+}
+
+private func compactReceivedRanges(_ received: [Bool]) -> [Range<Int>] {
+    var ranges: [Range<Int>] = []
+    var index = 0
+    while index < received.count {
+        guard received[index] else {
+            index += 1
+            continue
         }
-        return try TransferProgress(manifest: manifest, completedChunks: completed)
+        let start = index
+        while index < received.count, received[index] {
+            index += 1
+        }
+        ranges.append(start..<index)
+    }
+    return ranges
+}
+
+private extension Data {
+    func hexLower() -> String {
+        map { String(format: "%02x", $0) }.joined()
     }
 }
 

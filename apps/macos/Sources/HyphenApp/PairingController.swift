@@ -35,6 +35,7 @@ final class PairingController: NSObject {
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
     private var activeTransferSender: TransferSender?
     private let tokenStore = ResumeTokenStore()
+    private let transferCheckpointStore = TransferCheckpointStore()
     // Reconnect/trust state is touched from both `queue` (reconnect listener)
     // and the main thread (trust revoke); `reconnectLock` guards all of it.
     private let reconnectLock = NSLock()
@@ -45,13 +46,19 @@ final class PairingController: NSObject {
     private var reconnectSessionActive = false
     private let textReceiver = TextLinkReceiver()
     private var lastTransferProgress: TransferProgress?
-    private lazy var transferReceiver = TransferReceiver { [weak self] progress in
-        DispatchQueue.main.async {
-            self?.lastTransferProgress = progress
-            self?.onStatus(Self.transferProgressLine(progress))
-            self?.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
+    private lazy var transferReceiver = TransferReceiver(
+        storage: FileTransferStorage(
+            root: FileManager.default.temporaryDirectory.appendingPathComponent("hyphen-transfer", isDirectory: true)
+        ),
+        checkpointStore: transferCheckpointStore,
+        onProgress: { [weak self] progress in
+            DispatchQueue.main.async {
+                self?.lastTransferProgress = progress
+                self?.onStatus(Self.transferProgressLine(progress))
+                self?.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
+            }
         }
-    }
+    )
     private let notificationPresenter = UserNotificationCenterPresenter()
     // Mirrors every presented (post-scrub) notification into the activity feed
     // while forwarding to the real system presenter. The receiver below talks to
@@ -272,6 +279,7 @@ final class PairingController: NSObject {
 
     func stopAfterTrustChange() {
         reconnectLock.lock()
+        let peerFingerprint = rememberedPeerFingerprint
         stoppedForTrustChange = true
         rememberedPeerFingerprint = nil
         rememberedDeviceName = nil
@@ -281,12 +289,19 @@ final class PairingController: NSObject {
         steadyListener = nil
         reconnectLock.unlock()
         steady?.stop()
+        if let peerFingerprint {
+            tokenStore.invalidatePeer(peerFingerprint)
+            transferCheckpointStore.invalidatePeer(peerFingerprint)
+            transferReceiver.invalidatePeerCheckpoints(peerFingerprint)
+        }
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
         activeCapabilities = nil
+        activeTransferSender?.recycleSession()
         activeTransferSender = nil
         lastTransferProgress = nil
+        transferReceiver.recycleSession()
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
         onStatus("Session stopped after trust change")
@@ -538,14 +553,21 @@ final class PairingController: NSObject {
                         try? self?.activeTransferSender?.handleAck(messageId)
                     }
                 }
+                callbacks.onAckTimeout = { [weak self] messageId in
+                    DispatchQueue.main.async {
+                        self?.activeTransferSender?.handleAckTimeout(messageId)
+                    }
+                }
                 callbacks.onClosed = { [weak self] in
                     DispatchQueue.main.async {
                         if self?.activeSessionToken == sessionToken {
+                            self?.activeTransferSender?.recycleSession()
                             self?.activeSession = nil
                             self?.activeSessionToken = nil
                             self?.activeCapabilities = nil
                             self?.activeTransferSender = nil
                             self?.lastTransferProgress = nil
+                            self?.transferReceiver.recycleSession()
                             self?.notificationPresenter.setDismissHandler(nil)
                             self?.notificationPresenter.setReplyHandler(nil)
                             if let self {
@@ -580,6 +602,7 @@ final class PairingController: NSObject {
                     self.activeTransferSender = TransferSender(
                         outbox: ProtocolSessionTransferOutbox(session: session),
                         negotiatedCapabilities: handshake.negotiatedCapabilities,
+                        checkpointStore: self.transferCheckpointStore,
                         onProgress: { [weak self] progress in
                             DispatchQueue.main.async {
                                 self?.lastTransferProgress = progress
@@ -618,6 +641,14 @@ final class PairingController: NSObject {
                     self.stoppedForTrustChange = false
                     self.reconnectSessionActive = true
                     self.reconnectLock.unlock()
+                    self.transferReceiver.bindSession(
+                        peerFingerprint: peerFingerprint,
+                        sessionId: handshake.sessionId
+                    )
+                    self.activeTransferSender?.bindSession(
+                        peerFingerprint: peerFingerprint,
+                        sessionId: handshake.sessionId
+                    )
                     self.onStatus("Connected to \(name)")
                     self.onActivity(.peerChanged(isPaired: true, peerName: name))
                     self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
@@ -855,7 +886,7 @@ final class PairingController: NSObject {
                     } catch {
                         DispatchQueue.main.async { [weak self] in
                             self?.lastTransferProgress = nil
-                            self?.onStatus("transfer received but save failed (kept at \(completed.fileURL.path)): \(error)")
+                            self?.onStatus("transfer received but save failed; original retained for retry: \(error)")
                         }
                         return
                     }
@@ -1012,16 +1043,15 @@ final class PairingController: NSObject {
             onStatus("transfer cancel: no active transfer")
             return
         }
-        guard let session = activeSession else {
+        guard let sender = activeTransferSender else {
             onStatus("transfer cancel: no active Android session")
             return
         }
         do {
-            let id = TransferSender(outbox: ProtocolSessionTransferOutbox(session: session)).sendCancel(
-                try TransferCancel(fileId: progress.fileId, discard: true)
-            )
+            let id = try sender.cancel(fileId: progress.fileId, discard: true)
             lastTransferProgress = nil
             onStatus("transfer cancel sent: \(id ?? "session closed")")
+            onActivity(.transferCancelled(fileId: progress.fileId, at: Date()))
         } catch {
             onStatus("transfer cancel failed: \(error)")
         }

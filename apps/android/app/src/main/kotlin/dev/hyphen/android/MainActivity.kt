@@ -52,6 +52,7 @@ import dev.hyphen.android.transfer.TransferCancel
 import dev.hyphen.android.transfer.TransferCompleted
 import dev.hyphen.android.transfer.TransferEvent
 import dev.hyphen.android.transfer.FileTransferStorage
+import dev.hyphen.android.transfer.TransferCheckpointStore
 import dev.hyphen.android.transfer.StreamTransferByteSource
 import dev.hyphen.android.transfer.TransferProgress
 import dev.hyphen.android.transfer.TransferProtocol
@@ -102,8 +103,14 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var activityDestroyed = false
     private val model = HyphenUiModel()
+    private val checkpointStore by lazy {
+        TransferCheckpointStore(TransferCheckpointStore.defaultRoot(applicationContext))
+    }
     private val transferReceiver by lazy {
-        TransferReceiver(FileTransferStorage(File(cacheDir, "transfers"))) { progress ->
+        TransferReceiver(
+            FileTransferStorage(File(cacheDir, "transfers")),
+            checkpointStore = checkpointStore,
+        ) { progress ->
             updateLastTransferProgress(progress)
             append(transferProgressLine(progress))
             emit(transferProgressEvent(progress, TransferDirection.INCOMING))
@@ -112,8 +119,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        supervisor.configureTransferCheckpoints(checkpointStore)
         supervisor.addListener(sessionListener)
         supervisor.replayStateTo(sessionListener)
+        bindTransferPersistenceIfConnected()
         refreshPairingState()
         model.setBetaDiagnostics(betaDiagnosticsEnabled())
         model.updateNotificationPrivacyLabel(notificationPrivacyStatus(HyphenNotificationListenerRuntime.notificationPrivacyMode()))
@@ -168,7 +177,19 @@ class MainActivity : ComponentActivity() {
     private val sessionListener = object : ConnectionSupervisor.Listener {
         override fun onLog(line: String) = append(line)
 
-        override fun onActivityEvent(event: ActivityEvent) = emit(event)
+        override fun onActivityEvent(event: ActivityEvent) {
+            if (event is ActivityEvent.ConnectionChanged) {
+                when (event.state) {
+                    // Re-bind on every (re)connect, including supervisor-internal
+                    // reconnects, so the singleton receiver is re-armed and its
+                    // persisted checkpoints are restored.
+                    ConnectionState.CONNECTED -> bindTransferPersistenceIfConnected()
+                    ConnectionState.SUSPENDED -> transferReceiver.recycleSession()
+                    else -> Unit
+                }
+            }
+            emit(event)
+        }
 
         override fun onEnvelope(envelope: Envelope, state: ConnectionSupervisor.ActiveState) {
             handleSessionEnvelope(envelope, state)
@@ -303,6 +324,7 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.dlg_forget_msg, fingerprintPrefix(peer.spkiFingerprint)))
             .setPositiveButton(R.string.dlg_forget_confirm) { _, _ ->
                 try {
+                    supervisor.invalidateTransferCheckpoints(peer.spkiFingerprint, transferReceiver)
                     val removed = AndroidTrustStores.openDefault(applicationContext).remove(peer.spkiFingerprint)
                     stopCurrentSessionAfterTrustChange()
                     append("peer forgotten: ${peer.displayName.ifBlank { "unnamed" }} removed=$removed")
@@ -321,6 +343,8 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.dlg_reset_msg, count))
             .setPositiveButton(R.string.dlg_reset_confirm) { _, _ ->
                 try {
+                    val peers = AndroidTrustStores.openDefault(applicationContext).allPeers()
+                    peers.forEach { supervisor.invalidateTransferCheckpoints(it.spkiFingerprint, transferReceiver) }
                     AndroidTrustStores.openDefault(applicationContext).removeAll()
                     stopCurrentSessionAfterTrustChange()
                     append("paired devices reset: $count removed")
@@ -335,6 +359,11 @@ class MainActivity : ComponentActivity() {
 
     private fun stopCurrentSessionAfterTrustChange() {
         supervisor.stopAfterTrustChange()
+    }
+
+    private fun bindTransferPersistenceIfConnected() {
+        if (supervisor.activeState().session == null) return
+        supervisor.bindTransferPersistence(transferReceiver)
     }
 
     private fun peerLabel(peer: TrustedPeer): String =
@@ -472,6 +501,7 @@ class MainActivity : ComponentActivity() {
                 )
                 val peerName = handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"
                 supervisor.adoptPairedSession(socket, handshake, peerName)
+                bindTransferPersistenceIfConnected()
                 postToUi {
                     emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))
                 }
@@ -567,18 +597,24 @@ class MainActivity : ComponentActivity() {
                 when (val event = transferReceiver.handle(envelope)) {
                     is TransferEvent.Completed -> {
                         updateLastTransferProgress(null)
-                        val delivered = deliverIncomingFile(event.completed)
-                        val line = transferCompletedLine(event.completed, delivered)
-                        val manifest = event.completed.manifest
-                        append(line)
-                        emit(ActivityEvent.TransferCompleted(
-                            fileId = manifest.fileId,
-                            filename = manifest.filename,
-                            sizeBytes = manifest.sizeBytes,
-                            direction = TransferDirection.INCOMING,
-                            verified = true,
-                            atMillis = System.currentTimeMillis(),
-                        ))
+                        try {
+                            val delivered = deliverIncomingFile(event.completed)
+                            val line = transferCompletedLine(event.completed, delivered)
+                            val manifest = event.completed.manifest
+                            append(line)
+                            emit(ActivityEvent.TransferCompleted(
+                                fileId = manifest.fileId,
+                                filename = manifest.filename,
+                                sizeBytes = manifest.sizeBytes,
+                                direction = TransferDirection.INCOMING,
+                                verified = true,
+                                atMillis = System.currentTimeMillis(),
+                            ))
+                        } catch (e: Exception) {
+                            append(
+                                "transfer received but save failed; original retained for retry: ${e.message}",
+                            )
+                        }
                     }
                     is TransferEvent.ResumeRequested -> {
                         if (session != null) {
@@ -790,14 +826,12 @@ class MainActivity : ComponentActivity() {
             append("transfer cancel: no active transfer")
             return
         }
-        val session = state.session
-        if (session == null) {
+        val sender = state.transferSender
+        if (sender == null) {
             append("transfer cancel: no active session")
             return
         }
-        val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendCancel(
-            TransferCancel(progress.fileId, discard = true),
-        )
+        val id = sender.cancel(progress.fileId, discard = true)
         updateLastTransferProgress(null)
         append("transfer cancel sent: $id (${progress.filename})")
         emit(ActivityEvent.TransferCancelled(progress.fileId, System.currentTimeMillis()))
