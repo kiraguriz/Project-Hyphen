@@ -80,13 +80,13 @@
 
 ### P0：使配对提交状态与身份绑定可证明
 
-1. 实现协议级双端配对提交，或用 ADR 明确修改 v0 协议。
+1. - [x] 实现协议级双端配对提交，或用 ADR 明确修改 v0 协议。【来源：实测】`PairingWireProtocol` + `PairingCommit`（Android/macOS）；`pair.request/challenge/response/confirm` wire 状态机；trust 仅在 bilateral `accepted: true` 后通过 `SasConfirmationGate` 落盘。
    - 可能触及：`apps/android/app/src/main/kotlin/dev/hyphen/android/MainActivity.kt`、`apps/android/app/src/main/kotlin/dev/hyphen/android/pairing/`、`apps/macos/Sources/HyphenApp/PairingController.swift`、`apps/macos/Sources/HyphenCore/SasConfirmationGate.swift`、`docs/protocol/hyphen-protocol-v0.md`、`protocol/test-vectors/pairing/`。
    - 接受标准：任一端 reject、断线或未收到 remote accepted confirm 时，两端 trust store 都不新增 peer；只有本地确认和远端 accepted confirm 都完成后才落盘并启动 steady session。
    - 验证：新增 Android/macOS pairing state-machine unit tests；新增 loopback/protocol test 覆盖 accept/reject/disconnect；运行 `./scripts/test-protocol.sh`、`cd apps/android && ./gradlew testDebugUnitTest --tests 'dev.hyphen.android.pairing.*'`、`cd apps/macos && swift test --filter SasConfirmationGateTests`、`./scripts/check.sh --strict`。
    - 手工证据：真 Android + Mac 扫 QR，分别执行双方确认、一端拒绝、确认前断网、确认后重连，记录 trust store/UI/session 状态。
 
-2. 修复 macOS provisional fingerprint 绑定。
+2. - [x] 修复 macOS provisional fingerprint 绑定。【来源：实测】`ProvisionalPairingState` 拒绝第二 pre-attach claim；`pendingClaimTimeoutMs` 超时后可重试；`ProvisionalPairingStateTests` 覆盖 A/B verify 乱序。
    - 可能触及：`apps/macos/Sources/HyphenCore/ProvisionalPairingState.swift`、`apps/macos/Sources/HyphenApp/PairingController.swift`、必要时 `apps/macos/Sources/HyphenTransport/TLSEndpoint.swift`。
    - 推荐方向：不要让第二个 pre-attach claim 覆盖第一个；引入一次性 attempt/claim id、pending 超时或 listener 串行化策略，保证 attach 只能消费同一个 claim。若 Network.framework verify callback 无法拿到 connection identity，则采用“一个 pending claim + 超时释放”而不是覆盖。
    - 接受标准：`testSecondClaimBeforeAttachReclaimsTheSlot` 改为拒绝/排队第二 claim；新增测试证明 A verify 后 B verify 不能让 A attach B fingerprint；dropped pre-SAS attempt 仍能在超时或明确失败后重试。
@@ -94,17 +94,17 @@
 
 ### P1：补齐 token/session cleanup 与 Android trust store 事务性
 
-1. 给 resume token store 增加 purge 与 trust lifecycle API。
+1. - [x] 给 resume token store 增加 purge 与 trust lifecycle API。【来源：实测】`ResumeTokenStore.purgeExpired()`（Android/macOS）；`issue`/`redeem`/`liveCount` 前置清理；`ResumeTokenStoreTest` / `ResumeTokenStoreTests`。
    - 可能触及：`apps/android/app/src/main/kotlin/dev/hyphen/android/transport/ResumeTokenStore.kt`、`apps/macos/Sources/HyphenTransport/ResumeTokenStore.swift`、两端对应 tests。
    - 接受标准：未兑换过期 token 可由 `purgeExpired()` 或 `issue/redeem/liveCount` 前置清理移除；测试覆盖 expired-unredeemed 不再长期计入 live set。
    - 验证：`cd apps/android && ./gradlew testDebugUnitTest --tests 'dev.hyphen.android.transport.ResumeTokenStoreTest'`；`cd apps/macos && swift test --filter SessionReconnectTests`。
 
-2. 把 trust forget/reset 与 responder-side token invalidation 串起来。
+2. - [x] 把 trust forget/reset 与 responder-side token invalidation 串起来。【来源：实测】`PairingController.stopAfterTrustChange(invalidateTokensFor:)` / `invalidateAllTokens:`；`main.swift` forget/reset 传入被删 peer 或 `invalidateAllTokens: true`；`ResumeTokenStore.invalidateAll()`。
    - 可能触及：`apps/macos/Sources/HyphenApp/PairingController.swift`、`apps/macos/Sources/HyphenApp/main.swift`，以及未来 Android server/supervisor 接入点。
    - 接受标准：forget 单 peer 调用 `invalidatePeer(peerFingerprint)` 并 stop active session；reset all 调用新增 `invalidateAll()` 或逐 peer invalidation；Android 当前 client-side token 清理保持，若引入 responder token store 必须同一 trust lifecycle owner 管理。
    - 验证：新增 macOS test 覆盖 remove trust 后旧 token redeem 失败；真机手工执行 trust reset 后旧 session 无法 resume，必须重新配对。
 
-3. 修复 Android encrypted trust store 跨实例事务性。
+3. - [x] 修复 Android encrypted trust store 跨实例事务性。【来源：实测】`AndroidTrustStores.openDefault()` 按 canonical path 共享 `crossInstanceLock`；`EncryptedFilePeerTrustStoreTest` 并发 barrier。
    - 可能触及：`apps/android/app/src/main/kotlin/dev/hyphen/android/trust/AndroidTrustStores.kt`、`EncryptedFilePeerTrustStore.kt`、`EncryptedFilePeerTrustStoreTest.kt`。
    - 推荐方向：进程内按 canonical file path 共享单例/共享锁；或者增加文件锁 + version/CAS 事务，确保跨实例 load-mutate-persist 不丢更新。保持 zero-dependency 和 tamper-detect 行为。
    - 接受标准：两个 store 实例并发 add/remove 不丢 peer；forget/revoke 与 add 竞态下，已撤销 fingerprint 不会被旧快照写回；tamper/wrong-key 仍抛 `CorruptStore`。
@@ -112,18 +112,21 @@
 
 ### P2：纠正文档/tracker 与设备证据
 
-1. 在行为落地后拆分 tracker 状态。
+1. - [x] 在行为落地后拆分 tracker 状态。【来源：实测】HYP-M2-011 拆为本地 SAS UI `[x]` 与协议级 remote confirm `[x]`；troubleshooting 对齐 `stopAfterTrustChange` / `ResumeTokenStore.invalidatePeer`/`invalidateAll`；协议 §5.2 更新 bilateral `pair.confirm`。
    - 可能触及：`docs/project_hyphen_roadmap_tracker_v0_3.md`、`docs/protocol/hyphen-protocol-v0.md`、`docs/troubleshooting_en.md`、`docs/troubleshooting_zh.md`。
    - 接受标准：HYP-M2-011 不再把“本地 SAS UI gate”与“协议级双端 accepted confirm”混成同一完成状态；troubleshooting 的 trust reset/resume token 语句与代码 owner/API 一致。
    - 验证：文档 diff 逐条引用已落地代码/tests；`./scripts/check.sh --strict`。
 
-2. 补真实配对与并发证据。
+2. - [ ] 补真实配对与并发证据。
    - 接受标准：至少一组真 Android + Mac 记录 pairing accept/reject/reset/resume 行为；Android trust store 并发风险用自动测试覆盖，生产并发 reachability 用调用图或 runtime proof 说明。
    - 手工 proof：保存命令、设备、OS、构建版本、操作步骤、pass/fail，不把本地绿色测试等同于真机 release evidence。
 
 ## Open Questions / Environment-Only Gates
 
-- v0 是否必须实现文档中的 `pair.request/challenge/response/confirm`，还是接受当前“QR pin + SAS + 本地确认”的简化协议？若选择后者，需要 ADR 和协议文档更新，不能只改 tracker。
-- Network.framework 的 TLS verify callback 不能直接暴露 `NWConnection` identity；macOS provisional 修复需要在“拒绝第二 pending claim + timeout”与更深 transport 改造之间做取舍。
 - Android 当前没有生产级 app-scoped responder/server owner；M-03 Android responder invalidation 与 M-07 多 writer 场景在引入 FGS、server 或独立设备管理入口前仍是条件风险。
-- 真机配对、trust reset 后 reconnect、旧 resume token 失效、以及 Android trust store 多入口并发，都需要设备/运行时证据；本次审计只做静态仓库核验，没有运行测试或真机操作。
+- 真机配对、trust reset 后 reconnect、旧 resume token 失效、以及 Android trust store 多入口并发，都需要设备/运行时证据；本次实现已用 loopback/单元测试覆盖 wire 状态机与 store 锁，真机 drill 仍待补。
+
+### 实现中新发现（2026-06-19）
+
+- `PairingController` 层 verify/attach 乱序仍依赖 `ProvisionalPairingState` + listener 串行化；未加独立 controller 集成测试，仅 `ProvisionalPairingStateTests` 覆盖状态机。【来源：实测】
+- macOS `pair.confirm` 在 `NWConnection` 上为异步读写；断线时 `PairingCommit` 返回 `.incomplete` 且 gate reject，不落盘。【来源：实测】

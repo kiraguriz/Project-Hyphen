@@ -30,10 +30,18 @@ class ResumeTokenStore(
     private val random = SecureRandom()
     private val entries = HashMap<String, Entry>()
 
+    /** Drops unredeemed tokens past [ttlMs]. Called from issue/redeem/liveCount. */
+    @Synchronized
+    fun purgeExpired() {
+        val now = nowMs()
+        entries.entries.removeIf { now - it.value.issuedAtMs > ttlMs }
+    }
+
     /** Issues a fresh token for resuming [sessionId]; invalidates any
      *  previous token for the same session (one live token per session). */
     @Synchronized
     fun issue(sessionId: String, peerFingerprint: ByteArray): String {
+        purgeExpired()
         entries.values.removeAll { it.sessionId == sessionId }
         val token = Base64.getUrlEncoder().withoutPadding()
             .encodeToString(ByteArray(32).also(random::nextBytes))
@@ -45,6 +53,7 @@ class ResumeTokenStore(
      *  wrong peer). The token is consumed either way — single-use. */
     @Synchronized
     fun redeem(token: String, peerFingerprint: ByteArray): String? {
+        purgeExpired()
         val entry = entries.remove(token) ?: return null
         if (nowMs() - entry.issuedAtMs > ttlMs) return null
         if (entry.peerFingerprintHex != peerFingerprint.toHexLower()) return null
@@ -59,7 +68,15 @@ class ResumeTokenStore(
     }
 
     @Synchronized
-    fun liveCount(): Int = entries.size
+    fun invalidateAll() {
+        entries.clear()
+    }
+
+    @Synchronized
+    fun liveCount(): Int {
+        purgeExpired()
+        return entries.size
+    }
 }
 
 private fun ByteArray.toHexLower(): String = joinToString("") { "%02x".format(it) }

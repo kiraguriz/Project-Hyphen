@@ -35,6 +35,14 @@ public final class ResumeTokenStore {
 
     /// Issues a fresh token for resuming `sessionId`; invalidates any
     /// previous token for the same session (one live token per session).
+    /// Drops unredeemed tokens past `ttlMs`. Called from issue/redeem/liveCount.
+    public func purgeExpired() {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = nowMs()
+        entries = entries.filter { now - $0.value.issuedAtMs <= ttlMs }
+    }
+
     public func issue(sessionId: String, peerFingerprint: Data) -> String {
         var bytes = Data(count: 32)
         let status = bytes.withUnsafeMutableBytes {
@@ -48,6 +56,7 @@ public final class ResumeTokenStore {
 
         lock.lock()
         defer { lock.unlock() }
+        purgeExpiredLocked()
         entries = entries.filter { $0.value.sessionId != sessionId }
         entries[token] = Entry(sessionId: sessionId, peerFingerprint: peerFingerprint, issuedAtMs: nowMs())
         return token
@@ -58,6 +67,7 @@ public final class ResumeTokenStore {
     public func redeem(token: String, peerFingerprint: Data) -> String? {
         lock.lock()
         defer { lock.unlock() }
+        purgeExpiredLocked()
         guard let entry = entries.removeValue(forKey: token) else { return nil }
         guard nowMs() - entry.issuedAtMs <= ttlMs else { return nil }
         guard entry.peerFingerprint == peerFingerprint else { return nil }
@@ -71,9 +81,21 @@ public final class ResumeTokenStore {
         entries = entries.filter { $0.value.peerFingerprint != peerFingerprint }
     }
 
+    public func invalidateAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll()
+    }
+
     public var liveCount: Int {
         lock.lock()
         defer { lock.unlock() }
+        purgeExpiredLocked()
         return entries.count
+    }
+
+    private func purgeExpiredLocked() {
+        let now = nowMs()
+        entries = entries.filter { now - $0.value.issuedAtMs <= ttlMs }
     }
 }

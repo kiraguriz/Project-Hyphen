@@ -92,7 +92,10 @@
 1. SAS code 不一致时，两端都拒绝 pairing，不要继续。
 2. 使用 "Manage paired devices" 忘记 peer，然后重新配对。
 3. 确认显示的 endpoint 或 QR payload 来自你要配对的那台 Mac。
-4. 如果发生 trust reset，旧的 resume token 和 session 应该被丢弃。
+4. 如果发生 trust reset，macOS 侧 `PairingController.stopAfterTrustChange` 会通过
+   `ResumeTokenStore.invalidatePeer`（单个忘记）或 `invalidateAll`（全部重置）清理
+   responder 端 resume token；Android 侧由 connection supervisor 清理 client 端
+   `resumeToken`。重置后旧 token 不得再恢复会话。
 
 ## Wake、Sleep 与网络切换
 

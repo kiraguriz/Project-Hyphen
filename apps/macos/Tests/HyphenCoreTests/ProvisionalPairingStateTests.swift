@@ -16,12 +16,18 @@ final class ProvisionalPairingStateTests: XCTestCase {
         XCTAssertFalse(state.hasAttachedConnection)
     }
 
-    func testSecondClaimBeforeAttachReclaimsTheSlot() {
-        // A dropped or aborted pre-SAS attempt leaves a pending fingerprint with
-        // no connection; a retry must be able to reclaim it. (pairing wedge fix)
+    func testSecondClaimBeforeAttachIsRejectedWhilePending() {
         var state = ProvisionalPairingState()
-        XCTAssertTrue(state.claimFingerprint(fpA))
-        XCTAssertTrue(state.claimFingerprint(fpB))
+        XCTAssertTrue(state.claimFingerprint(fpA, nowMs: 1_000))
+        XCTAssertFalse(state.claimFingerprint(fpB, nowMs: 2_000))
+        XCTAssertEqual(state.pendingFingerprint, fpA)
+    }
+
+    func testExpiredPendingClaimAllowsRetryWithDifferentFingerprint() {
+        var state = ProvisionalPairingState()
+        XCTAssertTrue(state.claimFingerprint(fpA, nowMs: 0))
+        let afterTimeout = ProvisionalPairingState.pendingClaimTimeoutMs + 1
+        XCTAssertTrue(state.claimFingerprint(fpB, nowMs: afterTimeout))
         XCTAssertEqual(state.pendingFingerprint, fpB)
     }
 
@@ -30,7 +36,6 @@ final class ProvisionalPairingStateTests: XCTestCase {
         let connection = FakeConnection()
         XCTAssertTrue(state.claimFingerprint(fpA))
         XCTAssertEqual(state.attachConnection(ObjectIdentifier(connection)), fpA)
-        // One peer in SAS confirmation at a time: a second peer is refused.
         XCTAssertFalse(state.claimFingerprint(fpB))
         XCTAssertEqual(state.pendingFingerprint, fpA)
     }
@@ -51,6 +56,15 @@ final class ProvisionalPairingStateTests: XCTestCase {
         XCTAssertNil(state.attachConnection(ObjectIdentifier(connection)))
     }
 
+    func testAVerifyThenBVerifyCannotLetAAttachBFingerprint() {
+        var state = ProvisionalPairingState()
+        let connectionA = FakeConnection()
+        XCTAssertTrue(state.claimFingerprint(fpA, nowMs: 1_000))
+        XCTAssertFalse(state.claimFingerprint(fpB, nowMs: 2_000))
+        XCTAssertEqual(state.attachConnection(ObjectIdentifier(connectionA), nowMs: 2_000), fpA)
+        XCTAssertNotEqual(state.pendingFingerprint, fpB)
+    }
+
     func testReleaseClearsAttachedConnectionAndAllowsRetry() {
         var state = ProvisionalPairingState()
         let dropped = FakeConnection()
@@ -61,15 +75,12 @@ final class ProvisionalPairingStateTests: XCTestCase {
         XCTAssertNil(state.pendingFingerprint)
         XCTAssertFalse(state.hasAttachedConnection)
 
-        // Retry: a fresh peer can claim and attach after the drop.
         let retry = FakeConnection()
         XCTAssertTrue(state.claimFingerprint(fpB))
         XCTAssertEqual(state.attachConnection(ObjectIdentifier(retry)), fpB)
     }
 
     func testReleaseIsNoOpForANonMatchingConnection() {
-        // A rejected concurrent peer (or the post-confirm session connection)
-        // dropping must not clear the live provisional slot.
         var state = ProvisionalPairingState()
         let attached = FakeConnection()
         let other = FakeConnection()

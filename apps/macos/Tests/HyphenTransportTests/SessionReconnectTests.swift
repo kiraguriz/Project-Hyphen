@@ -37,11 +37,28 @@ final class ResumeTokenStoreTests: XCTestCase {
         XCTAssertEqual(store.redeem(token: second, peerFingerprint: peerA), "s_one")
     }
 
+    func testInvalidateAllDropsEveryLiveToken() {
+        let token = store.issue(sessionId: "s_one", peerFingerprint: peerA)
+        _ = store.issue(sessionId: "s_two", peerFingerprint: peerB)
+        store.invalidateAll()
+        XCTAssertEqual(store.liveCount, 0)
+        XCTAssertNil(store.redeem(token: token, peerFingerprint: peerA), "trust reset must void old tokens")
+    }
+
+    func testPurgeExpiredRemovesUnredeemedExpiredTokensFromLiveSet() {
+        let token = store.issue(sessionId: "s_one", peerFingerprint: peerA)
+        clock = ResumeTokenStore.defaultTTLMs + 1
+        store.purgeExpired()
+        XCTAssertEqual(store.liveCount, 0)
+        XCTAssertNil(store.redeem(token: token, peerFingerprint: peerA))
+    }
+
     func testTrustRevocationDropsEveryTokenForPeer() {
-        _ = store.issue(sessionId: "s_one", peerFingerprint: peerA)
+        let token = store.issue(sessionId: "s_one", peerFingerprint: peerA)
         _ = store.issue(sessionId: "s_two", peerFingerprint: peerB)
         store.invalidatePeer(peerA)
         XCTAssertEqual(store.liveCount, 1)
+        XCTAssertNil(store.redeem(token: token, peerFingerprint: peerA), "forget peer must void its tokens")
     }
 }
 

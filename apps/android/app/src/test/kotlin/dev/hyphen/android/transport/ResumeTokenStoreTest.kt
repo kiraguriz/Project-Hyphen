@@ -45,6 +45,15 @@ class ResumeTokenStoreTest {
     }
 
     @Test
+    fun `purgeExpired removes unredeemed expired tokens from live set`() {
+        val token = store.issue("s_one", peerA)
+        clock = ResumeTokenStore.DEFAULT_TTL_MS + 1
+        store.purgeExpired()
+        assertEquals(0, store.liveCount())
+        assertNull(store.redeem(token, peerA))
+    }
+
+    @Test
     fun `trust revocation drops every token for the peer`() {
         store.issue("s_one", peerA)
         store.issue("s_two", peerB)

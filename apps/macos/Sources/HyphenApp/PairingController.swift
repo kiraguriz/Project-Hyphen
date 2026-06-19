@@ -30,6 +30,7 @@ final class PairingController: NSObject {
     private let provisionalLock = NSLock()
     private var provisional = ProvisionalPairingState()
     private var provisionalConnection: NWConnection?
+    private var pairingConfirm: PairingWireProtocol.PairingConfirmExchange?
     private var activeSession: ProtocolSession?
     private var activeSessionToken: UUID?
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
@@ -163,14 +164,35 @@ final class PairingController: NSObject {
                         connection.cancel()
                         return
                     }
-                    DispatchQueue.main.async {
-                        self.presentSasConfirmation(
-                            attemptID: attemptID,
-                            identity: identity,
-                            nonce: nonce,
-                            deviceName: deviceName,
-                            peerFingerprint: peerFingerprint
-                        )
+                    PairingWireProtocol.runResponder(
+                        connection: connection,
+                        nonce: nonce,
+                        macSpkiFingerprint: identity.spkiFingerprint,
+                        expectedAndroidFingerprint: peerFingerprint,
+                        queue: self.queue
+                    ) { [weak self] result in
+                        guard let self else { return }
+                        switch result {
+                        case .failure:
+                            connection.cancel()
+                            self.releaseProvisionalConnection(connection)
+                            DispatchQueue.main.async {
+                                self.onStatus("Pairing aborted: wire exchange failed")
+                            }
+                        case .success(let wire):
+                            self.pairingConfirm = wire.confirm
+                            DispatchQueue.main.async {
+                                self.presentSasConfirmation(
+                                    attemptID: attemptID,
+                                    identity: identity,
+                                    nonce: nonce,
+                                    deviceName: deviceName,
+                                    peerFingerprint: peerFingerprint,
+                                    transcript: wire.transcript,
+                                    peerDeviceName: wire.peerDevice.deviceName
+                                )
+                            }
+                        }
                     }
                 },
                 onConnectionState: { [weak self] connection, state in
@@ -206,6 +228,7 @@ final class PairingController: NSObject {
         notificationPresenter.setReplyHandler(nil)
         pairingAttemptID = nil
         pairingModel.awaitingConfirmation = false
+        pairingConfirm = nil
         resetPairingActions()
         cancelAndClearProvisionalConnection()
         pairingWindow?.close()
@@ -277,9 +300,9 @@ final class PairingController: NSObject {
         }
     }
 
-    func stopAfterTrustChange() {
+    func stopAfterTrustChange(invalidateTokensFor peerFingerprint: Data? = nil, invalidateAllTokens: Bool = false) {
         reconnectLock.lock()
-        let peerFingerprint = rememberedPeerFingerprint
+        let rememberedFingerprint = rememberedPeerFingerprint
         stoppedForTrustChange = true
         rememberedPeerFingerprint = nil
         rememberedDeviceName = nil
@@ -289,10 +312,13 @@ final class PairingController: NSObject {
         steadyListener = nil
         reconnectLock.unlock()
         steady?.stop()
-        if let peerFingerprint {
-            tokenStore.invalidatePeer(peerFingerprint)
-            transferCheckpointStore.invalidatePeer(peerFingerprint)
-            transferReceiver.invalidatePeerCheckpoints(peerFingerprint)
+        if invalidateAllTokens {
+            tokenStore.invalidateAll()
+            transferCheckpointStore.invalidateAll()
+        } else if let fingerprint = peerFingerprint ?? rememberedFingerprint {
+            tokenStore.invalidatePeer(fingerprint)
+            transferCheckpointStore.invalidatePeer(fingerprint)
+            transferReceiver.invalidatePeerCheckpoints(fingerprint)
         }
         activeSession?.stop()
         activeSession = nil
@@ -361,23 +387,20 @@ final class PairingController: NSObject {
         identity: DeviceIdentity,
         nonce: Data,
         deviceName: String,
-        peerFingerprint: Data
+        peerFingerprint: Data,
+        transcript: PairingTranscript,
+        peerDeviceName: String?,
     ) {
         guard pairingAttemptID == attemptID, pairingWindow != nil else { return }
-        guard let transcript = PairingTranscript(
-            nonce: nonce,
-            macSpkiFingerprint: identity.spkiFingerprint,
-            androidSpkiFingerprint: peerFingerprint,
-            protocolVersion: HyphenCore.protocolVersion
-        ) else {
-            onStatus("Pairing aborted: transcript could not be built")
+        guard let confirm = pairingConfirm else {
+            onStatus("Pairing aborted: confirm channel missing")
             endPairing()
             return
         }
         let gate = SasConfirmationGate(
             transcript: transcript,
             peerFingerprint: peerFingerprint,
-            peerDisplayName: "Android device", // device-chosen names arrive with hello (M2-012)
+            peerDisplayName: peerDeviceName ?? "Android device",
             trustStore: KeychainTrustStore()
         )
 
@@ -391,39 +414,46 @@ final class PairingController: NSObject {
         pairingModel.peerName = L("pairing.androidDevice")
         pairingModel.fingerprint = Self.fingerprintLine(peerFingerprint)
         pairingModel.awaitingConfirmation = true
-        pairingModel.onConfirm = { [weak self, gate] in
+        pairingModel.onConfirm = { [weak self, gate, confirm] in
             guard let self else { return }
             guard self.pairingModel.awaitingConfirmation else { return }
             self.pairingModel.awaitingConfirmation = false
             self.resetPairingActions()
-            do {
-                guard try gate.confirm() == .trusted else {
-                    self.onStatus("Pairing rejected — nothing stored")
-                    self.endPairing()
-                    return
+            PairingCommit.finalize(gate: gate, confirm: confirm, localAccepted: true) { outcome in
+                DispatchQueue.main.async {
+                    switch outcome {
+                    case .trusted:
+                        let connection = self.takeProvisionalConnection()
+                        self.pairingConfirm = nil
+                        self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
+                        self.emitActivity(.pairingNote(message: L("pairing.note.paired"), at: Date()))
+                        self.closePairingUI()
+                        self.startSteadySession(
+                            connection: connection,
+                            deviceName: deviceName,
+                            peerFingerprint: peerFingerprint
+                        )
+                    case .rejected:
+                        self.onStatus("Pairing rejected — nothing stored")
+                        self.endPairing()
+                    case .incomplete:
+                        self.onStatus("Pairing incomplete — nothing stored")
+                        self.endPairing()
+                    }
                 }
-                let connection = self.takeProvisionalConnection()
-                self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
-                self.emitActivity(.pairingNote(message: L("pairing.note.paired"), at: Date()))
-                self.closePairingUI()
-                self.startSteadySession(
-                    connection: connection,
-                    deviceName: deviceName,
-                    peerFingerprint: peerFingerprint
-                )
-            } catch {
-                self.onStatus("Trust store write failed: \(error)")
-                self.endPairing()
             }
         }
-        pairingModel.onReject = { [weak self, gate] in
+        pairingModel.onReject = { [weak self, gate, confirm] in
             guard let self else { return }
             guard self.pairingModel.awaitingConfirmation else { return }
             self.pairingModel.awaitingConfirmation = false
             self.resetPairingActions()
-            gate.reject()
-            self.onStatus("Pairing rejected — nothing stored")
-            self.endPairing()
+            PairingCommit.finalize(gate: gate, confirm: confirm, localAccepted: false) { _ in
+                DispatchQueue.main.async {
+                    self.onStatus("Pairing rejected — nothing stored")
+                    self.endPairing()
+                }
+            }
         }
     }
 

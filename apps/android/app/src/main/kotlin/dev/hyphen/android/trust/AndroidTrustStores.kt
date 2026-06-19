@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.io.File
 import java.security.KeyStore
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
@@ -29,11 +30,17 @@ object AndroidTrustStores {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val STORE_FILE = "trust/peers.v0.bin"
 
-    fun openDefault(context: Context): PeerTrustStore =
-        EncryptedFilePeerTrustStore(
-            file = File(context.filesDir, STORE_FILE),
+    private val locksByCanonicalPath = ConcurrentHashMap<String, Any>()
+
+    fun openDefault(context: Context): PeerTrustStore {
+        val file = File(context.filesDir, STORE_FILE)
+        val lock = locksByCanonicalPath.getOrPut(file.canonicalPath) { Any() }
+        return EncryptedFilePeerTrustStore(
+            file = file,
             cipher = AesGcmTrustCipher(getOrCreateKey()),
+            crossInstanceLock = lock,
         )
+    }
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }

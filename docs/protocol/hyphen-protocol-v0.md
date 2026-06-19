@@ -97,8 +97,9 @@ Android → Mac: pair.request  { nonce, androidSpkiFp, deviceInfo }
 Mac → Android: pair.challenge { transcriptHash }
 Android → Mac: pair.response  { transcriptHash }     # both computed independently
 both:     display SAS; user confirms match on BOTH devices
-Mac → Android: pair.confirm   { accepted: true }
-both:     persist peer fingerprint in trust store (Keychain / encrypted store)
+Android → Mac: pair.confirm   { accepted: true|false }
+Mac → Android: pair.confirm   { accepted: true|false }
+both:     persist peer fingerprint in trust store only after BOTH sides sent `accepted: true`
 ```
 
 ### 5.3 Transcript and SAS

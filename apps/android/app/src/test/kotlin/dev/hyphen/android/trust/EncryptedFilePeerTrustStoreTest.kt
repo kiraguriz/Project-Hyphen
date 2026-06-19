@@ -143,4 +143,35 @@ class EncryptedFilePeerTrustStoreTest {
         assertNull(other.get(fpA))
         assertEquals(emptyList<TrustedPeer>(), other.allPeers())
     }
+
+    @Test
+    fun `concurrent store instances do not lose peer updates`() {
+        val sharedLock = Any()
+        val first = EncryptedFilePeerTrustStore(file, AesGcmTrustCipher(key), sharedLock)
+        val second = EncryptedFilePeerTrustStore(file, AesGcmTrustCipher(key), sharedLock)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val done = java.util.concurrent.CountDownLatch(2)
+        val errors = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+
+        fun worker(store: EncryptedFilePeerTrustStore, peer: TrustedPeer) {
+            Thread {
+                try {
+                    start.await()
+                    store.add(peer)
+                } catch (e: Throwable) {
+                    errors.add(e)
+                } finally {
+                    done.countDown()
+                }
+            }.start()
+        }
+
+        worker(first, peer(fpA, "Pixel"))
+        worker(second, peer(fpB, "Galaxy"))
+        start.countDown()
+        assertTrue(done.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(errors.isEmpty())
+        val reopened = EncryptedFilePeerTrustStore(file, AesGcmTrustCipher(key), sharedLock)
+        assertEquals(setOf("Pixel", "Galaxy"), reopened.allPeers().map { it.displayName }.toSet())
+    }
 }

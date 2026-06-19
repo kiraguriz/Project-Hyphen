@@ -641,7 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func forgetPeer(_ peer: TrustedPeer, store: KeychainTrustStore) throws {
         let removed = try store.remove(fingerprint: peer.spkiFingerprint)
-        pairingController?.stopAfterTrustChange()
+        pairingController?.stopAfterTrustChange(invalidateTokensFor: peer.spkiFingerprint)
         pairingController?.endPairing()
         stateItem.title = "Forgot \(peer.displayName.isEmpty ? "peer" : peer.displayName) (removed=\(removed))"
         invalidateTrustedPeerCache()
@@ -664,7 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             try store.removeAll()
-            pairingController?.stopAfterTrustChange()
+            pairingController?.stopAfterTrustChange(invalidateAllTokens: true)
             pairingController?.endPairing()
             stateItem.title = "Paired devices reset (\(count) removed)"
             invalidateTrustedPeerCache()

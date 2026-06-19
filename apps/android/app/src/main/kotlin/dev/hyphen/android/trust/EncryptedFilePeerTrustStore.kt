@@ -30,6 +30,7 @@ import java.util.Base64
 class EncryptedFilePeerTrustStore(
     private val file: File,
     private val cipher: TrustCipher,
+    private val crossInstanceLock: Any = Any(),
 ) : PeerTrustStore {
 
     companion object {
@@ -37,7 +38,7 @@ class EncryptedFilePeerTrustStore(
         private const val HEADER = "hyphen-trust-v0"
     }
 
-    private val lock = Any()
+    private val lock = crossInstanceLock
 
     override fun add(peer: TrustedPeer) {
         validate(peer.spkiFingerprint)

@@ -37,7 +37,9 @@ import dev.hyphen.android.notifications.NotificationReplyRequestHandler
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.session.ConnectionSupervisor
 import dev.hyphen.android.pairing.EndpointParser
+import dev.hyphen.android.pairing.PairingCommit
 import dev.hyphen.android.pairing.PairingTranscript
+import dev.hyphen.android.pairing.PairingWireProtocol
 import dev.hyphen.android.pairing.ParseResult
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.pairing.SasConfirmationGate
@@ -433,14 +435,19 @@ class MainActivity : ComponentActivity() {
                 )
                 val macFp = observedMacFp
                     ?: throw IllegalStateException("server fingerprint missing after provisional TLS")
-                val transcript = PairingTranscript.create(
+                val wire = PairingWireProtocol.runInitiator(
+                    socket = socket,
                     nonce = qr.decodedNonce(),
                     macSpkiFingerprint = macFp,
                     androidSpkiFingerprint = identity.spkiFingerprint,
-                    protocolVersion = PairingTranscript.PROTOCOL_VERSION,
-                )!!
+                    device = PairingWireProtocol.WireDeviceInfo(
+                        kind = "android",
+                        appVersion = "0.0.1",
+                        deviceName = Build.MODEL,
+                    ),
+                )
                 val gate = SasConfirmationGate(
-                    transcript = transcript,
+                    transcript = wire.transcript,
                     peerFingerprint = macFp,
                     peerDisplayName = qr.deviceName ?: "Mac",
                     trustStore = AndroidTrustStores.openDefault(applicationContext),
@@ -448,7 +455,7 @@ class MainActivity : ComponentActivity() {
                 val handoffSocket = socket
                 socket = null
                 postToUi(onDropped = { runCatching { handoffSocket.close() } }) {
-                    presentSasDialog(qr, gate, handoffSocket, macFp)
+                    presentSasDialog(qr, gate, wire.confirm, handoffSocket, macFp)
                 }
             } catch (e: Exception) {
                 runCatching { socket?.close() }
@@ -460,26 +467,41 @@ class MainActivity : ComponentActivity() {
     private fun presentSasDialog(
         qr: ParsedEndpoint.QrPayload,
         gate: SasConfirmationGate,
+        confirm: PairingWireProtocol.PairingConfirmExchange,
         socket: SSLSocket,
         macFp: ByteArray,
     ) {
         fun closeSocket() {
             launchWorker("hyphen-close-pairing-socket") { runCatching { socket.close() } }
         }
+        fun finalizePairing(localAccepted: Boolean, onTrusted: () -> Unit) {
+            launchWorker("hyphen-pairing-commit") {
+                when (PairingCommit.finalize(gate, confirm, localAccepted)) {
+                    PairingCommit.Outcome.TRUSTED -> postToUi { onTrusted() }
+                    PairingCommit.Outcome.REJECTED -> postToUi {
+                        append("pairing rejected — nothing stored")
+                        closeSocket()
+                    }
+                    PairingCommit.Outcome.INCOMPLETE -> postToUi {
+                        append("pairing incomplete — nothing stored")
+                        closeSocket()
+                    }
+                }
+            }
+        }
         AlertDialog.Builder(this)
             .setTitle(R.string.dlg_sas_title)
             .setMessage(getString(R.string.dlg_sas_msg, gate.sas))
             .setPositiveButton(R.string.dlg_sas_confirm) { _, _ ->
-                gate.confirm()
-                append("paired — fingerprint pinned (${gate.sas})")
-                emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_paired), System.currentTimeMillis()))
-                supervisor.rememberEndpoint(qr, macFp)
-                startSteadySession(qr, socket)
+                finalizePairing(localAccepted = true) {
+                    append("paired — fingerprint pinned (${gate.sas})")
+                    emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_paired), System.currentTimeMillis()))
+                    supervisor.rememberEndpoint(qr, macFp)
+                    startSteadySession(qr, socket)
+                }
             }
             .setNegativeButton(R.string.dlg_sas_reject) { _, _ ->
-                gate.reject()
-                append("pairing rejected — nothing stored")
-                closeSocket()
+                finalizePairing(localAccepted = false) { closeSocket() }
             }
             .setCancelable(false)
             .show()

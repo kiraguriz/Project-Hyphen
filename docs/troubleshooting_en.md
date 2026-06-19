@@ -107,7 +107,10 @@ Checks:
 2. Use "Manage paired devices" to forget the peer, then pair again.
 3. Confirm the displayed endpoint or QR payload came from the Mac you intend to
    pair with.
-4. If a trust reset happened, old resume tokens and sessions should be discarded.
+4. If a trust reset happened, macOS `PairingController.stopAfterTrustChange` clears
+   responder-side resume tokens via `ResumeTokenStore.invalidatePeer` (single forget)
+   or `invalidateAll` (reset all); Android clears client-side `resumeToken` in the
+   connection supervisor. Old tokens must not resume a session after reset.
 
 ## Wake, Sleep, And Network Changes
 

@@ -155,7 +155,8 @@ gantt
 | HYP-M2-008 | `[x]` | P0 | Transport | Implement Android TLS client/server skeleton | HYP-M2-006 | Self-signed cert and pinned peer verification | Integration test |
 | HYP-M2-009 | `[x]` | P0 | Pairing | Implement QR payload generation on macOS | HYP-M2-004,HYP-M2-007 | QR contains endpoint, fingerprint, nonce, protocol | Unit/manual test |
 | HYP-M2-010 | `[x]` | P0 | Pairing | Implement QR scan/parse on Android | HYP-M2-009 | Invalid payload rejected safely | Unit/manual test |
-| HYP-M2-011 | `[x]` | P0 | Pairing | Implement SAS confirmation UI both sides | HYP-M2-009,HYP-M2-010 | User confirms matching code before trust is stored; live two-device SAS drill remains manual residue | Unit/manual test |
+| HYP-M2-011 | `[x]` | P0 | Pairing | Implement SAS confirmation UI both sides | HYP-M2-009,HYP-M2-010 | User confirms matching code in local SAS UI before trust is stored; live two-device SAS drill remains manual residue | Unit/manual test |
+| HYP-M2-011b | `[x]` | P0 | Pairing | Wire-level bilateral `pair.confirm` before trust commit | HYP-M2-011 | `PairingWireProtocol` + `PairingCommit`; trust persists only after both peers send `accepted: true`; loopback tests in `PairingWireProtocolTest` | Unit/integration test |
 | HYP-M2-012 | `[x]` | P0 | Transport | Implement heartbeat and ack | HYP-M2-007,HYP-M2-008 | Missed heartbeat transitions to degraded | Unit/integration test |
 | HYP-M2-013 | `[~]` | P0 | Transport | Implement session reconnect and backoff (component + loopback) | HYP-M2-012 | `SessionReconnector` + mutual-TLS loopback reconnect after simulated drop; product lifecycle owner wiring is HYP-M2-016 | Integration test |
 | HYP-M2-014 | `[x]` | P1 | Diagnostics | Add protocol-level trace IDs local only | HYP-M2-001 | Trace IDs are not transmitted in diagnostics unless opted-in | Unit test |

@@ -141,6 +141,20 @@ public final class TransferCheckpointStore {
         }
     }
 
+    public func invalidateAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+        for url in files where url.pathExtension == "json" {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     public func purgeExpired() {
         lock.lock()
         defer { lock.unlock() }

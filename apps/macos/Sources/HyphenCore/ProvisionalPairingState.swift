@@ -15,11 +15,17 @@ import Foundation
 /// before confirm). The type is not thread-safe; the owner serializes access
 /// (`PairingController` holds a lock around it).
 public struct ProvisionalPairingState: Equatable {
+
+    /// How long a pre-attach claim blocks a second fingerprint (security review M-02).
+    public static let pendingClaimTimeoutMs: Int64 = 60_000
+
     public private(set) var pendingFingerprint: Data?
+    public private(set) var pendingClaimedAtMs: Int64?
     public private(set) var connectionID: ObjectIdentifier?
 
     public init() {
         pendingFingerprint = nil
+        pendingClaimedAtMs = nil
         connectionID = nil
     }
 
@@ -27,20 +33,29 @@ public struct ProvisionalPairingState: Equatable {
     public var hasAttachedConnection: Bool { connectionID != nil }
 
     /// Claim the provisional slot for a fingerprint seen in the TLS verify
-    /// block. Succeeds when no connection has attached yet — a free slot, or a
-    /// prior claim whose connection never arrived (a dropped pre-SAS attempt),
-    /// which is overwritten so a retry can proceed. Rejected once a connection
-    /// has attached, so only one peer is ever in SAS confirmation at a time.
-    public mutating func claimFingerprint(_ fingerprint: Data) -> Bool {
+    /// block. Succeeds when no connection has attached yet and the slot is free
+    /// or the prior pre-attach claim timed out. A second fingerprint is rejected
+    /// while a pending claim is still live (M-02).
+    public mutating func claimFingerprint(_ fingerprint: Data, nowMs: Int64? = nil) -> Bool {
+        let clock = nowMs ?? Self.currentEpochMs()
         guard connectionID == nil else { return false }
-        pendingFingerprint = fingerprint
+        releaseExpiredPendingClaim(nowMs: clock)
+        if let pending = pendingFingerprint, pending != fingerprint {
+            return false
+        }
+        if pendingFingerprint == nil {
+            pendingFingerprint = fingerprint
+            pendingClaimedAtMs = clock
+        }
         return true
     }
 
     /// Bind a live connection to the pending fingerprint. Returns the fingerprint
     /// to confirm, or nil when there is no pending claim or a connection has
     /// already attached (the caller should drop the surplus connection).
-    public mutating func attachConnection(_ id: ObjectIdentifier) -> Data? {
+    public mutating func attachConnection(_ id: ObjectIdentifier, nowMs: Int64? = nil) -> Data? {
+        let clock = nowMs ?? Self.currentEpochMs()
+        releaseExpiredPendingClaim(nowMs: clock)
         guard let fingerprint = pendingFingerprint, connectionID == nil else { return nil }
         connectionID = id
         return fingerprint
@@ -53,6 +68,7 @@ public struct ProvisionalPairingState: Equatable {
     public mutating func releaseConnection(_ id: ObjectIdentifier) -> Bool {
         guard connectionID == id else { return false }
         pendingFingerprint = nil
+        pendingClaimedAtMs = nil
         connectionID = nil
         return true
     }
@@ -61,6 +77,19 @@ public struct ProvisionalPairingState: Equatable {
     /// connection for the steady-state session.
     public mutating func reset() {
         pendingFingerprint = nil
+        pendingClaimedAtMs = nil
         connectionID = nil
+    }
+
+    private mutating func releaseExpiredPendingClaim(nowMs: Int64) {
+        guard connectionID == nil,
+              let claimedAt = pendingClaimedAtMs,
+              nowMs - claimedAt > Self.pendingClaimTimeoutMs else { return }
+        pendingFingerprint = nil
+        pendingClaimedAtMs = nil
+    }
+
+    private static func currentEpochMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 }
