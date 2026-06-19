@@ -304,7 +304,8 @@ class TransferMessagesTest {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
         val outbox = RecordingTransferOutbox()
         val sendProgress = mutableListOf<TransferProgress>()
-        val manifest = TransferSender(outbox, onProgress = sendProgress::add).sendSource(
+        val sender = TransferSender(outbox, onProgress = sendProgress::add)
+        val manifest = sender.sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
             source = source(bytes),
@@ -314,22 +315,256 @@ class TransferMessagesTest {
         val receiveProgress = mutableListOf<TransferProgress>()
         val receiver = receiver(onProgress = receiveProgress::add)
 
-        outbox.envelopes.forEachIndexed { index, sent ->
-            receiver.handle(toEnvelope(sent, index))
+        assertEquals(listOf(0), sendProgress.map { it.completedChunks })
+
+        var processed = 0
+        while (processed < outbox.envelopes.size) {
+            val sent = outbox.envelopes[processed]
+            receiver.handle(toEnvelope(sent, processed))
+            if (sent.type == TransferProtocol.TYPE_CHUNK) {
+                sender.handleAck("sent-$processed")
+            }
+            processed += 1
         }
 
         assertEquals(listOf(0, 1, 2, 3), sendProgress.map { it.completedChunks })
         assertEquals(listOf(0, 1, 2, 3), receiveProgress.map { it.completedChunks })
+        assertTrue(sendProgress.all { (it.sentChunks ?: 0) >= it.completedChunks })
         assertEquals(bytes.size.toLong(), sendProgress.last().completedBytes)
         assertEquals(manifest.sizeBytes, receiveProgress.last().totalBytes)
         assertTrue(sendProgress.last().isComplete)
     }
 
     @Test
+    fun `duplicate and out of order chunks keep contiguous checkpoint separate`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val manifest = TransferSender(outbox).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_out_of_order",
+        )
+        val receiveProgress = mutableListOf<TransferProgress>()
+        val receiver = receiver(onProgress = receiveProgress::add)
+        receiver.handle(toEnvelope(outbox.envelopes[0], index = 0))
+        receiver.handle(toEnvelope(outbox.envelopes[1], index = 1)) // chunk 0
+        receiver.handle(toEnvelope(outbox.envelopes[1], index = 2)) // duplicate chunk 0
+        receiver.handle(toEnvelope(outbox.envelopes[3], index = 3)) // chunk 2 out of order
+
+        assertEquals(1, receiver.checkpoint(manifest.fileId)?.nextChunkIndex)
+        val progress = receiveProgress.last()
+        assertEquals(1, progress.completedChunks)
+        assertEquals(2, progress.receivedChunks)
+
+        receiver.handle(toEnvelope(outbox.envelopes[2], index = 4)) // chunk 1 fills gap
+        assertEquals(3, receiver.checkpoint(manifest.fileId)?.nextChunkIndex)
+    }
+
+    @Test
+    fun `receiver enforces concurrent transfer and staging quotas`() {
+        val limits = TransferResourceLimits(
+            maxConcurrentTransfers = 1,
+            maxStagingBytes = 2048,
+            maxCompletedEntries = 1,
+        )
+        val receiver = receiver(limits = limits)
+        val first = manifestPayload("f_quota_one", sizeBytes = 1500, chunkSizeBytes = 1024, chunkCount = 2)
+        val second = manifestPayload("f_quota_two", sizeBytes = 1500, chunkSizeBytes = 1024, chunkCount = 2)
+
+        receiver.handle(
+            toEnvelope(
+                SentTransferEnvelope(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, first),
+                index = 0,
+            ),
+        )
+        assertRejected("concurrent transfer quota") {
+            receiver.handle(
+                toEnvelope(
+                    SentTransferEnvelope(TransferProtocol.TYPE_MANIFEST, TransferProtocol.CAPABILITY, true, second),
+                    index = 1,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `sender enforces registry and outstanding quotas`() {
+        val limits = TransferResourceLimits(
+            maxSenderRegistrySize = 1,
+            maxOutstandingMessages = 1,
+            maxOutstandingBytes = 2048,
+        )
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 4, limits = limits)
+        sender.sendSource(
+            filename = "one.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(1500) { it.toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_registry_one",
+        )
+        assertRejected("registry quota") {
+            sender.sendSource(
+                filename = "two.bin",
+                mimeType = "application/octet-stream",
+                source = source(ByteArray(1500) { it.toByte() }),
+                chunkSizeBytes = 1024,
+                fileId = "f_registry_two",
+            )
+        }
+        assertEquals(1, outbox.envelopes.count { it.type == TransferProtocol.TYPE_CHUNK })
+    }
+
+    @Test
+    fun `ack timeout aborts sender transfer`() {
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        val manifest = sender.sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(5000) { (it % 251).toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_ack_timeout",
+        )
+        val before = outbox.envelopes.size
+        sender.handleAckTimeout("sent-1")
+        sender.handleAck("sent-2")
+        assertEquals(before, outbox.envelopes.size)
+        assertRejected("terminal after ack timeout") {
+            sender.sendRemaining(manifest.fileId, fromChunkIndex = 0)
+        }
+    }
+
+    @Test
+    fun `cancel on same sender stops further chunks after ack`() {
+        val bytes = ByteArray(10_000) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        val manifest = sender.sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_cancel_same_sender",
+        )
+
+        sender.cancel(manifest.fileId, discard = true)
+        assertEquals(TransferProtocol.TYPE_CANCEL, outbox.envelopes.last().type)
+        val countAfterCancel = outbox.envelopes.size
+
+        sender.handleAck("sent-1")
+        sender.handleAck("sent-2")
+        assertEquals(countAfterCancel, outbox.envelopes.size)
+        assertRejected("terminal sendRemaining") {
+            sender.sendRemaining(manifest.fileId, fromChunkIndex = 0)
+        }
+    }
+
+    @Test
+    fun `sender recycles registry after all chunks are acked`() {
+        val bytes = ByteArray(5000) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        val manifest = sender.sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_sender_recycle_complete",
+        )
+
+        var processed = 0
+        while (processed < outbox.envelopes.size) {
+            val sent = outbox.envelopes[processed]
+            if (sent.type == TransferProtocol.TYPE_CHUNK) {
+                sender.handleAck("sent-$processed")
+            }
+            processed += 1
+        }
+        assertRejected("completed sendRemaining") {
+            sender.sendRemaining(manifest.fileId, manifest.chunkCount)
+        }
+    }
+
+    @Test
+    fun `receiver recycleSession clears active partial state`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val manifest = TransferSender(outbox).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_receiver_recycle",
+        )
+        val receiver = receiver()
+        receiver.handle(toEnvelope(outbox.envelopes[0], index = 0))
+        receiver.handle(toEnvelope(outbox.envelopes[1], index = 1))
+        assertEquals(1, receiver.checkpoint(manifest.fileId)?.nextChunkIndex)
+
+        receiver.recycleSession()
+
+        assertEquals(null, receiver.checkpoint(manifest.fileId))
+        assertRejected("unknown fileId after recycle") {
+            receiver.handle(toEnvelope(outbox.envelopes[1], index = 2))
+        }
+    }
+
+    @Test
+    fun `receiver resumes transfers after recycle and rebind`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        TransferSender(outbox).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_rebind_rearm",
+        )
+        val receiver = receiver()
+
+        // Freeze the long-lived receiver as a session teardown would, then re-arm
+        // it on the next session: a fresh transfer must complete, not be rejected.
+        receiver.recycleSession()
+        receiver.bindSession(ByteArray(32) { 1 }, "s_rebind")
+
+        var completed: TransferCompleted? = null
+        outbox.envelopes.forEachIndexed { index, sent ->
+            val event = receiver.handle(toEnvelope(sent, index))
+            if (event is TransferEvent.Completed) completed = event.completed
+        }
+        assertEquals(bytes.toList(), completed?.file?.readBytes()?.toList())
+    }
+
+    @Test
+    fun `completed receiver keeps bounded tombstone checkpoint without file ref`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val manifest = TransferSender(outbox).sendSource(
+            filename = "sample.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_completed_tombstone",
+        )
+        val receiver = receiver()
+        outbox.envelopes.forEachIndexed { index, sent ->
+            receiver.handle(toEnvelope(sent, index))
+        }
+
+        val checkpoint = receiver.checkpoint(manifest.fileId)
+        assertEquals(manifest.chunkCount, checkpoint?.nextChunkIndex)
+        receiver.handle(toEnvelope(outbox.envelopes[0], index = outbox.envelopes.size))
+    }
+
+    @Test
     fun `cancel message uses protocol wire name and discard clears receiver checkpoint`() {
         val bytes = ByteArray(2500) { (it % 251).toByte() }
-        val firstOutbox = RecordingTransferOutbox()
-        val manifest = TransferSender(firstOutbox).sendSource(
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox)
+        val manifest = sender.sendSource(
             filename = "sample.bin",
             mimeType = "application/octet-stream",
             source = source(bytes),
@@ -337,14 +572,13 @@ class TransferMessagesTest {
             fileId = "f_cancel_test",
         )
         val receiver = receiver()
-        firstOutbox.envelopes.take(2).forEachIndexed { index, sent ->
+        outbox.envelopes.take(2).forEachIndexed { index, sent ->
             receiver.handle(toEnvelope(sent, index))
         }
         assertEquals(1, receiver.checkpoint(manifest.fileId)?.nextChunkIndex)
 
-        val cancelOutbox = RecordingTransferOutbox()
-        TransferSender(cancelOutbox).sendCancel(TransferCancel(manifest.fileId, discard = true))
-        val cancel = cancelOutbox.envelopes.single()
+        sender.cancel(manifest.fileId, discard = true)
+        val cancel = outbox.envelopes.last()
         assertEquals(TransferProtocol.TYPE_CANCEL, cancel.type)
         assertEquals(Json.Bool(true), cancel.payload["discard"])
 
@@ -381,7 +615,7 @@ class TransferMessagesTest {
     @Test
     fun `receiver rejects oversized manifests before state allocation`() {
         val receiver = TransferReceiver(object : TransferStorage {
-            override fun prepare(manifest: TransferManifest): java.io.File {
+            override fun prepare(manifest: TransferManifest, reuseExisting: Boolean): java.io.File {
                 fail("oversized manifest should reject before storage allocation")
                 throw IllegalStateException("unexpected storage allocation")
             }
@@ -549,9 +783,14 @@ class TransferMessagesTest {
     }
 
     private fun receiver(
+        limits: TransferResourceLimits = TransferResourceLimits(),
         onProgress: (TransferProgress) -> Unit = {},
     ): TransferReceiver =
-        TransferReceiver(FileTransferStorage(temp.newFolder("receive-${System.nanoTime()}")), onProgress)
+        TransferReceiver(
+            storage = FileTransferStorage(temp.newFolder("receive-${System.nanoTime()}")),
+            limits = limits,
+            onProgress = onProgress,
+        )
 
     private fun chunk(fileId: String, chunkIndex: Int, bytes: ByteArray): SentTransferEnvelope =
         SentTransferEnvelope(

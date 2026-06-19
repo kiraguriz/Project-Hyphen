@@ -110,11 +110,11 @@
 
 修复项：
 
-- 为 receiver completion 引入明确的 delivery contract：完成 hash 验证后，文件必须原子交付到用户批准的位置或保持在可打开的 app-owned location；只有交付成功并完成状态回收后才删除临时 `.part`。
-- Android 使用 SAF 或 app-specific share/export flow；macOS 使用 save panel 或 security-scoped URL。debug surface 不得再无条件删除唯一副本。
-- 给 `TransferSender` 增加本实例 `cancel(fileId, discard: Boolean)`：关闭 stream、清理 outstanding/active、从 registered 移除或标记 terminal、阻止后续 ACK 继续 pump，并由同一实例发送 `transfer.cancel`。
-- receiver 在完成、取消、失败、超时后回收 `states/completed`；sender 在完成、取消、失败、session close 后回收 `registered/activeSends`。
-- 增加 terminal-state 语义，避免 completed map 对已删除文件继续报告完成 checkpoint。若需要完成去重，保留 bounded tombstone，而不是永久 `TransferCompleted(fileURL)`。
+- [x] 为 receiver completion 引入明确的 delivery contract：完成 hash 验证后，文件必须原子交付到用户批准的位置或保持在可打开的 app-owned location；只有交付成功并完成状态回收后才删除临时 `.part`。【来源：评估】Android `received/` + macOS Downloads 已落地（HYP-M3-016）；SAF/save-panel 真机 UX 仍 `[?]`。
+- [ ] Android 使用 SAF 或 app-specific share/export flow；macOS 使用 save panel 或 security-scoped URL。debug surface 不得再无条件删除唯一副本。（基础 app-owned 路径已完成；交互式 SAF/save panel 仍 open）
+- [x] 给 `TransferSender` 增加本实例 `cancel(fileId, discard: Boolean)`：关闭 stream、清理 outstanding/active、从 registered 移除或标记 terminal、阻止后续 ACK 继续 pump，并由同一实例发送 `transfer.cancel`。【来源：评估】
+- [x] receiver 在完成、取消、失败、超时后回收 `states/completed`；sender 在完成、取消、失败、session close 后回收 `registered/activeSends`。【来源：评估】bounded tombstone + `recycleSession()`/`handleAckTimeout()`。
+- [x] 增加 terminal-state 语义，避免 completed map 对已删除文件继续报告完成 checkpoint。若需要完成去重，保留 bounded tombstone，而不是永久 `TransferCompleted(fileURL)`。【来源：评估】
 
 验收标准：
 
@@ -145,12 +145,12 @@
 
 修复项：
 
-- `TransferState` 维护 `receivedCount`、`highestContiguousIndex`、`receivedBytes`，使 progress/checkpoint/complete 检查为 O(1) 或摊还 O(1)。
-- 重复 chunk 不重复写磁盘或重复计数；乱序 chunk 的 total received 与 contiguous checkpoint 分开记录。
-- 增加 per-peer 和全局配额：最大并发 transfer 数、最大暂存总字节、最大 completed/tombstone 数、最大 sender registry 数、最大 outstanding bytes/messages。
-- 对超额情况返回明确错误，如 `plugin/disk-full`、`plugin/transfer-cancelled` 或新增受审 error code。
-- 发送端 progress 分层：`queued/sent`、`acked`、receiver `verified`。用户主进度默认使用 ACK 或 receiver verified；debug 可单独展示 queued。
-- ACK timeout、session close、trust revoke 要能终止/冻结相关 transfer，并释放资源或留下 bounded resumable state。
+- [x] `TransferState` 维护 `receivedCount`、`highestContiguousIndex`、`receivedBytes`，使 progress/checkpoint/complete 检查为 O(1) 或摊还 O(1)。【来源：评估】
+- [x] 重复 chunk 不重复写磁盘或重复计数；乱序 chunk 的 total received 与 contiguous checkpoint 分开记录。【来源：评估】
+- [x] 增加 per-peer 和全局配额：最大并发 transfer 数、最大暂存总字节、最大 completed/tombstone 数、最大 sender registry 数、最大 outstanding bytes/messages。【来源：评估】`TransferResourceLimits`。
+- [x] 对超额情况返回明确错误，如 `plugin/disk-full`、`plugin/transfer-cancelled` 或新增受审 error code。【来源：评估】
+- [x] 发送端 progress 分层：`queued/sent`、`acked`、receiver `verified`。用户主进度默认使用 ACK 或 receiver verified；debug 可单独展示 queued。【来源：评估】Android sender 区分 `sentChunks`/`completedChunks`（ACK）；receiver 区分 `receivedChunks`/contiguous。
+- [x] ACK timeout、session close、trust revoke 要能终止/冻结相关 transfer，并释放资源或留下 bounded resumable state。【来源：评估】`handleAckTimeout`/`recycleSession`/`stopAfterTrustChange`；持久 checkpoint 见 P2。
 
 验收标准：
 
@@ -180,11 +180,11 @@
 
 修复项：
 
-- 持久化 peer-bound transfer checkpoint：manifest、temp file identity、contiguous index、received bitmap/compact ranges、hash state策略、expiry、peer/session binding。
-- App/process restart 后能恢复或明确作废 partial transfer；trust revoke/reset 必须删除 peer-bound transfer checkpoints 和相关 resume tokens。
-- 对 Android `FrameIO.write(... flush())` 做吞吐实验。若是瓶颈，引入受控 writer batching，确保 ACK/heartbeat 延迟不被牺牲。
-- 发送前整文件 SHA-256 如首包延迟不可接受，评估预扫描 UI、缓存 hash、或协议级分阶段 manifest；任何 wire 变化需 ADR/version note。
-- 更新 tracker：HYP-M3-011/012 保持“core/v0 wire path”语义；产品级交付、durable checkpoint、ACK/verified progress、资源配额应有单独行或明确补充，不再混在 `[x]` 行中。
+- [x] 持久化 peer-bound transfer checkpoint：manifest、temp file identity、contiguous index、received bitmap/compact ranges、hash state策略、expiry、peer/session binding。【来源：评估】`TransferCheckpointStore`（Android `filesDir/transfer-checkpoints`、macOS Application Support）。
+- [x] App/process restart 后能恢复或明确作废 partial transfer；trust revoke/reset 必须删除 peer-bound transfer checkpoints 和相关 resume tokens。【来源：评估】`bindSession()` 恢复 inbound；macOS `stopAfterTrustChange()` 同时 `tokenStore.invalidatePeer` + checkpoint purge；Android forget/reset + supervisor path。
+- [ ] 对 Android `FrameIO.write(... flush())` 做吞吐实验。若是瓶颈，引入受控 writer batching，确保 ACK/heartbeat 延迟不被牺牲。（未做 batching；见开放问题）
+- [ ] 发送前整文件 SHA-256 如首包延迟不可接受，评估预扫描 UI、缓存 hash、或协议级分阶段 manifest；任何 wire 变化需 ADR/version note。
+- [x] 更新 tracker：HYP-M3-011/012 保持“core/v0 wire path”语义；产品级交付、durable checkpoint、ACK/verified progress、资源配额应有单独行或明确补充，不再混在 `[x]` 行中。【来源：评估】HYP-M3-017/018/019。
 
 验收标准：
 
@@ -205,8 +205,11 @@
 ## 开放问题与环境门槛
 
 - **实测（2026-06-18）**：生命周期维度已实现基础用户交付（Android `received/`、macOS Downloads），但 SAF/save-panel UX、打开/分享动作与磁盘满处理仍未有真机证明。【来源：实测】
+- **评估（2026-06-18）**：Android `FrameIO.write` 仍每帧 `flush()`；未引入 writer batching。原因：无 paired-device 吞吐/p95 基线，batching 可能延迟 ACK/heartbeat 小帧，macOS 无同等 flush 问题；保留简单实现直至 HYP-M3-015/M6-004 真机数据。【来源：评估】
+- **评估（2026-06-18）**：进程 kill/restart 后 durable checkpoint 已在单元层证明 JSON+ranges+`.part` 绑定与 trust-revoke 清理；跨进程 kill/restart 端到端恢复仍缺 paired-device 证据（与 HYP-M3-015 同门槛）。【来源：评估】
+- **评估（2026-06-18）**：Android outbound `StreamTransferByteSource`（content URI）进程重启后不能恢复 sender registry；checkpoint 会作废，仅 file-backed/macOS 路径可恢复 outbound。【来源：评估】
 - environment-only：真实 1 GiB transfer、断网、进程死亡、Doze/OEM battery restriction、20 次 sleep/wake、三组 Android/macOS/network 组合都需要真实设备/网络与人工调度；当前仓库只能证明 core path 和测试计划存在。
 - environment-only：Android SAF 与 macOS save panel/security-scoped URL 的最终 UX 需要真机/真 App 验证，单元测试不能证明用户可交付路径。
 - disputed：HYP-M3-011/012 的 `[x]` 不应被解读为产品级传输生命周期完成；它们当前更准确地表示 core/v0 wire path 完成。
-- confirmed：ADR-0001 把 bidirectional file transfer with resume/progress/cancellation 放在 v1 scope；如果这些 P0/P1 修复不做，transfer stability 不能作为 v1/release-ready 结论。
-- open：是否继续把 1 GiB 作为 v0 单文件上限，还是在资源配额实现前临时降低 default/negotiated `maxChunkBytes` 或总量上限，需要产品与协议共同决策。
+- confirmed：ADR-0001 把 bidirectional file transfer with resume/progress/cancellation 放在 v1 scope；P0/P1 核心代码已落地，release-ready 仍依赖真机矩阵与 1 GiB 证据。
+- open：是否继续把 1 GiB 作为 v0 单文件上限，还是在资源配额已落地后调整 default/negotiated `maxChunkBytes` 或总量上限，需要产品与协议共同决策。

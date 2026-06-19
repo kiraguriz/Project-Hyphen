@@ -16,7 +16,9 @@ import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.SessionReconnector
 import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.transfer.ProtocolSessionTransferOutbox
+import dev.hyphen.android.transfer.TransferCheckpointStore
 import dev.hyphen.android.transfer.TransferProgress
+import dev.hyphen.android.transfer.TransferReceiver
 import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.ConnectionState
@@ -60,6 +62,7 @@ class ConnectionSupervisor private constructor(
     private var reconnector: SessionReconnector? = null
     private var stoppedForTrustChange = false
     private var sessionOwnedByReconnector = false
+    private var transferCheckpointStore: TransferCheckpointStore? = null
 
     fun addListener(listener: Listener) {
         listeners.add(listener)
@@ -92,6 +95,39 @@ class ConnectionSupervisor private constructor(
                 lastTransferProgress = lastTransferProgress,
             )
         }
+
+    fun currentSessionId(): String? = synchronized(stateLock) { lastSessionId }
+
+    fun currentPeerFingerprint(): ByteArray? =
+        synchronized(stateLock) { trustedPeerFingerprint?.copyOf() }
+
+    fun configureTransferCheckpoints(store: TransferCheckpointStore) {
+        synchronized(stateLock) { transferCheckpointStore = store }
+    }
+
+    fun bindTransferPersistence(receiver: TransferReceiver) {
+        val peerFingerprint: ByteArray
+        val sessionId: String
+        synchronized(stateLock) {
+            peerFingerprint = trustedPeerFingerprint ?: return
+            sessionId = lastSessionId ?: return
+        }
+        receiver.bindSession(peerFingerprint, sessionId)
+        synchronized(stateLock) {
+            activeTransferSender?.bindSession(peerFingerprint, sessionId)
+        }
+    }
+
+    fun invalidateTransferCheckpoints(
+        peerFingerprint: ByteArray,
+        receiver: TransferReceiver,
+    ) {
+        receiver.invalidatePeerCheckpoints(peerFingerprint)
+        synchronized(stateLock) {
+            activeTransferSender?.invalidatePeerCheckpoints(peerFingerprint)
+            transferCheckpointStore?.invalidatePeer(peerFingerprint)
+        }
+    }
 
     fun updateLastTransferProgress(progress: TransferProgress?) {
         synchronized(stateLock) { lastTransferProgress = progress }
@@ -130,8 +166,10 @@ class ConnectionSupervisor private constructor(
     fun stopAfterTrustChange() {
         val oldReconnector: SessionReconnector?
         val current: ProtocolSession?
+        val peerFingerprint: ByteArray?
         synchronized(stateLock) {
             stoppedForTrustChange = true
+            peerFingerprint = trustedPeerFingerprint?.copyOf()
             rememberedEndpoint = null
             trustedPeerFingerprint = null
             resumeToken = null
@@ -141,6 +179,7 @@ class ConnectionSupervisor private constructor(
             oldReconnector = reconnector
             reconnector = null
             current = clearActiveStateLocked()
+            peerFingerprint?.let { transferCheckpointStore?.invalidatePeer(it) }
         }
         oldReconnector?.stop()
         current?.stop()
@@ -162,6 +201,7 @@ class ConnectionSupervisor private constructor(
             activeTransferSender = TransferSender(
                 ProtocolSessionTransferOutbox(session),
                 handshake.negotiatedCapabilities,
+                checkpointStore = transferCheckpointStore,
                 onProgress = { progress ->
                     updateLastTransferProgress(progress)
                     listeners.forEach { it.onTransferProgress(progress, outgoing = true) }
@@ -188,6 +228,7 @@ class ConnectionSupervisor private constructor(
         val sender = TransferSender(
             ProtocolSessionTransferOutbox(session),
             handshake.negotiatedCapabilities,
+            checkpointStore = transferCheckpointStore,
             onProgress = { progress ->
                 updateLastTransferProgress(progress)
                 listeners.forEach { it.onTransferProgress(progress, outgoing = true) }
@@ -217,6 +258,10 @@ class ConnectionSupervisor private constructor(
 
             override fun onAck(messageId: String) {
                 runCatching { activeState().transferSender?.handleAck(messageId) }
+            }
+
+            override fun onAckTimeout(messageId: String) {
+                runCatching { activeState().transferSender?.handleAckTimeout(messageId) }
             }
 
             override fun onLiveness(state: HeartbeatMonitor.State) {
@@ -296,6 +341,10 @@ class ConnectionSupervisor private constructor(
                     runCatching { activeState().transferSender?.handleAck(messageId) }
                 }
 
+                override fun onAckTimeout(messageId: String) {
+                    runCatching { activeState().transferSender?.handleAckTimeout(messageId) }
+                }
+
                 override fun onRetryScheduled(attempt: Int, delaySeconds: Long) {
                     log("reconnect scheduled: attempt=$attempt delay=${delaySeconds}s")
                 }
@@ -352,6 +401,7 @@ class ConnectionSupervisor private constructor(
     }
 
     private fun clearActiveStateLocked(): ProtocolSession? {
+        activeTransferSender?.recycleSession()
         val current = activeSession
         activeSession = null
         activeCapabilities = null

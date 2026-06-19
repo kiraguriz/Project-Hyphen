@@ -72,7 +72,12 @@ fi
 # --- [4/5] macos ------------------------------------------------------------
 echo "[4/5] macos build/tests"
 if compgen -G 'apps/macos/*.xcodeproj' >/dev/null || [ -f apps/macos/Package.swift ]; then
-  if command -v xcodebuild >/dev/null 2>&1 || command -v swift >/dev/null 2>&1; then
+  if [ "$(uname -s)" != "Darwin" ]; then
+    # The macOS app targets Apple-only frameworks (AppKit/Security/Network/
+    # CryptoKit); a Linux swift toolchain cannot build it even though `swift`
+    # is on PATH. macOS dev machines and macOS CI cover this step.
+    skip_check "macOS app requires Apple frameworks; not buildable on $(uname -s)"
+  elif command -v xcodebuild >/dev/null 2>&1 || command -v swift >/dev/null 2>&1; then
     if [ -f apps/macos/Package.swift ]; then
       (cd apps/macos && swift test) || fail=1
     else

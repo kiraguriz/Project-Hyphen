@@ -481,7 +481,8 @@ final class TransferMessagesTests: XCTestCase {
         let bytes = Data((0..<2500).map { UInt8($0 % 251) })
         let outbox = RecordingTransferOutbox()
         var sendProgress: [TransferProgress] = []
-        let manifest = try TransferSender(outbox: outbox) { sendProgress.append($0) }.sendSource(
+        let sender = TransferSender(outbox: outbox) { sendProgress.append($0) }
+        let manifest = try sender.sendSource(
             filename: "sample.bin",
             mimeType: "application/octet-stream",
             source: source(bytes),
@@ -491,21 +492,247 @@ final class TransferMessagesTests: XCTestCase {
         var receiveProgress: [TransferProgress] = []
         let receiver = try receiver { receiveProgress.append($0) }
 
-        for (index, sent) in outbox.envelopes.enumerated() {
-            _ = try receiver.handle(toEnvelope(sent, index: index))
+        XCTAssertEqual(sendProgress.map(\.completedChunks), [0])
+
+        var processed = 0
+        while processed < outbox.envelopes.count {
+            let sent = outbox.envelopes[processed]
+            _ = try receiver.handle(toEnvelope(sent, index: processed))
+            if sent.type == TransferProtocol.typeChunk {
+                try sender.handleAck("sent-\(processed)")
+            }
+            processed += 1
         }
 
         XCTAssertEqual(sendProgress.map(\.completedChunks), [0, 1, 2, 3])
         XCTAssertEqual(receiveProgress.map(\.completedChunks), [0, 1, 2, 3])
+        XCTAssertTrue(sendProgress.allSatisfy { ($0.sentChunks ?? 0) >= $0.completedChunks })
         XCTAssertEqual(sendProgress.last?.completedBytes, Int64(bytes.count))
         XCTAssertEqual(receiveProgress.last?.totalBytes, manifest.sizeBytes)
         XCTAssertEqual(sendProgress.last?.isComplete, true)
     }
 
+    func testDuplicateAndOutOfOrderChunksKeepContiguousCheckpointSeparate() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: outbox).sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_out_of_order"
+        )
+        var receiveProgress: [TransferProgress] = []
+        let receiver = try receiver { receiveProgress.append($0) }
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[0], index: 0))
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[1], index: 1))
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[1], index: 2))
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[3], index: 3))
+
+        XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, 1)
+        let progress = try XCTUnwrap(receiveProgress.last)
+        XCTAssertEqual(progress.completedChunks, 1)
+        XCTAssertEqual(progress.receivedChunks, 2)
+
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[2], index: 4))
+        XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, 3)
+    }
+
+    func testReceiverEnforcesConcurrentTransferAndStagingQuotas() throws {
+        let limits = TransferResourceLimits(maxConcurrentTransfers: 1, maxStagingBytes: 2048, maxCompletedEntries: 1)
+        let receiver = try receiver(limits: limits)
+        let first = manifestPayload(fileId: "f_quota_one", sizeBytes: 1500, chunkSizeBytes: 1024, chunkCount: 2)
+        let second = manifestPayload(fileId: "f_quota_two", sizeBytes: 1500, chunkSizeBytes: 1024, chunkCount: 2)
+
+        _ = try receiver.handle(
+            toEnvelope(
+                SentTransferEnvelope(
+                    type: TransferProtocol.typeManifest,
+                    capability: TransferProtocol.capability,
+                    requiresAck: true,
+                    payload: first
+                ),
+                index: 0
+            )
+        )
+        XCTAssertThrowsError(
+            try receiver.handle(
+                toEnvelope(
+                    SentTransferEnvelope(
+                        type: TransferProtocol.typeManifest,
+                        capability: TransferProtocol.capability,
+                        requiresAck: true,
+                        payload: second
+                    ),
+                    index: 1
+                )
+            )
+        )
+    }
+
+    func testSenderEnforcesRegistryAndOutstandingQuotas() throws {
+        let limits = TransferResourceLimits(
+            maxSenderRegistrySize: 1,
+            maxOutstandingMessages: 1,
+            maxOutstandingBytes: 2048
+        )
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox, outstandingWindow: 4, limits: limits)
+        try sender.sendSource(
+            filename: "one.bin",
+            mimeType: "application/octet-stream",
+            source: source(Data((0..<1500).map { UInt8($0 % 251) })),
+            chunkSizeBytes: 1024,
+            fileId: "f_registry_one"
+        )
+        XCTAssertThrowsError(
+            try sender.sendSource(
+                filename: "two.bin",
+                mimeType: "application/octet-stream",
+                source: source(Data((0..<1500).map { UInt8($0 % 251) })),
+                chunkSizeBytes: 1024,
+                fileId: "f_registry_two"
+            )
+        )
+        XCTAssertEqual(outbox.envelopes.filter { $0.type == TransferProtocol.typeChunk }.count, 1)
+    }
+
+    func testAckTimeoutAbortsSenderTransfer() throws {
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox, outstandingWindow: 2)
+        let manifest = try sender.sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(Data((0..<5000).map { UInt8($0 % 251) })),
+            chunkSizeBytes: 1024,
+            fileId: "f_ack_timeout"
+        )
+        let before = outbox.envelopes.count
+        sender.handleAckTimeout("sent-1")
+        try sender.handleAck("sent-2")
+        XCTAssertEqual(outbox.envelopes.count, before)
+        XCTAssertThrowsError(try sender.sendRemaining(fileId: manifest.fileId, fromChunkIndex: 0))
+    }
+
+    func testCancelOnSameSenderStopsFurtherChunksAfterAck() throws {
+        let bytes = Data((0..<10_000).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox, outstandingWindow: 2)
+        let manifest = try sender.sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_cancel_same_sender"
+        )
+
+        _ = try sender.cancel(fileId: manifest.fileId, discard: true)
+        XCTAssertEqual(outbox.envelopes.last?.type, TransferProtocol.typeCancel)
+        let countAfterCancel = outbox.envelopes.count
+
+        try sender.handleAck("sent-1")
+        try sender.handleAck("sent-2")
+        XCTAssertEqual(outbox.envelopes.count, countAfterCancel)
+        XCTAssertThrowsError(try sender.sendRemaining(fileId: manifest.fileId, fromChunkIndex: 0))
+    }
+
+    func testSenderRecyclesRegistryAfterAllChunksAreAcked() throws {
+        let bytes = Data((0..<5_000).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox, outstandingWindow: 2)
+        let manifest = try sender.sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_sender_recycle_complete"
+        )
+
+        var processed = 0
+        while processed < outbox.envelopes.count {
+            let sent = outbox.envelopes[processed]
+            if sent.type == TransferProtocol.typeChunk {
+                try sender.handleAck("sent-\(processed)")
+            }
+            processed += 1
+        }
+        XCTAssertThrowsError(try sender.sendRemaining(fileId: manifest.fileId, fromChunkIndex: manifest.chunkCount))
+        XCTAssertThrowsError(try sender.sendRemaining(fileId: manifest.fileId, fromChunkIndex: 0))
+    }
+
+    func testReceiverRecycleSessionClearsActivePartialState() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: outbox).sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_receiver_recycle"
+        )
+        let receiver = try receiver()
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[0], index: 0))
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[1], index: 1))
+        XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, 1)
+
+        receiver.recycleSession()
+
+        XCTAssertNil(receiver.checkpoint(fileId: manifest.fileId))
+        XCTAssertThrowsError(try receiver.handle(toEnvelope(outbox.envelopes[1], index: 2)))
+    }
+
+    func testReceiverResumesTransfersAfterRecycleAndRebind() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        _ = try TransferSender(outbox: outbox).sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_rebind_rearm"
+        )
+        let receiver = try receiver()
+
+        // Freeze the long-lived receiver as a session teardown would, then re-arm
+        // it on the next session: a fresh transfer must complete, not be rejected.
+        receiver.recycleSession()
+        receiver.bindSession(peerFingerprint: Data(repeating: 1, count: 32), sessionId: "s_rebind")
+
+        var completed: TransferCompleted?
+        for (index, sent) in outbox.envelopes.enumerated() {
+            if case let .completed(next) = try receiver.handle(toEnvelope(sent, index: index)) {
+                completed = next
+            }
+        }
+        let delivered = try XCTUnwrap(completed)
+        XCTAssertEqual(try Data(contentsOf: delivered.fileURL), bytes)
+    }
+
+    func testCompletedReceiverKeepsBoundedTombstoneCheckpointWithoutFileRef() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: outbox).sendSource(
+            filename: "sample.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_completed_tombstone"
+        )
+        let receiver = try receiver()
+        for (index, sent) in outbox.envelopes.enumerated() {
+            _ = try receiver.handle(toEnvelope(sent, index: index))
+        }
+
+        XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, manifest.chunkCount)
+        let duplicate = try receiver.handle(toEnvelope(outbox.envelopes[0], index: outbox.envelopes.count))
+        XCTAssertEqual(duplicate, .ignored)
+    }
+
     func testCancelMessageUsesProtocolWireNameAndDiscardClearsReceiverCheckpoint() throws {
         let bytes = Data((0..<2500).map { UInt8($0 % 251) })
-        let firstOutbox = RecordingTransferOutbox()
-        let manifest = try TransferSender(outbox: firstOutbox).sendSource(
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox)
+        let manifest = try sender.sendSource(
             filename: "sample.bin",
             mimeType: "application/octet-stream",
             source: source(bytes),
@@ -513,14 +740,13 @@ final class TransferMessagesTests: XCTestCase {
             fileId: "f_cancel_test"
         )
         let receiver = try receiver()
-        for (index, sent) in firstOutbox.envelopes.prefix(2).enumerated() {
+        for (index, sent) in outbox.envelopes.prefix(2).enumerated() {
             _ = try receiver.handle(toEnvelope(sent, index: index))
         }
         XCTAssertEqual(receiver.checkpoint(fileId: manifest.fileId)?.nextChunkIndex, 1)
 
-        let cancelOutbox = RecordingTransferOutbox()
-        try TransferSender(outbox: cancelOutbox).sendCancel(TransferCancel(fileId: manifest.fileId, discard: true))
-        let cancel = try XCTUnwrap(cancelOutbox.envelopes.single)
+        _ = try sender.cancel(fileId: manifest.fileId, discard: true)
+        let cancel = try XCTUnwrap(outbox.envelopes.last)
         XCTAssertEqual(cancel.type, TransferProtocol.typeCancel)
         XCTAssertEqual(cancel.payload["discard"] as? Bool, true)
 
@@ -636,10 +862,11 @@ final class TransferMessagesTests: XCTestCase {
     }
 
     private func receiver(
+        limits: TransferResourceLimits = TransferResourceLimits(),
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) throws -> TransferReceiver {
         let root = tempRoot.appendingPathComponent("receive-\(UUID().uuidString)", isDirectory: true)
-        return TransferReceiver(storage: FileTransferStorage(root: root), onProgress: onProgress)
+        return TransferReceiver(storage: FileTransferStorage(root: root), limits: limits, onProgress: onProgress)
     }
 
     private func appendSession(_ session: ProtocolSession) {
@@ -689,12 +916,14 @@ final class TransferMessagesTests: XCTestCase {
 }
 
 private final class RejectingTransferStorage: TransferStorage {
-    func prepare(manifest: TransferManifest) throws -> URL {
+    func prepare(manifest: TransferManifest, reuseExisting: Bool) throws -> URL {
         XCTFail("oversized manifest should reject before storage allocation")
         throw TransferError.io("unexpected storage allocation")
     }
 
     func discard(fileId: String) {}
+
+    func partFile(fileId: String) -> URL? { nil }
 }
 
 private final class CountingTransferByteSource: TransferByteSource {
