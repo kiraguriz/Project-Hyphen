@@ -11,9 +11,10 @@ import kotlin.concurrent.thread
 /**
  * Mutual-TLS endpoints with SPKI pinning (HYP-M2-008; twin of macOS
  * `TLSEndpointListener`/`TLSConnector`). TLS 1.3 only, per protocol v0
- * §2 — on Android this needs API 29+; on API 26–28 `SSLContext.getInstance`
- * throws and the gap is an ADR-0002 decision (raise minSdk vs. allow 1.2
- * for legacy), deliberately NOT silently downgraded here. Framing and
+ * §2 — on Android this needs API 29+. ADR-0008 resolved the floor by
+ * raising `minSdk` to 29 (route A); API 26–28, where
+ * `SSLContext.getInstance("TLSv1.3")` throws, are no longer installable,
+ * so this layer never silently downgrades to TLS 1.2. Framing and
  * session logic land with HYP-M2-012; this layer only produces
  * authenticated sockets.
  */

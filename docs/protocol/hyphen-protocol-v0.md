@@ -425,8 +425,8 @@ These decisions document the Android and macOS behavior frozen for the current v
 ### 9.3 TLS and platform floor
 
 - v0 transport uses mutual TLS 1.3 with SPKI pinning on both platforms.
-- Android API 26-28 lack platform TLS 1.3 support; the current implementation fails loudly rather than downgrading to TLS 1.2 or bundling a TLS provider.
-- Changing the TLS floor, raising `minSdk`, or adding a TLS dependency requires a new ADR because it changes the security/dependency tradeoff.
+- Android API 26-28 lack platform TLS 1.3 support; the implementation fails loudly rather than downgrading to TLS 1.2 or bundling a TLS provider. **ADR-0008** resolves this by setting `minSdk = 29`, so those devices cannot install the app — the floor is enforced, not just documented.
+- Changing the TLS floor again — lowering `minSdk`, adding a TLS 1.2 path, or bundling a TLS dependency — requires a superseding ADR because it changes the security/dependency tradeoff.
 
 ### 9.4 Diagnostics and trace handling
 
