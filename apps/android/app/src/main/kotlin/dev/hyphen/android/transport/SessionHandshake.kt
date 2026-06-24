@@ -62,6 +62,38 @@ object SessionHandshake {
         fun transferMaxChunkBytes(): Int? =
             ((entries[CAPABILITY_TRANSFER]?.get("maxChunkBytes") as? Json.Num)?.asLong())?.toInt()
 
+        /** The negotiated text.v1 direction (null when text was not negotiated). */
+        fun textDirection(): String? =
+            (entries[CAPABILITY_TEXT]?.get("direction") as? Json.Str)?.value
+
+        /**
+         * Finalize text.v1 direction once device kinds are known (responder
+         * side). Direction is expressed from the canonical android-endpoint
+         * frame; the client adopts this verbatim. Drops the text capability
+         * entirely when no compatible flow exists (review dim 05-02).
+         */
+        fun resolveTextDirection(
+            localKind: String,
+            localDir: String,
+            peerKind: String?,
+            peerDir: String?,
+        ): NegotiatedCapabilities {
+            if (!contains(CAPABILITY_TEXT)) return this
+            val direction = negotiateTextDirection(
+                localKind,
+                localDir,
+                peerKind ?: localKind,
+                peerDir ?: "bidirectional",
+            )
+            val updated = LinkedHashMap(entries)
+            if (direction == "none") {
+                updated.remove(CAPABILITY_TEXT)
+            } else {
+                updated[CAPABILITY_TEXT] = Json.obj("direction" to Json.Str(direction))
+            }
+            return NegotiatedCapabilities(updated)
+        }
+
         fun toJson(): Json.Obj = Json.Obj(entries)
 
         fun intersect(peer: NegotiatedCapabilities): NegotiatedCapabilities {
@@ -89,7 +121,14 @@ object SessionHandshake {
                 )
             }
             if (contains(CAPABILITY_TEXT) && peer.contains(CAPABILITY_TEXT)) {
-                result[CAPABILITY_TEXT] = Json.obj("direction" to Json.Str("bidirectional"))
+                // Carry the left operand's direction through instead of
+                // fabricating bidirectional (review dim 05-02). The responder
+                // finalizes the real direction via resolveTextDirection() once
+                // device kinds are known; the client adopts the responder's
+                // already-resolved value (its hello reply is the left operand).
+                result[CAPABILITY_TEXT] = Json.obj(
+                    "direction" to Json.Str(entries.getValue(CAPABILITY_TEXT).string("direction", "bidirectional")),
+                )
             }
             if (contains(CAPABILITY_DIAGNOSTICS) && peer.contains(CAPABILITY_DIAGNOSTICS)) {
                 val local = entries.getValue(CAPABILITY_DIAGNOSTICS)
@@ -139,6 +178,30 @@ object SessionHandshake {
             }
 
             fun empty(): NegotiatedCapabilities = NegotiatedCapabilities(emptyMap())
+
+            /**
+             * Negotiate text.v1 direction from the canonical android-endpoint
+             * frame. Each advertised `direction` is the advertiser's own
+             * perspective (what it will do); v0 assumes exactly one android +
+             * one macos peer, so the android device is the frame subject
+             * (fallback: the first argument when neither is android). Returns
+             * `bidirectional` / `send-only` / `receive-only` / `none`.
+             */
+            fun negotiateTextDirection(kindA: String, dirA: String, kindB: String, dirB: String): String {
+                val aIsSubject = !(kindB == "android" && kindA != "android")
+                val subjectDir = if (aIsSubject) dirA else dirB
+                val otherDir = if (aIsSubject) dirB else dirA
+                fun sends(d: String) = d == "bidirectional" || d == "send-only"
+                fun receives(d: String) = d == "bidirectional" || d == "receive-only"
+                val subjectSends = sends(subjectDir) && receives(otherDir)
+                val subjectReceives = sends(otherDir) && receives(subjectDir)
+                return when {
+                    subjectSends && subjectReceives -> "bidirectional"
+                    subjectSends -> "send-only"
+                    subjectReceives -> "receive-only"
+                    else -> "none"
+                }
+            }
         }
     }
 
@@ -189,7 +252,15 @@ object SessionHandshake {
         )
 
         val hello = readHello(socket)
-        val negotiatedCapabilities = NegotiatedCapabilities.advertised().intersect(capabilitiesOf(hello.payload))
+        val peerCaps = capabilitiesOf(hello.payload)
+        val peerDevice = deviceOf(hello.payload)
+        val advertised = NegotiatedCapabilities.advertised()
+        val negotiatedCapabilities = advertised.intersect(peerCaps).resolveTextDirection(
+            localKind = device.kind,
+            localDir = advertised.textDirection() ?: "bidirectional",
+            peerKind = peerDevice?.kind,
+            peerDir = peerCaps.textDirection(),
+        )
         val presented = (hello.payload["resumeToken"] as? Json.Str)?.value
         val resumedSessionId = presented?.let { tokenStore.redeem(it, peerFingerprint) }
         val sessionId = resumedSessionId ?: "s_${Ulid.generate()}"

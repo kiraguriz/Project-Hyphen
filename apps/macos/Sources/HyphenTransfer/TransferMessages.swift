@@ -131,7 +131,18 @@ public struct TransferManifest: Equatable {
         )
     }
 
+    private static let manifestFields: Set<String> = [
+        "fileId", "filename", "sizeBytes", "mimeType", "sha256", "chunkSizeBytes", "chunkCount",
+    ]
+
     public init(payload: [String: Any]) throws {
+        // transfer-manifest.schema.json is additionalProperties:false; the
+        // runtime decoder must reject smuggled fields (e.g. destinationPath)
+        // too, not silently ignore them (review dim 05-03).
+        let unknown = Set(payload.keys).subtracting(Self.manifestFields)
+        guard unknown.isEmpty else {
+            throw TransferError.invalidPayload("unknown manifest fields: \(unknown.sorted())")
+        }
         try self.init(
             fileId: try string(payload, "fileId"),
             filename: try string(payload, "filename"),

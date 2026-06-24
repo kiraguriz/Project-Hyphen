@@ -126,35 +126,52 @@ class ProtocolSession(
     fun stop() = close()
 
     private fun readLoop() {
-        while (!closed.get()) {
-            val frame = try {
-                FrameIO.read(socket.inputStream) ?: break
-            } catch (e: FrameIO.FrameTooLarge) {
-                listener.onProtocolError("transport/frame-too-large", e.message ?: "")
-                break
-            } catch (_: IOException) {
-                break
-            }
-            val envelope = try {
-                Envelope.decode(frame)
-            } catch (e: EnvelopeException) {
-                listener.onProtocolError("protocol/invalid-envelope", e.message ?: "")
-                break
-            }
-            if (!validateSessionAndSeq(envelope)) break
-            monitor.envelopeReceived(monotonicNowMs())
-            when (envelope.type) {
-                Envelope.TYPE_ACK -> envelope.ackOf?.let { if (ackTracker.ackReceived(it)) listener.onAck(it) }
-                Envelope.TYPE_HEARTBEAT -> Unit // liveness already recorded
-                else -> {
-                    if (envelope.requiresAck && config.autoAck) {
-                        runCatching { send(Envelope.TYPE_ACK, ackOf = envelope.messageId) }
+        // close() runs in finally so the session always tears down cleanly
+        // (onClosed + socket close) no matter how the loop exits — including a
+        // listener/plugin handler throwing below. A reader thread that died
+        // mid-dispatch would skip close(), strand the socket, and never notify
+        // the reconnect owner (H-07 / review dim 07-04/05).
+        try {
+            while (!closed.get()) {
+                val frame = try {
+                    FrameIO.read(socket.inputStream) ?: break
+                } catch (e: FrameIO.FrameTooLarge) {
+                    listener.onProtocolError("transport/frame-too-large", e.message ?: "")
+                    break
+                } catch (_: IOException) {
+                    break
+                }
+                val envelope = try {
+                    Envelope.decode(frame)
+                } catch (e: EnvelopeException) {
+                    listener.onProtocolError("protocol/invalid-envelope", e.message ?: "")
+                    break
+                }
+                if (!validateSessionAndSeq(envelope)) break
+                monitor.envelopeReceived(monotonicNowMs())
+                try {
+                    when (envelope.type) {
+                        Envelope.TYPE_ACK -> envelope.ackOf?.let { if (ackTracker.ackReceived(it)) listener.onAck(it) }
+                        Envelope.TYPE_HEARTBEAT -> Unit // liveness already recorded
+                        else -> {
+                            if (envelope.requiresAck && config.autoAck) {
+                                runCatching { send(Envelope.TYPE_ACK, ackOf = envelope.messageId) }
+                            }
+                            listener.onEnvelope(envelope)
+                        }
                     }
-                    listener.onEnvelope(envelope)
+                } catch (e: Throwable) {
+                    // Isolate a misbehaving handler: report it for local
+                    // diagnostics, then break to the guaranteed close() below.
+                    runCatching {
+                        listener.onProtocolError("protocol/invalid-envelope", "handler failed: ${e.message ?: e.javaClass.simpleName}")
+                    }
+                    break
                 }
             }
+        } finally {
+            close()
         }
-        close()
     }
 
     private fun validateSessionAndSeq(envelope: Envelope): Boolean {
