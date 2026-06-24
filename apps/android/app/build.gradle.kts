@@ -28,7 +28,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.hyphen.android"
-        minSdk = 26
+        minSdk = 29 // TLS 1.3 platform floor (ADR-0008); API 26-28 lack it
         targetSdk = 36
         versionCode = 1
         versionName = "0.0.1"

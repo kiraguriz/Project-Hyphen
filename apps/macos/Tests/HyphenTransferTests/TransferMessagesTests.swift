@@ -81,6 +81,21 @@ final class TransferMessagesTests: XCTestCase {
         })
     }
 
+    func testManifestDecoderRejectsSmuggledUnknownFields() throws {
+        // transfer-manifest.schema.json is additionalProperties:false; the
+        // runtime decoder must reject a smuggled field too (review dim 05-03).
+        let valid = try TransferManifest(
+            filename: "notes.txt",
+            mimeType: "text/plain",
+            source: source(Data("hello".utf8)),
+            chunkSizeBytes: 1024,
+            fileId: "f_smuggled_destination"
+        )
+        var smuggled = valid.payload
+        smuggled["destinationPath"] = "../../etc/passwd"
+        XCTAssertThrowsError(try TransferManifest(payload: smuggled))
+    }
+
     func testReceiverReconstructsSmallFilesInBothDirections() throws {
         let macToAndroid = Data((0..<1500).map { UInt8($0 % 251) })
         let androidToMac = Data("hello back from Android".utf8)

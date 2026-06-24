@@ -139,6 +139,8 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - Unknown capabilities MUST be ignored, not rejected (forward compatibility).
 - Effective transfer chunk size = min of both sides' `maxChunkBytes`. The capability schema caps `maxChunkBytes` at 2 MiB (and floors it at 1 KiB) so a base64-inflated chunk plus envelope overhead always fits the 4 MiB frame limit (§2.1).
 - `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. Until Android applies the first policy envelope, Android MUST fail closed with `existsOnly` scrubbing on outbound notification payloads. The intersection ANDs both sides, so a peer that omits it disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
+- `text.v1.direction` is advertised from the **advertiser's own perspective** (`bidirectional` = the advertiser both sends and receives text; `send-only` = it only sends; `receive-only` = it only receives). The responder computes the negotiated direction from both advertised values and the two device kinds, expressed canonically **from the android endpoint's frame** (v0 assumes exactly one `android` + one `macos` peer); the initiator adopts the responder's value verbatim. A flow is enabled only when one side will send AND the other will receive; when no flow is mutually supported the `text.v1` capability is dropped entirely (it is NOT negotiated to `bidirectional`). v0 status: the negotiated direction is computed and reported, but the built-in clients both advertise `bidirectional`; **per-direction enforcement in the text send/receive paths is a tracked residual** (review dim 05-02) — today only capability presence gates text.
+- Schema-backed payloads reject unknown fields at runtime to match their `additionalProperties:false` schema-of-record: the `transfer.manifest` decoder rejects any field outside its known key set (e.g. a smuggled `destinationPath`) rather than silently ignoring it (review dim 05-03). `transfer.chunk`/`resume`/`cancel` payloads have no schema-of-record in v0 and read only known fields.
 
 ## 7. Message catalog (v0)
 
@@ -423,8 +425,8 @@ These decisions document the Android and macOS behavior frozen for the current v
 ### 9.3 TLS and platform floor
 
 - v0 transport uses mutual TLS 1.3 with SPKI pinning on both platforms.
-- Android API 26-28 lack platform TLS 1.3 support; the current implementation fails loudly rather than downgrading to TLS 1.2 or bundling a TLS provider.
-- Changing the TLS floor, raising `minSdk`, or adding a TLS dependency requires a new ADR because it changes the security/dependency tradeoff.
+- Android API 26-28 lack platform TLS 1.3 support; the implementation fails loudly rather than downgrading to TLS 1.2 or bundling a TLS provider. **ADR-0008** resolves this by setting `minSdk = 29`, so those devices cannot install the app — the floor is enforced, not just documented.
+- Changing the TLS floor again — lowering `minSdk`, adding a TLS 1.2 path, or bundling a TLS dependency — requires a superseding ADR because it changes the security/dependency tradeoff.
 
 ### 9.4 Diagnostics and trace handling
 

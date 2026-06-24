@@ -40,10 +40,23 @@ if [ ! -x "$SOURCE" ]; then
   exit 1
 fi
 
+# SwiftPM emits the HyphenApp target's resources (zh-Hans/en Localizable.strings)
+# as a separate bundle next to the binary. Bundle.module resolves it from the
+# app's Contents/Resources at runtime, so the packaged .app is broken — it falls
+# back to raw localization keys — unless we copy the bundle in. Fail loud if it
+# is missing so this regresses to red instead of shipping silently (dim 06-03).
+RESOURCE_BUNDLE="$(find "$BIN_DIR" -maxdepth 1 -name 'Hyphen_*.bundle' -type d | head -n 1)"
+if [ -z "$RESOURCE_BUNDLE" ] || [ ! -d "$RESOURCE_BUNDLE" ]; then
+  echo "package-local: SwiftPM resource bundle (Hyphen_HyphenApp.bundle) not found in $BIN_DIR" >&2
+  echo "package-local: the packaged app would launch without its localized strings" >&2
+  exit 1
+fi
+
 rm -rf "$STAGING_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$SOURCE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
