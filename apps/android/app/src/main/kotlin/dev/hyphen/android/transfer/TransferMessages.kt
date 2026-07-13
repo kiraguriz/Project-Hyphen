@@ -120,8 +120,17 @@ data class TransferManifest(
             )
         }
 
-        fun fromJson(payload: Json.Obj): TransferManifest =
-            TransferManifest(
+        private val MANIFEST_FIELDS = setOf(
+            "fileId", "filename", "sizeBytes", "mimeType", "sha256", "chunkSizeBytes", "chunkCount",
+        )
+
+        fun fromJson(payload: Json.Obj): TransferManifest {
+            // transfer-manifest.schema.json is additionalProperties:false; the
+            // runtime decoder must reject smuggled fields (e.g. destinationPath)
+            // too, not silently ignore them (review dim 05-03).
+            val unknown = payload.entries.keys - MANIFEST_FIELDS
+            require(unknown.isEmpty()) { "unknown manifest fields: ${unknown.sorted()}" }
+            return TransferManifest(
                 fileId = string(payload, "fileId"),
                 filename = string(payload, "filename"),
                 sizeBytes = long(payload, "sizeBytes"),
@@ -130,6 +139,7 @@ data class TransferManifest(
                 chunkSizeBytes = int(payload, "chunkSizeBytes"),
                 chunkCount = int(payload, "chunkCount"),
             )
+        }
     }
 }
 

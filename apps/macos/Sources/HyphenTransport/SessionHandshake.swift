@@ -78,6 +78,54 @@ public enum SessionHandshake {
             entries[capabilityTransfer]?["maxChunkBytes"] as? Int
         }
 
+        /// The negotiated text.v1 direction (nil when text was not negotiated).
+        public var textDirection: String? {
+            entries[capabilityText]?["direction"] as? String
+        }
+
+        /// Finalize text.v1 direction once device kinds are known (responder
+        /// side). Direction is expressed from the canonical android-endpoint
+        /// frame; the client adopts this verbatim. Drops the text capability
+        /// entirely when no compatible flow exists (review dim 05-02).
+        public func resolvingTextDirection(
+            localKind: String,
+            localDir: String,
+            peerKind: String?,
+            peerDir: String?
+        ) -> NegotiatedCapabilities {
+            guard contains(capabilityText) else { return self }
+            let direction = Self.negotiateTextDirection(
+                localKind, localDir, peerKind ?? localKind, peerDir ?? "bidirectional"
+            )
+            var updated = entries
+            if direction == "none" {
+                updated.removeValue(forKey: capabilityText)
+            } else {
+                updated[capabilityText] = ["direction": direction]
+            }
+            return NegotiatedCapabilities(updated)
+        }
+
+        /// Negotiate text.v1 direction from the canonical android-endpoint
+        /// frame. Each advertised `direction` is the advertiser's own
+        /// perspective (what it will do); v0 assumes exactly one android + one
+        /// macos peer, so the android device is the frame subject (fallback:
+        /// the first argument when neither is android). Returns
+        /// `bidirectional` / `send-only` / `receive-only` / `none`.
+        public static func negotiateTextDirection(_ kindA: String, _ dirA: String, _ kindB: String, _ dirB: String) -> String {
+            let aIsSubject = !(kindB == "android" && kindA != "android")
+            let subjectDir = aIsSubject ? dirA : dirB
+            let otherDir = aIsSubject ? dirB : dirA
+            func sends(_ d: String) -> Bool { d == "bidirectional" || d == "send-only" }
+            func receives(_ d: String) -> Bool { d == "bidirectional" || d == "receive-only" }
+            let subjectSends = sends(subjectDir) && receives(otherDir)
+            let subjectReceives = sends(otherDir) && receives(subjectDir)
+            if subjectSends && subjectReceives { return "bidirectional" }
+            if subjectSends { return "send-only" }
+            if subjectReceives { return "receive-only" }
+            return "none"
+        }
+
         public var wireObject: [String: Any] {
             entries
         }
@@ -108,7 +156,12 @@ public enum SessionHandshake {
                 ]
             }
             if contains(capabilityText), peer.contains(capabilityText) {
-                result[capabilityText] = ["direction": "bidirectional"]
+                // Carry the left operand's direction through instead of
+                // fabricating bidirectional (review dim 05-02). The responder
+                // finalizes the real direction via resolvingTextDirection() once
+                // device kinds are known; the client adopts the responder's
+                // already-resolved value (its hello reply is the left operand).
+                result[capabilityText] = ["direction": entries[capabilityText]?["direction"] as? String ?? "bidirectional"]
             }
             if contains(capabilityDiagnostics), peer.contains(capabilityDiagnostics),
                let local = entries[capabilityDiagnostics],
@@ -218,8 +271,14 @@ public enum SessionHandshake {
             case .success(let (hello, leftover)):
                 let negotiatedCapabilities: NegotiatedCapabilities
                 do {
-                    negotiatedCapabilities = try NegotiatedCapabilities.advertised()
-                        .intersecting(try capabilities(of: hello.payload))
+                    let peerCaps = try capabilities(of: hello.payload)
+                    let advertised = try NegotiatedCapabilities.advertised()
+                    negotiatedCapabilities = advertised.intersecting(peerCaps).resolvingTextDirection(
+                        localKind: device.kind,
+                        localDir: advertised.textDirection ?? "bidirectional",
+                        peerKind: deviceKind(of: hello.payload),
+                        peerDir: peerCaps.textDirection
+                    )
                 } catch {
                     completion(.failure(error))
                     return
@@ -443,6 +502,10 @@ public enum SessionHandshake {
 
     private static func deviceName(of payload: [String: Any]) -> String? {
         (payload["device"] as? [String: Any])?["deviceName"] as? String
+    }
+
+    private static func deviceKind(of payload: [String: Any]) -> String? {
+        (payload["device"] as? [String: Any])?["kind"] as? String
     }
 
     private static func isBoolean(_ value: Any) -> Bool {

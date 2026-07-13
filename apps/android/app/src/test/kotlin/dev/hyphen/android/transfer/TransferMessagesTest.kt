@@ -644,6 +644,19 @@ class TransferMessagesTest {
     }
 
     @Test
+    fun `manifest decoder rejects smuggled unknown fields`() {
+        val smuggled = Json.Obj(
+            manifestPayload(
+                fileId = "f_smuggled_destination",
+                sizeBytes = 1024,
+                chunkSizeBytes = 1024,
+                chunkCount = 1,
+            ).entries + mapOf("destinationPath" to Json.Str("../../etc/passwd")),
+        )
+        assertRejected("smuggled manifest field") { TransferManifest.fromJson(smuggled) }
+    }
+
+    @Test
     fun `manifest accepts exactly one gibibyte when chunk math is valid`() {
         val manifest = TransferManifest.fromJson(
             manifestPayload(

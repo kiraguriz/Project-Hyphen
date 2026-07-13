@@ -19,7 +19,7 @@ Android permissions are Hyphen's largest platform risk, and they are moving:
 
 ### 1. SDK targets
 
-- `minSdk 26` (CompanionDeviceManager floor), initial `targetSdk 36`, and SDK 37 (`ACCESS_LOCAL_NETWORK`) compatibility work begins in M1, not later.
+- `minSdk 29` (raised from 26 by **ADR-0008** for the TLS 1.3 platform floor; the CDM floor was 26 but TLS 1.3 needs API 29+), initial `targetSdk 36`, and SDK 37 (`ACCESS_LOCAL_NETWORK`) compatibility work begins in M1, not later.
 
 ### 2. Local network: controller-mediated, deny-tolerant
 
@@ -62,7 +62,7 @@ Android permissions are Hyphen's largest platform risk, and they are moving:
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_DATA_SYNC` | §3 | Install-time + Play declaration |
 | `CAMERA` | QR scan during pairing only | Runtime, requested at scan time; denial falls back to manual entry |
 | Notification access (special) | Mirroring | Special access screen, §4 |
-| `REQUEST_COMPANION_SELF_MANAGED` | Self-managed CDM association on API 33+ (Hyphen manages the LAN-TLS link itself; CDM records the relationship). API 26–32: no CDM association — QR-only pairing with conservative background behavior; a BT-filter legacy association remains an open device-spike question. Decided by HYP-M1-007 | ⚠ API 36+ presence-observation specifics still pend HYP-M1-009 |
+| `REQUEST_COMPANION_SELF_MANAGED` | Self-managed CDM association on API 33+ (Hyphen manages the LAN-TLS link itself; CDM records the relationship). API 29–32 (the `minSdk` floor is 29 per ADR-0008): no CDM association — QR-only pairing with conservative background behavior; a BT-filter legacy association remains an open device-spike question. Decided by HYP-M1-007 | ⚠ API 36+ presence-observation specifics still pend HYP-M1-009 |
 
 Both distribution tracks share this ceiling; the Play build may *reduce* (never extend) it if review demands (ADR-0004).
 

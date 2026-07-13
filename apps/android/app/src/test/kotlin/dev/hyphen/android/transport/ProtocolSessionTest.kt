@@ -402,4 +402,50 @@ class ProtocolSessionTest {
         assertEquals("protocol/invalid-envelope", serverListener.protocolError.get())
         assertTrue(serverListener.closedLatch.await(3, TimeUnit.SECONDS))
     }
+
+    @Test
+    fun `a throwing listener handler still tears the session down`() {
+        // H-07 / review dim 07-04/05: a plugin/listener handler that throws a
+        // non-IllegalArgumentException must not kill the reader thread silently.
+        // The session must still close (onClosed) so the reconnect owner is
+        // notified instead of leaking the socket.
+        val closed = CountDownLatch(1)
+        val errorLatch = CountDownLatch(1)
+        val listener = object : ProtocolSession.Listener {
+            override fun onEnvelope(envelope: Envelope) {
+                throw IllegalStateException("boom from a misbehaving handler")
+            }
+
+            override fun onLiveness(state: HeartbeatMonitor.State) {}
+            override fun onAckTimeout(messageId: String) {}
+            override fun onProtocolError(code: String, detail: String) {
+                errorLatch.countDown()
+            }
+
+            override fun onClosed() {
+                closed.countDown()
+            }
+        }
+
+        val tlsServer = TlsServer(serverIdentity, isTrusted = { it.contentEquals(clientIdentity.spkiFingerprint) })
+        server = tlsServer
+        val port = tlsServer.start { socket ->
+            val session = ProtocolSession(socket, "s_test1", fast.copy(heartbeatIntervalMs = 60_000), listener)
+            synchronized(sessions) { sessions += session }
+            session.start()
+        }
+        val socket = TlsClient.connect(
+            host = "127.0.0.1",
+            port = port,
+            identity = clientIdentity,
+            isTrusted = { it.contentEquals(serverIdentity.spkiFingerprint) },
+        )
+
+        socket.use {
+            FrameIO.write(it.outputStream, rawEnvelope(seq = 1).encode())
+        }
+
+        assertTrue("a throwing handler must still close the session", closed.await(3, TimeUnit.SECONDS))
+        assertTrue("the handler failure should surface as a protocol error", errorLatch.await(3, TimeUnit.SECONDS))
+    }
 }

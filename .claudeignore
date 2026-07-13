@@ -1,0 +1,38 @@
+# Dependencies, build products, and caches
+.git/
+.idea/
+.kotlin/
+apps/android/.gradle/
+apps/android/**/build/
+apps/android/local.properties
+apps/macos/.build/
+apps/macos/.swiftpm/
+apps/macos/**/xcuserdata/
+packaging/**/build/
+DerivedData/
+*.iml
+*.xcuserstate
+
+# Secrets, credentials, and signing material
+.env
+.env.*
+!.env.example
+!.env.template
+credentials.json
+credentials/
+*.keystore
+*.jks
+*.pem
+*.p12
+*.mobileprovision
+
+# Private runtime data and generated artifacts
+logs/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.DS_Store

@@ -9,10 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  # Linux job: markdown links, secret scan, Android unit tests, protocol
+  # schemas/vectors. The macOS hook in check.sh legitimately skips here (the
+  # app needs Apple-only frameworks), so macOS is covered by its own job below
+  # rather than silently SKIPped on a single runner (review dim 06-04).
   repo-checks:
-    name: docs and protocol checks
+    name: docs, android, protocol (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run repo checks (md links, secret scan, schemas when present)
+      # No explicit setup-java: this is the proven-green config — ubuntu-latest's
+      # default JDK + preinstalled Android SDK already build apps/android via
+      # check.sh's gradle hook (see prior green runs on main).
+      - name: Repo checks (md links, secrets, Android unit tests, protocol)
         run: ./scripts/check.sh
+
+  # macOS job: the gate that makes a missing Swift toolchain, a failing
+  # swift test, or a missing SwiftPM resource bundle turn the build RED instead
+  # of passing as a SKIP. package-local.sh fails loud when the localization
+  # bundle is absent (review dim 06-03/06-04).
+  macos-checks:
+    name: swift tests + packaging smoke (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift build and test
+        run: swift test --package-path apps/macos
+      - name: Packaging resource-bundle smoke (ad-hoc signed dry run)
+        run: ./packaging/macos/package-local.sh
