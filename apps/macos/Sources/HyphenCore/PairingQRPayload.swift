@@ -37,10 +37,9 @@ public struct PairingQRPayload: Equatable {
               nonce.count == Self.nonceLength,
               !host.isEmpty,
               host.count <= 253,
-              !host.contains(":"), // IPv6 literals are an M2 follow-up, like the Android parser
-              !host.contains("/"),
-              host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
-              port >= 1
+              host.unicodeScalars.allSatisfy({ Self.asciiHost.contains($0) }),
+              port >= 1,
+              deviceName.map(Self.isSafeDeviceName) ?? true
         else { return nil }
         self.host = host
         self.port = port
@@ -64,6 +63,18 @@ public struct PairingQRPayload: Equatable {
     private static let unreserved = CharacterSet(
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
     )
+
+    private static let asciiHost = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-."
+    )
+
+    private static func isSafeDeviceName(_ value: String) -> Bool {
+        guard !value.isEmpty, value.unicodeScalars.count <= 80 else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            let category = scalar.properties.generalCategory
+            return category != .control && category != .format
+        }
+    }
 }
 
 public enum PairingNonce {

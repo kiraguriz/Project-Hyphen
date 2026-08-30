@@ -77,7 +77,13 @@ final class PairingQRPayloadTests: XCTestCase {
         XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: Data(count: 15)))
         XCTAssertNil(PairingQRPayload(host: "", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
         XCTAssertNil(PairingQRPayload(host: "fe80::1", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "mac%2Flocal", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "mác.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
         XCTAssertNil(PairingQRPayload(host: "h", port: 0, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: ""))
+        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "line\nbreak"))
+        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "\u{202E}txt.exe"))
+        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: String(repeating: "x", count: 81)))
     }
 
     func testNonceIsFreshAndSized() {

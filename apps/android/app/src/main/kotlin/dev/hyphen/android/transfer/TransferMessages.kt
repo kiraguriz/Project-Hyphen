@@ -524,8 +524,10 @@ class TransferSender(
         tombstones.remove(manifest.fileId)
         registered[manifest.fileId] = RegisteredTransfer(manifest, source)
         persistOutboundCheckpoint(manifest, source, fromChunkIndex = 0)
-        reportProgress(manifest, completedChunks = 0, sentChunks = 0)
         startSend(manifest.fileId, fromChunkIndex = 0, sendManifest = true)
+        if (manifest.chunkCount > 0) {
+            reportProgress(manifest, completedChunks = 0, sentChunks = 0)
+        }
         return manifest
     }
 
@@ -572,6 +574,7 @@ class TransferSender(
     @Synchronized
     fun handleAck(messageId: String) {
         if (frozen) return
+        var progressUpdate: Triple<TransferManifest, Int, Int>? = null
         if (outstandingControls.remove(messageId) == null) {
             val fileId = activeSends.entries
                 .firstOrNull {
@@ -581,18 +584,24 @@ class TransferSender(
                 val active = activeSends[fileId]
                 if (active?.manifestMessageId == messageId) {
                     active.manifestMessageId = null
+                    if (active.manifest.chunkCount == 0) {
+                        progressUpdate = Triple(active.manifest, 0, 0)
+                    }
                 } else {
                     val chunkIndex = active?.outstanding?.remove(messageId)
                     if (active != null && chunkIndex != null) {
                         active.outstandingBytes -= active.manifest.expectedChunkBytes(chunkIndex)
                         val completedChunks = active.markAcked(chunkIndex)
-                        reportProgress(active.manifest, completedChunks, sentChunks = active.nextIndex)
+                        progressUpdate = Triple(active.manifest, completedChunks, active.nextIndex)
                     }
                 }
             }
         }
         pumpControl()
         pumpAll()
+        progressUpdate?.let { (manifest, completedChunks, sentChunks) ->
+            reportProgress(manifest, completedChunks, sentChunks)
+        }
     }
 
     /** ACK timeout aborts the affected transfer and releases sender resources. */
@@ -623,18 +632,43 @@ class TransferSender(
 
     @Synchronized
     fun cancel(fileId: String, discard: Boolean = false): String? {
-        activeSends.remove(fileId)?.closeStream()
-        registered.remove(fileId)
-        checkpointStore?.delete(fileId)
-        recordTombstone(fileId, TerminalOutcome.CANCELLED)
-        return sendCancel(TransferCancel(fileId, discard))
+        cleanLocalTransfer(fileId)
+        return runCatching { sendCancel(TransferCancel(fileId, discard)) }
+            .onFailure { discardPendingControl(TransferProtocol.TYPE_CANCEL, fileId) }
+            .getOrNull()
+    }
+
+    /** Stops every outbound stream while keeping the negotiated session usable. */
+    @Synchronized
+    fun cancelAll(discard: Boolean = true): List<String> {
+        if (frozen) return emptyList()
+        val fileIds = (registered.keys + activeSends.keys).toSortedSet().toList()
+        // First make every local stream terminal. Cleanup for one source must
+        // never prevent a later source from being closed and forgotten.
+        fileIds.forEach(::cleanLocalTransfer)
+        // Remote cancel controls are best-effort after local ownership ended.
+        // A failed outbox must not poison the pending-control queue.
+        fileIds.forEach { fileId ->
+            runCatching { sendCancel(TransferCancel(fileId, discard)) }
+                .onFailure { discardPendingControl(TransferProtocol.TYPE_CANCEL, fileId) }
+        }
+        return fileIds
+    }
+
+    /** True only while at least one sender still has protocol work in flight. */
+    @Synchronized
+    fun hasInFlightOutboundTransfers(): Boolean = activeSends.values.any { active ->
+        active.manifestPending ||
+            active.manifestMessageId != null ||
+            active.nextIndex < active.manifest.chunkCount ||
+            active.outstanding.isNotEmpty()
     }
 
     /** Clears in-flight outbound state when the transport session ends. */
     @Synchronized
     fun recycleSession() {
         frozen = true
-        activeSends.values.forEach { it.closeStream() }
+        activeSends.values.forEach { active -> runCatching { active.closeStream() } }
         activeSends.clear()
         registered.clear()
         pendingControls.clear()
@@ -769,6 +803,19 @@ class TransferSender(
             val oldest = tombstones.keys.first()
             tombstones.remove(oldest)
         }
+    }
+
+    private fun cleanLocalTransfer(fileId: String) {
+        val active = activeSends.remove(fileId)
+        registered.remove(fileId)
+        runCatching { active?.closeStream() }
+        runCatching { checkpointStore?.delete(fileId) }
+        runCatching { recordTombstone(fileId, TerminalOutcome.CANCELLED) }
+    }
+
+    private fun discardPendingControl(type: String, fileId: String) {
+        val key = "$type:$fileId"
+        pendingControls.removeAll { it.key == key }
     }
 
     @Synchronized

@@ -3,8 +3,12 @@ package dev.hyphen.android.session
 import dev.hyphen.android.diagnostics.LocalStructuredLogStore
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.Json
 import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.SessionReconnector
+import dev.hyphen.android.transfer.StreamTransferByteSource
+import dev.hyphen.android.transfer.TransferOutbox
+import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.trust.TrustedPeer
 import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.ConnectionState
@@ -12,6 +16,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
@@ -26,9 +31,16 @@ private class FakePeerLinkLifecycle(
 ) : PeerLinkLifecycle {
     var invalidations = 0
     val remembered = mutableListOf<Pair<ParsedEndpoint, ByteArray>>()
+    val pairingCommits = mutableListOf<Pair<ParsedEndpoint, TrustedPeer>>()
+    var pairingCommitFailure: RuntimeException? = null
 
     override fun remember(endpoint: ParsedEndpoint, peerFingerprint: ByteArray) {
         remembered += endpoint to peerFingerprint.copyOf()
+    }
+
+    override fun commitPairing(endpoint: ParsedEndpoint, peer: TrustedPeer) {
+        pairingCommitFailure?.let { throw it }
+        pairingCommits += endpoint to peer
     }
 
     override fun restoreTrusted(): RestoredPeerLink? {
@@ -64,6 +76,10 @@ private class BlockingRememberPeerLinkLifecycle : PeerLinkLifecycle {
         rememberEntered.countDown()
         check(releaseRemember.await(5, TimeUnit.SECONDS))
         stored.set(true)
+    }
+
+    override fun commitPairing(endpoint: ParsedEndpoint, peer: TrustedPeer) {
+        remember(endpoint, peer.spkiFingerprint)
     }
 
     override fun restoreTrusted(): RestoredPeerLink? = null
@@ -170,6 +186,83 @@ class ConnectionSupervisorColdStartTest {
         assertEquals(nextEndpoint, lifecycle.remembered.single().first)
         assertTrue(nextFingerprint.contentEquals(lifecycle.remembered.single().second))
         assertTrue(nextFingerprint.contentEquals(supervisor.currentPeerFingerprint()))
+    }
+
+    @Test
+    fun `failed pairing route commit publishes neither peer nor reconnect state`() {
+        val lifecycle = FakePeerLinkLifecycle().apply {
+            pairingCommitFailure = IllegalStateException("route disk full")
+        }
+        val logs = LocalStructuredLogStore()
+        val events = mutableListOf<ActivityEvent>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = logs,
+            peerLinkLifecycle = lifecycle,
+            reconnectAfterRestore = {},
+        )
+        supervisor.addListener(object : ConnectionSupervisor.Listener {
+            override fun onActivityEvent(event: ActivityEvent) {
+                events += event
+            }
+        })
+
+        val committed = supervisor.commitPairingEndpoint(restored.endpoint, restored.peer)
+
+        assertFalse(committed)
+        assertNull(supervisor.currentPeerFingerprint())
+        assertTrue(events.none { it == ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null) })
+        assertEquals("trust/peer-link-persist-failed", logs.snapshot().single().code)
+    }
+
+    @Test
+    fun `user pause retires transport but keeps durable trust route for explicit resume`() {
+        val lifecycle = FakePeerLinkLifecycle(restored = restored)
+        val owners = mutableListOf<FakeTrustedPeerReconnectOwner>()
+        val events = mutableListOf<ActivityEvent>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = lifecycle,
+            reconnectFactory = TrustedPeerReconnectFactory {
+                FakeTrustedPeerReconnectOwner().also(owners::add)
+            },
+        )
+        supervisor.addListener(object : ConnectionSupervisor.Listener {
+            override fun onActivityEvent(event: ActivityEvent) {
+                events += event
+            }
+        })
+        assertTrue(supervisor.restorePersistedLink())
+        assertEquals(1, owners.single().starts)
+
+        supervisor.pauseConnection()
+
+        assertEquals(1, owners.single().stops)
+        assertTrue(fingerprint.contentEquals(supervisor.currentPeerFingerprint()))
+        assertEquals(0, lifecycle.invalidations)
+        assertEquals(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null), events.last())
+
+        assertTrue(supervisor.resumeConnection())
+        assertEquals(2, owners.size)
+        assertEquals(1, owners.last().starts)
+        assertEquals(ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null), events.last())
+    }
+
+    @Test
+    fun `trust revoke while paused still clears durable route and blocks resume`() {
+        val lifecycle = FakePeerLinkLifecycle(restored = restored)
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = lifecycle,
+            reconnectAfterRestore = {},
+        )
+        assertTrue(supervisor.restorePersistedLink())
+        supervisor.pauseConnection()
+
+        supervisor.stopAfterTrustChange()
+
+        assertFalse(supervisor.resumeConnection())
+        assertNull(supervisor.currentPeerFingerprint())
+        assertEquals(1, lifecycle.invalidations)
     }
 
     @Test
@@ -325,5 +418,71 @@ class ConnectionSupervisorColdStartTest {
         assertFalse(revoke.isAlive)
         assertFalse(lifecycle.stored.get())
         assertTrue(lifecycle.invalidations.get() >= 1)
+    }
+
+    @Test
+    fun `foreground inspection never holds supervisor state lock while waiting for sender`() {
+        val senderSnapshotTaken = CountDownLatch(1)
+        val allowSenderInspection = CountDownLatch(1)
+        val callbackEntered = CountDownLatch(1)
+        val allowCallbackStateWrite = CountDownLatch(1)
+        lateinit var supervisor: ConnectionSupervisor
+        supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            beforeTransferSenderInspection = {
+                senderSnapshotTaken.countDown()
+                assertTrue(allowSenderInspection.await(5, TimeUnit.SECONDS))
+            },
+        )
+        var sent = 0
+        val sender = TransferSender(
+            outbox = object : TransferOutbox {
+                override fun send(
+                    type: String,
+                    capability: String,
+                    requiresAck: Boolean,
+                    payload: Json.Obj,
+                ): String = "sent-${sent++}"
+            },
+            outstandingWindow = 1,
+            onProgress = { progress ->
+                if (progress.isComplete) {
+                    callbackEntered.countDown()
+                    assertTrue(allowCallbackStateWrite.await(5, TimeUnit.SECONDS))
+                }
+                supervisor.updateLastTransferProgress(progress)
+            },
+        )
+        val senderField = ConnectionSupervisor::class.java.getDeclaredField("activeTransferSender")
+        senderField.isAccessible = true
+        senderField.set(supervisor, sender)
+        sender.sendSource(
+            filename = "lock.bin",
+            mimeType = "application/octet-stream",
+            source = StreamTransferByteSource(1) { java.io.ByteArrayInputStream(byteArrayOf(1)) },
+            chunkSizeBytes = 1024,
+            fileId = "f_lock_order",
+        )
+        sender.handleAck("sent-0")
+
+        val ackThread = thread(name = "sender-progress-callback") {
+            sender.handleAck("sent-1")
+        }
+        assertTrue(callbackEntered.await(5, TimeUnit.SECONDS))
+        val inspectionResult = AtomicReference<Boolean?>()
+        val inspectionThread = thread(name = "foreground-sender-inspection") {
+            inspectionResult.set(supervisor.hasInFlightOutboundTransfers())
+        }
+        assertTrue(senderSnapshotTaken.await(5, TimeUnit.SECONDS))
+
+        allowCallbackStateWrite.countDown()
+        allowSenderInspection.countDown()
+        ackThread.join(5_000)
+        inspectionThread.join(5_000)
+
+        assertFalse(ackThread.isAlive)
+        assertFalse(inspectionThread.isAlive)
+        assertEquals(false, inspectionResult.get())
     }
 }

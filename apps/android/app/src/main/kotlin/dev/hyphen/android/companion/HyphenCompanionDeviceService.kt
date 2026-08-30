@@ -29,10 +29,10 @@ fun presenceEventToAppeared(eventType: Int): Boolean? = when (eventType) {
 }
 
 /**
- * System-bound companion service (HYP-M1-009 spike). While an observed
- * peer is present, the system keeps this service bound — that binding is
- * the background-resilience win CDM offers self-managed companions.
- * Findings and open questions: docs/spikes/api36-device-presence.md.
+ * Compile-only API-shape artifact from HYP-M1-009. It is intentionally not
+ * registered in the product manifest: public observation is BLE/BT-only and
+ * third-party apps cannot report self-managed Wi-Fi/LAN presence. It provides
+ * neither v1 lifecycle ownership nor background-resilience evidence.
  */
 class HyphenCompanionDeviceService : CompanionDeviceService() {
 
@@ -44,8 +44,8 @@ class HyphenCompanionDeviceService : CompanionDeviceService() {
         DevicePresenceBridge.dispatch(event.associationId, appeared)
     }
 
-    // Pre-36 address/AssociationInfo callbacks (31–35): self-managed
-    // presence is app-driven there, so nothing arrives for Hyphen peers.
+    // Pre-36 address/AssociationInfo callbacks do not provide a compatible
+    // public Wi-Fi/LAN presence feed for Hyphen peers.
     @Deprecated("pre-API36 path; Hyphen peers are self-managed")
     override fun onDeviceAppeared(associationInfo: AssociationInfo) = Unit
 
@@ -53,7 +53,7 @@ class HyphenCompanionDeviceService : CompanionDeviceService() {
     override fun onDeviceDisappeared(associationInfo: AssociationInfo) = Unit
 }
 
-/** API 36+ start/stop of system presence observation for an association. */
+/** Compile-only API 36 BLE/BT observation shape; not a Hyphen LAN product path. */
 class Api36PresenceObservation(context: Context) {
 
     private val cdm =

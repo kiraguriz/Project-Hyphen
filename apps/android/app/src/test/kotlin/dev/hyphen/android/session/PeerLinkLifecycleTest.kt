@@ -29,8 +29,10 @@ private class MemoryPeerLinkStore : PeerLinkStore {
 
 private class MemoryPeerTrustStore : PeerTrustStore {
     private val peers = mutableListOf<TrustedPeer>()
+    var addFailure: RuntimeException? = null
 
     override fun add(peer: TrustedPeer) {
+        addFailure?.let { throw it }
         peers.removeAll { it.spkiFingerprint.contentEquals(peer.spkiFingerprint) }
         peers += peer
     }
@@ -119,5 +121,39 @@ class PeerLinkLifecycleTest {
 
         assertNull(links.descriptor)
         assertEquals(1, links.clearCalls)
+    }
+
+    @Test
+    fun `pairing commit never writes trust when route persistence fails`() {
+        val links = MemoryPeerLinkStore().apply {
+            saveFailure = IllegalStateException("route disk full")
+        }
+        val trust = MemoryPeerTrustStore()
+        val lifecycle: PeerLinkLifecycle = PersistentPeerLinkLifecycle(links, trust)
+        val peer = TrustedPeer(fingerprint, "Studio Mac", 123L)
+
+        assertThrows(IllegalStateException::class.java) {
+            lifecycle.commitPairing(endpoint, peer)
+        }
+
+        assertNull(links.descriptor)
+        assertNull(trust.get(fingerprint))
+    }
+
+    @Test
+    fun `pairing commit clears staged route when trust persistence fails`() {
+        val links = MemoryPeerLinkStore()
+        val trust = MemoryPeerTrustStore().apply {
+            addFailure = IllegalStateException("trust disk full")
+        }
+        val lifecycle: PeerLinkLifecycle = PersistentPeerLinkLifecycle(links, trust)
+        val peer = TrustedPeer(fingerprint, "Studio Mac", 123L)
+
+        assertThrows(IllegalStateException::class.java) {
+            lifecycle.commitPairing(endpoint, peer)
+        }
+
+        assertNull(links.descriptor)
+        assertNull(trust.get(fingerprint))
     }
 }

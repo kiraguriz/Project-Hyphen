@@ -1,38 +1,68 @@
 # Spike: API 36 Device Presence (`ObservingDevicePresenceRequest`)
 
 - **Tracker**: HYP-M1-009 · **Builds on**: HYP-M1-007 (self-managed CDM), HYP-M1-008 (adapter layering)
-- **Status**: Compile-gated implementation landed (allowed verification path per the roadmap row). On-device behavior log pending an API 36 physical device.
+- **Status**: Spike complete; the intended self-managed Wi-Fi presence path is unsupported for an ordinary third-party app. Compile-gated adapters remain, but they are not product-lifecycle evidence.
 
-## What the API 36 model actually is (recorded behavior)
+## Corrected platform finding (2026-08-30)
 
-1. **Observation is per-association.** `CompanionDeviceManager.startObservingDevicePresence(ObservingDevicePresenceRequest)` takes an association id (the API 31–35 path took a MAC address and is deprecated). Stop is symmetric.
-2. **Events arrive at a system-bound service, not a callback.** The app declares a `CompanionDeviceService` guarded by `BIND_COMPANION_DEVICE_SERVICE` with the `android.companion.CompanionDeviceService` intent-filter. API 36 delivers `onDevicePresenceEvent(DevicePresenceEvent)` with an event-type int: BLE appeared/disappeared, BT connected/disconnected, self-managed appeared/disappeared.
-3. **Self-managed presence is app-driven, not radio-driven.** For `setSelfManaged(true)` associations (Hyphen's model, ADR-0003/HYP-M1-007), the *app* reports reachability via `notifyDeviceAppeared(associationId)` / `notifyDeviceDisappeared(associationId)` — i.e. Hyphen will call notify* when the LAN-TLS session to the Mac comes up/down (M2 transport wiring). The system then (a) binds the companion service for the present period and (b) reflects it back as `EVENT_SELF_MANAGED_APPEARED/DISAPPEARED`.
-4. **The prize is the binding.** While a peer is present, the system keeps the companion service bound — process priority without a visible foreground service. The `connectedDevice` FGS (ADR-0003 §3) remains the transparency surface; the CDM binding is resilience, not a replacement.
+The earlier spike conflated service-side/AOSP surfaces with the third-party
+public SDK. Rechecking the SDK 36 `android.jar` and current Android reference
+material established:
 
-## What Hyphen built (compile-gated, API-36 paths annotated)
+1. `CompanionDeviceManager.startObservingDevicePresence(ObservingDevicePresenceRequest)`
+   is public on API 36, but public observation covers BLE range and Bluetooth
+   connection state. The Android reference explicitly says Wi-Fi devices are
+   not supported.
+2. `CompanionDeviceService.onDevicePresenceEvent(DevicePresenceEvent)` is the
+   system delivery surface once valid observation exists.
+3. `notifyDeviceAppeared(int)`, `notifyDeviceDisappeared(int)`, and the newer
+   self-managed report surface exist in AOSP as `@SystemApi @hide`; they are
+   absent from the public SDK 36 `CompanionDeviceManager` class. Hyphen must not
+   call them through reflection or private APIs.
+4. Therefore a normal Hyphen build cannot report LAN-TLS reachability to CDM
+   and cannot obtain a system binding from self-managed LAN presence. A CDM
+   association records a user-approved relationship only; TLS pinning remains
+   trust, and the visible `connectedDevice` foreground service remains the
+   Android background-lifecycle owner.
 
-- `HyphenCompanionDeviceService`: translates `DevicePresenceEvent` → appeared/disappeared via the pure `presenceEventToAppeared()` mapper (unit-tested against the platform constants); pre-36 deprecated callbacks are explicit no-ops (self-managed peers never fire them).
-- `DevicePresenceBridge`: process-wide seam from the system-instantiated service to adapter consumers — `bind(associationId, peerId)` after association, `dispatch` routes to per-peer observers; unknown ids ignored. `BridgePresenceSource` plugs it into `Api36PresenceAdapter` (which dedupes flapping).
-- `Api36PresenceObservation`: SDK-gated start/stop of system observation per association id.
-- Manifest: exported service guarded by the system-only bind permission.
+Sources checked: the public [CompanionDeviceManager API reference](https://developer.android.com/reference/android/companion/CompanionDeviceManager), the [companion-device pairing guide](https://developer.android.com/develop/connectivity/bluetooth/companion-device-pairing), SDK 36 `android.jar` inspected with `javap`, and the Android 16 QPR2 [framework source](https://android.googlesource.com/platform/frameworks/base/+/android16-qpr2-release/core/java/android/companion/CompanionDeviceManager.java) showing the report methods annotated `@SystemApi`/`@hide`.
 
-## Open questions for the device session (record results here)
+## What remains useful in the repository
 
-| # | Question | Expected per docs | Observed |
-|---|---|---|---|
-| 1 | Does the service stay bound across doze when a self-managed peer is "appeared"? | Bound, elevated proc state | TBD |
-| 2 | Latency from `notifyDeviceAppeared` to `EVENT_SELF_MANAGED_APPEARED` | ~immediate | TBD |
-| 3 | Does `startObservingDevicePresence` require the association to exist first (error otherwise)? | IllegalArgumentException on unknown id | TBD |
-| 4 | Behavior on app force-stop: does observation survive reboot/restart? | Re-arm needed on process start | TBD |
-| 5 | Do BLE/BT event types ever fire for self-managed associations? | No | TBD |
+- `AssociationController` / `CdmAssociationBackend` create and remove the
+  public self-managed association on API 33+.
+- `CompanionAssociationBindings` durably binds an association ID to exactly one
+  already trusted 32-byte SPKI fingerprint. App-driven removal, trust removal,
+  and trust reset clear the mapping; Activity resume/listing also reconciles it
+  against `myAssociations` so a Settings-side deletion cannot remain durable.
+  A process-scoped attempt token prevents Activity recreation from owning two
+  platform requests and transfers an unclaimed approval launcher to the current
+  visible Activity without retaining the destroyed one. A repeated terminal
+  callback for the same association ID is idempotent; a different stale ID
+  cannot consume a newer peer identity and is cleaned as an orphan. A launcher
+  exception abandons the unusable request so the user can retry. Every
+  Activity-era registry operation reloads durable bindings under a process lock,
+  and trust reset/removal returns the affected IDs for best-effort platform
+  disassociation. If
+  trust changes during approval, binding persistence fails, or a new approval
+  displaces an older association for the same peer, Hyphen best-effort
+  disassociates the orphan. The mapping never authorizes TLS.
+- `HyphenCompanionDeviceService`, `DevicePresenceBridge`,
+  `Api36PresenceAdapter`, and `Api36PresenceObservation` retain the compile-gated
+  API-shape spike and pure event tests. The service is not registered in the
+  product manifest, and these sources do not prove that self-managed Wi-Fi
+  presence can be armed in a third-party build.
 
-## Test log
+## Evidence boundary and release decision
 
-```text
-Date:
-Device/OS build:
-Hyphen commit:
-Q1..Q5 observations:
-Issues filed:
-```
+| Claim | Status | Required proof |
+|---|---|---|
+| User can create/remove a self-managed association | environment-only | Physical API 33+ system-dialog run (HYP-M1-007) |
+| Association ID stays bound to the intended trusted SPKI locally | host-confirmed | JVM binding/index tests |
+| API 36 BLE/BT observation API shape compiles | host-confirmed | SDK 36 compile + pure mapper tests |
+| CDM keeps Hyphen alive for a self-managed LAN-TLS peer | unsupported | No public third-party reporting API; do not claim |
+| Visible FGS maintains the opted-in LAN link | environment-only beyond host invariants | Physical-device notification, process, timeout, Doze/OEM matrix |
+
+Revisit only if Android publishes a third-party API for self-managed presence
+that supports this Wi-Fi/LAN companion model. Such a change requires a fresh
+ADR/platform review; it must not be inferred from hidden framework source.

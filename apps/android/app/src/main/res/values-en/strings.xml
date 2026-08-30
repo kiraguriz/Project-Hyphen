@@ -143,6 +143,8 @@
     <string name="dlg_assoc_remove_title">Remove association #%1$d?</string>
     <string name="dlg_assoc_remove_msg">This only removes Android\'s system companion association. Manage Hyphen\'s pinned peer trust separately under Paired devices.</string>
     <string name="dlg_assoc_remove_confirm">Remove association</string>
+    <string name="dlg_assoc_requires_peer_title">Pair a Mac first</string>
+    <string name="dlg_assoc_requires_peer_msg">A system companion association can only bind to a Mac already verified by QR or SAS. Complete Hyphen pairing before creating the association.</string>
 
     <!-- Dialogs: SAS pairing -->
     <string name="dlg_sas_title">Confirm pairing code</string>
@@ -169,4 +171,47 @@
 
     <!-- Dialogs: diagnostics preview -->
     <string name="dlg_diag_preview_title">Diagnostics preview</string>
+
+    <!-- User-visible foreground companion services -->
+    <string name="fgs_channel_name">Hyphen companion link</string>
+    <string name="fgs_channel_description">Shows the local paired-Mac link and user-initiated transfers.</string>
+    <string name="fgs_connection_title">Hyphen companion link</string>
+    <string name="fgs_connection_connecting">Connecting to the paired Mac</string>
+    <string name="fgs_connection_connected">Connected over local TLS</string>
+    <string name="fgs_connection_degraded">Link degraded; recovering</string>
+    <string name="fgs_connection_paused">Link paused; open Hyphen to resume</string>
+    <string name="fgs_connection_retry_required">Transfer stopped; open Hyphen and reselect the file</string>
+    <string name="fgs_disconnect_action">Disconnect</string>
+    <string name="fgs_transfer_title">Hyphen file transfer</string>
+    <string name="fgs_transfer_active">Sending to the paired Mac; cancel from Hyphen</string>
+    <string name="fgs_transfer_stopped_title">Hyphen transfer stopped</string>
+    <string name="fgs_transfer_stopped_body">The platform time limit was reached. Open Hyphen and reselect the file to retry.</string>
+
+    <!-- Companion-link / QR journey -->
+    <string name="perm_companion_title">Background companion link</string>
+    <string name="perm_companion_on_detail">The foreground-service notification stays visible; disconnect any time.</string>
+    <string name="perm_companion_off_detail">Background continuity starts only when you explicitly enable it.</string>
+    <string name="perm_companion_badge_on">On</string>
+    <string name="perm_companion_badge_off">Off</string>
+    <string name="perm_btn_companion_on">Disconnect</string>
+    <string name="perm_btn_companion_off">Keep connected</string>
+    <string name="perm_qr_title">Scan with system camera</string>
+    <string name="perm_qr_detail">Scan the Mac\'s Hyphen QR with the system camera; its pairing link returns here for validation.</string>
+    <string name="perm_btn_qr_help">How to scan</string>
+    <string name="dlg_qr_help_title">Scan the QR code on your Mac</string>
+    <string name="dlg_qr_help_msg">1. Open “Pair new device” from the Hyphen menu on your Mac.\n2. Scan its QR code with the Android system camera.\n3. Open the hyphen://pair link to return here.\n4. Trust only when both devices show the same pairing code.\n\nThis path does not give Hyphen camera access or add a third-party scanner SDK.</string>
+    <string name="dlg_companion_title">Keep the Mac connected?</string>
+    <string name="dlg_companion_msg">Hyphen will run a connectedDevice foreground service with an always-visible notification. It communicates only with the paired Mac over LAN TLS—no cloud relay or telemetry. Disconnect any time from the notification or this screen.</string>
+    <string name="dlg_companion_enable">Enable with notification</string>
+    <string name="dlg_companion_requires_peer_msg">The background companion link can only connect to a Mac already verified by QR or SAS. Complete pairing first.</string>
+    <string name="dlg_companion_settings_title">Companion notification is not visible</string>
+    <string name="dlg_companion_settings_msg">For transparency, Hyphen will not keep a background link when its notification is hidden. Allow Hyphen notifications in system settings, then try again.</string>
+    <string name="dlg_open_app_notification_settings">Open notification settings</string>
+    <string name="dlg_discovery_none_title">No Mac found</string>
+    <string name="dlg_discovery_none_msg">This LAN discovery window found nothing. You can still scan the pairing QR with the system camera, or paste the address and nonce shown on the Mac pairing screen.</string>
+    <string name="dlg_discovery_found_title">Found %1$d Mac(s)</string>
+    <string name="dlg_discovery_found_msg">%1$s\n\nDiscovery results are LAN hints, not trust credentials. Open Hyphen\'s pairing screen on one of these Macs and scan its QR code.</string>
+    <string name="dlg_transfer_notification_title">Show transfer status?</string>
+    <string name="dlg_transfer_notification_msg">Choosing a file temporarily leaves Hyphen. To avoid a hidden background link, Hyphen first enables the visible companion-link notification and shows a dataSync notification while sending. The companion link stays on until you disconnect from the notification or this screen.</string>
+    <string name="dlg_transfer_notification_continue">Allow and choose file</string>
 </resources>

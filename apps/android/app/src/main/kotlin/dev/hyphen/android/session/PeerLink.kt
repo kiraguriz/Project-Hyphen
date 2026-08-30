@@ -56,6 +56,13 @@ interface PeerLinkStore {
 /** Lifecycle seam shared by Activity, the process supervisor, and Phase-4 FGS. */
 interface PeerLinkLifecycle {
     fun remember(endpoint: ParsedEndpoint, peerFingerprint: ByteArray)
+    /**
+     * Commits a newly SAS-approved peer in crash-safe order: route first,
+     * trust second. A route without trust is inert and is cleared by
+     * [restoreTrusted], whereas writing trust first could leave a trusted
+     * identity after route persistence failed.
+     */
+    fun commitPairing(endpoint: ParsedEndpoint, peer: TrustedPeer)
     fun restoreTrusted(): RestoredPeerLink?
     fun invalidate()
 }
@@ -73,6 +80,35 @@ class PersistentPeerLinkLifecycle(
             // descriptor intact. Best-effort removal keeps the next cold start
             // fail-closed instead of silently selecting that previous peer.
             runCatching { store.clear() }
+            throw error
+        }
+    }
+
+    override fun commitPairing(endpoint: ParsedEndpoint, peer: TrustedPeer) {
+        val previousTrust = trustStore.get(peer.spkiFingerprint)
+        val descriptor = RememberedPeerLink(
+            endpoint.host,
+            endpoint.port,
+            peer.spkiFingerprint.copyOf(),
+        )
+        try {
+            // The old current route must not survive an interrupted re-pair.
+            store.clear()
+            store.save(descriptor)
+            // This is the commit point. A crash before it leaves only an
+            // inert route; a crash after it leaves both durable records.
+            trustStore.add(peer)
+        } catch (error: Exception) {
+            // Store implementations replace atomically, but clear again in
+            // case either route save or trust persistence failed mid-call.
+            runCatching { store.clear() }
+            runCatching {
+                if (previousTrust == null) {
+                    trustStore.remove(peer.spkiFingerprint)
+                } else {
+                    trustStore.add(previousTrust)
+                }
+            }
             throw error
         }
     }

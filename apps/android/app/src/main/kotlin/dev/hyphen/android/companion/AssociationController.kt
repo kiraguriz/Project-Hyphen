@@ -1,9 +1,15 @@
 package dev.hyphen.android.companion
 
+import android.app.Activity
+
+fun interface AssociationApprovalRequest {
+    fun launch(activity: Activity)
+}
+
 /**
  * CDM association PoC (HYP-M1-007, plan §7.4). Hyphen uses *self-managed*
  * associations (API 33+): the app manages the LAN-TLS connection itself and
- * CDM only records the companion relationship for background resilience.
+ * CDM only records system relationship metadata.
  * API 26–32 gets no CDM association in v1 — QR-only pairing with
  * conservative background behavior (ADR-0003); a BT-filter legacy spike
  * stays an open question for the M1 device session (HYP-M1-009 log).
@@ -12,8 +18,8 @@ package dev.hyphen.android.companion
  * the Hyphen trust store decides peers (plan §7.4).
  */
 sealed class AssociationEvent {
-    /** System approval dialog is ready; invoke [launch] from the Activity. */
-    data class PendingUserApproval(val launch: () -> Unit) : AssociationEvent()
+    /** System approval dialog is ready; launch it from the current Activity. */
+    data class PendingUserApproval(val approval: AssociationApprovalRequest) : AssociationEvent()
     data class Associated(val associationId: Int, val displayName: String?) : AssociationEvent()
     data class Removed(val associationId: Int) : AssociationEvent()
     data class Failed(val message: String) : AssociationEvent()
@@ -29,7 +35,7 @@ interface CdmBackend {
 }
 
 interface CdmCallbacks {
-    fun onPendingApproval(launch: () -> Unit)
+    fun onPendingApproval(approval: AssociationApprovalRequest)
     fun onAssociated(associationId: Int, displayName: String?)
     fun onFailure(message: String)
 }
@@ -67,29 +73,38 @@ class AssociationController(
     private val backend: CdmBackend,
     private val onEvent: (AssociationEvent) -> Unit,
 ) {
-
-    private val callbacks = object : CdmCallbacks {
-        override fun onPendingApproval(launch: () -> Unit) {
-            onEvent(AssociationEvent.PendingUserApproval(launch))
-        }
-
-        override fun onAssociated(associationId: Int, displayName: String?) {
-            onEvent(AssociationEvent.Associated(associationId, displayName))
-        }
-
-        override fun onFailure(message: String) {
-            onEvent(AssociationEvent.Failed(message))
-        }
-    }
-
     private fun supported(): Boolean = backend.sdkInt() >= SELF_MANAGED_MIN_SDK
 
-    fun associate(displayName: String) {
+    fun associate(
+        displayName: String,
+        requestEvents: (AssociationEvent) -> Unit = onEvent,
+    ) {
         if (!supported()) {
-            onEvent(AssociationEvent.UnsupportedOnThisSdk)
+            requestEvents(AssociationEvent.UnsupportedOnThisSdk)
             return
         }
-        backend.requestSelfManagedAssociation(displayName, callbacks)
+        val callbacks = object : CdmCallbacks {
+            override fun onPendingApproval(approval: AssociationApprovalRequest) {
+                requestEvents(AssociationEvent.PendingUserApproval(approval))
+            }
+
+            override fun onAssociated(associationId: Int, displayName: String?) {
+                requestEvents(AssociationEvent.Associated(associationId, displayName))
+            }
+
+            override fun onFailure(message: String) {
+                requestEvents(AssociationEvent.Failed(message))
+            }
+        }
+        try {
+            backend.requestSelfManagedAssociation(displayName, callbacks)
+        } catch (error: RuntimeException) {
+            requestEvents(
+                AssociationEvent.Failed(
+                    error.message ?: "CDM association request failed",
+                ),
+            )
+        }
     }
 
     fun prepareDisassociation(associationId: Int): AssociationRemovalRequest? {
@@ -97,14 +112,46 @@ class AssociationController(
             onEvent(AssociationEvent.UnsupportedOnThisSdk)
             return null
         }
-        if (associationId !in backend.listAssociationIds()) {
+        val associationIds = listAssociationIdsOrReport() ?: return null
+        if (associationId !in associationIds) {
             onEvent(AssociationEvent.Failed("association $associationId is no longer present"))
             return null
         }
         return AssociationRemovalRequest(associationId, ::removeAssociation)
     }
 
-    fun associations(): List<Int> = if (supported()) backend.listAssociationIds() else emptyList()
+    fun associations(): List<Int> =
+        if (supported()) listAssociationIdsOrReport() ?: emptyList() else emptyList()
+
+    /** Null means the platform list failed; callers must not erase bindings. */
+    fun associationIdsForReconciliation(): Set<Int>? =
+        if (!supported()) {
+            emptySet()
+        } else {
+            try {
+                backend.listAssociationIds().toSet()
+            } catch (_: RuntimeException) {
+                null
+            }
+        }
+
+    /** Cleans up a just-created association that lost its trusted peer. */
+    fun removeUnboundAssociation(associationId: Int) {
+        if (!supported()) return
+        removeAssociation(associationId)
+    }
+
+    private fun listAssociationIdsOrReport(): List<Int>? =
+        try {
+            backend.listAssociationIds()
+        } catch (error: RuntimeException) {
+            onEvent(
+                AssociationEvent.Failed(
+                    error.message ?: "CDM association list failed",
+                ),
+            )
+            null
+        }
 
     private fun removeAssociation(associationId: Int) {
         try {

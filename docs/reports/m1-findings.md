@@ -23,7 +23,7 @@
 2. **Android 16 restricted LAN is invisible to the permission API.** The controller correctly reports `GRANTED/platformGated=false` while sockets fail. Degradation must key off I/O failures on API 36, and off the permission state only on SDK 37+. Both paths are distinct test cases now.
 3. **NsdManager constraints are real design inputs**: resolves must be serialized (one in flight), discovery must be windowed (20s) with the MulticastLock scoped to the window, and `MulticastLock.release()` throws on over-release — wrapped idempotently.
 4. **Emulator NAT drops multicast** — Android-side mDNS verification requires physical hardware, full stop. This is why M1-004/006 carry `[?]`.
-5. **Self-managed CDM is the right model and changes the presence story**: presence for self-managed associations is *app-driven* (`notifyDeviceAppeared/Disappeared` when the LAN-TLS session changes — M2 must wire this); the reward is system binding of the companion service while present. The `connectedDevice` FGS stays as the user-visible transparency surface.
+5. **Corrected 2026-08-30 — CDM does not provide Hyphen LAN presence.** The public API can record a self-managed association, but Wi-Fi observation is unsupported and self-managed appeared/disappeared reporting is hidden `@SystemApi`. No product service is registered for this compile spike; the visible `connectedDevice` FGS is the only Android LAN lifecycle owner. See `docs/spikes/api36-device-presence.md`.
 
 ### macOS
 
@@ -41,7 +41,7 @@
 
 1. TLS identity: key type (P-256 vs Ed25519), cert lifetime, SPKI pin format on both platforms.
 2. Trust store schema (Keychain item layout / EncryptedSharedPreferences structure) and `PeerId` = fingerprint derivation.
-3. `notifyDeviceAppeared/Disappeared` wiring rules (what "session up" means).
+3. ~~`notifyDeviceAppeared/Disappeared` wiring rules~~ — closed as unsupported for third-party Wi-Fi/LAN companions; revisit only if Android publishes a suitable public API.
 4. Module split for `apps/android` (`core-protocol`, `core-transport`, `core-discovery`, `core-companion`) + coroutines/Compose adoption.
 5. IPv6 endpoint literals (parser currently rejects them by design).
 6. Resume-token construction (protocol v0 §9 open question #1).

@@ -1,18 +1,17 @@
 package dev.hyphen.android.companion
 
 /**
- * In-process bridge between the system-instantiated
- * [HyphenCompanionDeviceService] and adapter-level [PresenceSource]
- * consumers (HYP-M1-009). The service cannot be constructed by us, so a
- * process-wide registry is the seam: association ids map to Hyphen peer
- * ids, presence dispatches route to whoever observes that peer.
+ * Compile-spike bridge between [HyphenCompanionDeviceService] and a
+ * [PresenceSource]. The service is not registered in the product manifest;
+ * this seam exists only to keep the public BLE/BT API shape testable and must
+ * not be interpreted as self-managed LAN presence or lifecycle evidence.
  */
 object DevicePresenceBridge {
 
     private val peerByAssociation = mutableMapOf<Int, PeerId>()
     private val observers = mutableMapOf<PeerId, (PresenceEvent) -> Unit>()
 
-    /** Call after a successful association (id ↔ peer binding). */
+    /** Compile-spike binding helper; product trust bindings use the durable index. */
     @Synchronized
     fun bind(associationId: Int, peerId: PeerId) {
         peerByAssociation[associationId] = peerId

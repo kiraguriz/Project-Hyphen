@@ -80,6 +80,24 @@ private class GatedFlowControlledTransferOutbox : TransferOutbox {
     }
 }
 
+private class RejectingCancelTransferOutbox : TransferOutbox {
+    val envelopes = mutableListOf<SentTransferEnvelope>()
+
+    override fun send(
+        type: String,
+        capability: String,
+        requiresAck: Boolean,
+        payload: Json.Obj,
+    ): String {
+        if (type == TransferProtocol.TYPE_CANCEL) {
+            throw IllegalStateException("cancel control unavailable")
+        }
+        val id = "sent-${envelopes.size}"
+        envelopes += SentTransferEnvelope(type, capability, requiresAck, payload)
+        return id
+    }
+}
+
 class TransferMessagesTest {
     @Rule
     @JvmField
@@ -922,6 +940,151 @@ class TransferMessagesTest {
         assertRejected("terminal sendRemaining") {
             sender.sendRemaining(manifest.fileId, fromChunkIndex = 0)
         }
+    }
+
+    @Test
+    fun `stale worker cancel cannot remove a newer transfer`() {
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        sender.sendSource(
+            filename = "newer.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(2048) { it.toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_newer_generation",
+        )
+
+        sender.cancel("f_stale_generation", discard = true)
+
+        assertTrue(sender.hasInFlightOutboundTransfers())
+        assertEquals(TransferProtocol.TYPE_CANCEL, outbox.envelopes.last().type)
+        assertEquals(Json.Str("f_stale_generation"), outbox.envelopes.last().payload["fileId"])
+    }
+
+    @Test
+    fun `foreground owner stop cancels every outbound transfer without recycling the session`() {
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        val first = sender.sendSource(
+            filename = "first.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(2048) { it.toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_owner_stop_first",
+        )
+        val second = sender.sendSource(
+            filename = "second.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(2048) { (it + 1).toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_owner_stop_second",
+        )
+
+        assertEquals(setOf(first.fileId, second.fileId), sender.cancelAll(discard = true).toSet())
+        assertEquals(2, outbox.envelopes.count { it.type == TransferProtocol.TYPE_CANCEL })
+        assertRejected("first transfer after owner stop") {
+            sender.sendRemaining(first.fileId, fromChunkIndex = 0)
+        }
+        assertRejected("second transfer after owner stop") {
+            sender.sendRemaining(second.fileId, fromChunkIndex = 0)
+        }
+    }
+
+    @Test
+    fun `foreground owner cleanup isolates throwing streams and cancel controls`() {
+        val bytes = ByteArray(4096) { (it % 251).toByte() }
+        var opens = 0
+        val closeThrowingSource = StreamTransferByteSource(bytes.size.toLong()) {
+            opens += 1
+            val delegate = java.io.ByteArrayInputStream(bytes)
+            if (opens == 2) {
+                object : java.io.FilterInputStream(delegate) {
+                    override fun close() {
+                        super.close()
+                        throw java.io.IOException("close failed")
+                    }
+                }
+            } else {
+                delegate
+            }
+        }
+        val outbox = RejectingCancelTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 1)
+        val first = sender.sendSource(
+            filename = "throwing.bin",
+            mimeType = "application/octet-stream",
+            source = closeThrowingSource,
+            chunkSizeBytes = 1024,
+            fileId = "f_owner_stop_throwing",
+        )
+        val second = sender.sendSource(
+            filename = "second.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_owner_stop_after_throw",
+        )
+
+        assertTrue(sender.hasInFlightOutboundTransfers())
+        assertEquals(setOf(first.fileId, second.fileId), sender.cancelAll(discard = true).toSet())
+        assertFalse(sender.hasInFlightOutboundTransfers())
+        assertRejected("throwing stream transfer after owner stop") {
+            sender.sendRemaining(first.fileId, fromChunkIndex = 0)
+        }
+        assertRejected("later transfer after owner stop") {
+            sender.sendRemaining(second.fileId, fromChunkIndex = 0)
+        }
+    }
+
+    @Test
+    fun `foreground ownership stays until the last concurrent transfer drains`() {
+        val outbox = RecordingTransferOutbox()
+        val progress = mutableListOf<TransferProgress>()
+        val sender = TransferSender(outbox, outstandingWindow = 2, onProgress = progress::add)
+        sender.sendSource(
+            filename = "first.bin",
+            mimeType = "application/octet-stream",
+            source = source(byteArrayOf(1)),
+            chunkSizeBytes = 1024,
+            fileId = "f_drain_first",
+        )
+        sender.sendSource(
+            filename = "second.bin",
+            mimeType = "application/octet-stream",
+            source = source(byteArrayOf(2)),
+            chunkSizeBytes = 1024,
+            fileId = "f_drain_second",
+        )
+
+        sender.handleAck("sent-0")
+        sender.handleAck("sent-2")
+        assertTrue(progress.last { it.fileId == "f_drain_first" }.isComplete)
+        assertTrue(sender.hasInFlightOutboundTransfers())
+
+        sender.handleAck("sent-1")
+        sender.handleAck("sent-3")
+        assertTrue(progress.last { it.fileId == "f_drain_second" }.isComplete)
+        assertFalse(sender.hasInFlightOutboundTransfers())
+    }
+
+    @Test
+    fun `zero-byte transfer drains only after its manifest is acknowledged`() {
+        val outbox = RecordingTransferOutbox()
+        val progress = mutableListOf<TransferProgress>()
+        val sender = TransferSender(outbox, onProgress = progress::add)
+        sender.sendSource(
+            filename = "empty.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(0)),
+            chunkSizeBytes = 1024,
+            fileId = "f_drain_empty",
+        )
+
+        assertTrue(progress.isEmpty())
+        assertTrue(sender.hasInFlightOutboundTransfers())
+        sender.handleAck("sent-0")
+        assertTrue(progress.single().isComplete)
+        assertFalse(sender.hasInFlightOutboundTransfers())
     }
 
     @Test

@@ -30,9 +30,12 @@ Current manifest permissions and special access surfaces:
 
 - `INTERNET` for LAN sockets and pinned TLS.
 - `CHANGE_WIFI_MULTICAST_STATE` for scoped discovery windows.
+- `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, and `FOREGROUND_SERVICE_DATA_SYNC` for the explicitly enabled companion link and user-started file transfers.
+- `POST_NOTIFICATIONS`; Hyphen declines background link/transfer work when the app or FGS channel notification is not visible.
 - `REQUEST_COMPANION_SELF_MANAGED` plus optional companion-device feature.
-- `BIND_COMPANION_DEVICE_SERVICE` service.
-- `BIND_NOTIFICATION_LISTENER_SERVICE` service, enabled only through Android system settings.
+- No `CompanionDeviceService` is registered in the product manifest. Compile-only API-shape sources remain, but the public SDK does not expose self-managed Wi-Fi/LAN presence reporting; CDM is neither trust nor a background-liveness claim.
+- A `NotificationListenerService` guarded by `BIND_NOTIFICATION_LISTENER_SERVICE`, enabled only through Android system settings.
+- A host-filtered `hyphen://pair` deep link for system-camera/QR handoff. The app requests no `CAMERA` permission and includes no scanner SDK.
 
 Current Android release build dependencies:
 
@@ -139,7 +142,7 @@ The Play privacy policy should state, in plain language:
 ## Submission Blockers
 
 - A final Play privacy policy URL does not exist yet.
-- Android foreground service implementation and notification screenshots are not complete.
-- `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE*`, `CAMERA`, and future `ACCESS_LOCAL_NETWORK` permission paths are expected by ADR-0003 but are not yet all present in the current manifest.
+- Android foreground-service host implementation is present, but notification screenshots and physical-device denial/revocation/timeout/OEM evidence are not complete.
+- Future SDK-37 `ACCESS_LOCAL_NETWORK` behavior remains a compatibility task. `CAMERA` is no longer expected: system QR handoff plus manual paste is the no-permission v1 decision.
 - HYP-M4-002 and HYP-M4-004 Android manual diagnostics acceptance remain blocked by lack of an attached Android device/emulator.
 - Any added SDK must be re-audited for its own data collection and sharing before this draft can be used.

@@ -86,7 +86,7 @@ The Mac displays (and the Android app scans):
 hyphen://pair?v=0&ep=192.168.1.20:48273&fp=<base64url(SHA-256(SPKI))>&n=<base64url(16-byte nonce)>&dn=<urlencoded device name (optional)>
 ```
 
-Parsers MUST reject payloads with unknown scheme, missing `v`/`ep`/`fp`/`n`, malformed fields, or `v` they cannot speak — silently safe, no crash (HYP-M2-010). Manual-IP pairing is the same flow with `fp` absent: trust then rests entirely on SAS confirmation.
+Parsers MUST reject payloads with an unknown field or scheme, an empty query segment, a raw URI fragment, missing `v`/`ep`/`n`, malformed fields, or `v` they cannot speak — silently safe, no crash (HYP-M2-010). `fp` and `n` use unpadded base64url with exact encoded lengths of 43 and 22 characters. `ep` v0 hosts contain only ASCII letters, digits, `-`, and `.` (IPv6 remains a later protocol decision). The encoded `dn` contains only RFC 3986 unreserved ASCII or `%HH` bytes, followed by strict UTF-8 decoding: malformed byte sequences and unpaired surrogates are rejected, and a plus sign is encoded as `%2B` rather than accepted as raw form-encoded text. When present, decoded `dn` is non-empty, at most 80 Unicode scalar values, and contains no Unicode control or format scalar. Manual-IP pairing is the same flow with `fp` absent: trust then rests entirely on SAS confirmation.
 
 ### 5.2 Sequence
 

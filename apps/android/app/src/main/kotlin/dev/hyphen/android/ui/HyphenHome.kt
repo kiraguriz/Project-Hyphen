@@ -78,7 +78,10 @@ fun HyphenHome(model: HyphenUiModel, actions: HyphenActions) {
         Spacer(Modifier.height(12.dp))
         TimelineCard(state = state, actions = actions)
         Spacer(Modifier.height(12.dp))
-        PermissionsCard(actions = actions)
+        PermissionsCard(
+            companionEnabled = model.companionConnectionEnabled,
+            actions = actions,
+        )
         Spacer(Modifier.height(12.dp))
         NotificationCard(
             accessEnabled = model.notificationAccessEnabled,
@@ -379,7 +382,7 @@ private fun ProgressBar(fraction: Float, tint: Color) {
 // MARK: - Permission / pairing card
 
 @Composable
-private fun PermissionsCard(actions: HyphenActions) {
+private fun PermissionsCard(companionEnabled: Boolean, actions: HyphenActions) {
     val p = HyphenTheme.palette
     var endpoint by remember { mutableStateOf("") }
     HyphenCard(title = stringResource(R.string.perm_title), subtitle = stringResource(R.string.perm_subtitle)) {
@@ -392,6 +395,14 @@ private fun PermissionsCard(actions: HyphenActions) {
         }
         Spacer(Modifier.height(8.dp))
         StatusRow(
+            stringResource(R.string.perm_qr_title),
+            stringResource(R.string.perm_qr_detail),
+            null,
+        ) {
+            HyphenButton(stringResource(R.string.perm_btn_qr_help), onClick = actions.onShowQrHelp)
+        }
+        Spacer(Modifier.height(8.dp))
+        StatusRow(
             stringResource(R.string.perm_manual_title),
             stringResource(R.string.perm_manual_detail),
             null,
@@ -401,6 +412,27 @@ private fun PermissionsCard(actions: HyphenActions) {
         HyphenTextField(value = endpoint, onValueChange = { endpoint = it }, hint = stringResource(R.string.perm_manual_hint), enabled = true)
         Spacer(Modifier.height(10.dp))
         HyphenButton(stringResource(R.string.perm_btn_manual_connect), modifier = Modifier.fillMaxWidth()) { actions.onManualConnect(endpoint) }
+        Spacer(Modifier.height(10.dp))
+        StatusRow(
+            stringResource(R.string.perm_companion_title),
+            stringResource(
+                if (companionEnabled) R.string.perm_companion_on_detail
+                else R.string.perm_companion_off_detail,
+            ),
+            stringResource(
+                if (companionEnabled) R.string.perm_companion_badge_on
+                else R.string.perm_companion_badge_off,
+            ),
+        ) {
+            HyphenButton(
+                stringResource(
+                    if (companionEnabled) R.string.perm_btn_companion_on
+                    else R.string.perm_btn_companion_off,
+                ),
+                primary = !companionEnabled,
+                onClick = actions.onToggleCompanionConnection,
+            )
+        }
         Spacer(Modifier.height(10.dp))
         StatusRow(
             stringResource(R.string.perm_cdm_title),

@@ -14,7 +14,9 @@ import java.util.Locale
  */
 data class HyphenActions(
     val onFindMac: () -> Unit = {},
+    val onShowQrHelp: () -> Unit = {},
     val onManualConnect: (String) -> Unit = {},
+    val onToggleCompanionConnection: () -> Unit = {},
     val onCreateAssociation: () -> Unit = {},
     val onListAssociations: () -> Unit = {},
     val onManagePeers: () -> Unit = {},

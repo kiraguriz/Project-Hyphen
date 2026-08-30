@@ -6,6 +6,7 @@ import dev.hyphen.android.trust.softwareAesKey
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -79,5 +80,17 @@ class SasConfirmationGateTest {
         assertEquals(1, store.allPeers().size)
         assertEquals(SasConfirmationGate.Outcome.TRUSTED, gate.reject())
         assertEquals(1, store.allPeers().size)
+    }
+
+    @Test
+    fun `failed transactional persistence does not publish a trusted gate outcome`() {
+        val gate = makeGate()
+
+        assertThrows(IllegalStateException::class.java) {
+            gate.confirm { throw IllegalStateException("route disk full") }
+        }
+
+        assertNull(gate.outcome)
+        assertTrue(store.allPeers().isEmpty())
     }
 }

@@ -1,5 +1,7 @@
 package dev.hyphen.android.pairing
 
+import dev.hyphen.android.trust.TrustedPeer
+
 /**
  * Commits trust only after local SAS acceptance AND a remote
  * `pair.confirm { accepted: true }` (security review M-01).
@@ -13,38 +15,58 @@ object PairingCommit {
     }
 
     /**
-     * Sends local decision, waits for remote confirm, then writes trust
-     * through [gate] only when both accepted.
+     * Sends the local decision and waits for the remote decision without
+     * touching local trust. Callers with lifecycle ownership can therefore
+     * commit trust and durable routing in one token-owned critical section.
      */
-    fun finalize(
-        gate: SasConfirmationGate,
+    fun exchange(
         confirm: PairingWireProtocol.PairingConfirmExchange,
         localAccepted: Boolean,
     ): Outcome {
         if (!localAccepted) {
-            gate.reject()
             confirm.submitLocalDecision(false)
             return Outcome.REJECTED
         }
         confirm.submitLocalDecision(true)
         val remote = confirm.awaitRemoteConfirm()
-        when {
-            remote == null -> {
-                gate.reject()
-                return Outcome.INCOMPLETE
-            }
-            !remote -> {
-                gate.reject()
-                return Outcome.REJECTED
-            }
-            confirm.bothAccepted -> {
-                gate.confirm()
-                return Outcome.TRUSTED
-            }
-            else -> {
-                gate.reject()
-                return Outcome.INCOMPLETE
-            }
+        return when {
+            remote == null -> Outcome.INCOMPLETE
+            !remote -> Outcome.REJECTED
+            confirm.bothAccepted -> Outcome.TRUSTED
+            else -> Outcome.INCOMPLETE
         }
     }
+
+    /** Applies an already-negotiated outcome to the local SAS trust gate. */
+    fun commitTrust(
+        gate: SasConfirmationGate,
+        outcome: Outcome,
+        persist: ((TrustedPeer) -> Unit)? = null,
+    ): Outcome =
+        when (outcome) {
+            Outcome.TRUSTED ->
+                if (
+                    (persist?.let { gate.confirm(persist = it) } ?: gate.confirm()) ==
+                    SasConfirmationGate.Outcome.TRUSTED
+                ) {
+                    Outcome.TRUSTED
+                } else {
+                    Outcome.REJECTED
+                }
+            Outcome.REJECTED -> {
+                gate.reject()
+                Outcome.REJECTED
+            }
+            Outcome.INCOMPLETE -> {
+                gate.reject()
+                Outcome.INCOMPLETE
+            }
+        }
+
+    /** Convenience path for owners that need no external lifecycle transaction. */
+    fun finalize(
+        gate: SasConfirmationGate,
+        confirm: PairingWireProtocol.PairingConfirmExchange,
+        localAccepted: Boolean,
+    ): Outcome = commitTrust(gate, exchange(confirm, localAccepted))
 }

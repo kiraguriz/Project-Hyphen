@@ -34,9 +34,27 @@ Android permissions are Hyphen's largest platform risk, and they are moving:
 | Use | FGS type | Rules |
 |---|---|---|
 | Persistent companion link | `connectedDevice` | The only resident service. Notification is always user-visible (transparency feature, not a nuisance to hide). Auto-connect can be disabled in settings. |
-| User-initiated large transfer | `dataSync` | Started only on explicit user action; handles platform timeout by checkpointing and surfacing a resumable state (⚠ exact timeout behavior validated in M1/M3). |
+| User-initiated large transfer | `dataSync` | Started only on explicit user action; an Android 15+ platform timeout stops the stream and tells the user to reopen Hyphen and reselect the file. The current `content://` picker source is not claimed as restart-restorable. |
 | Messaging continuity | `remoteMessaging` | **Not used in v1** (future SMS research track only, P3). |
 | Maintenance/cleanup | none | WorkManager/JobScheduler; no resident service for housekeeping. |
+
+Implementation state (2026-08-30): Android now declares two separate services,
+one `connectedDevice` owner for an explicitly enabled trusted-peer link and one
+`dataSync` owner started only after the user selects a file. Both require a
+displayable notification before starting and re-check channel/app visibility at
+most 60 seconds apart. Revocation pauses TLS. Each user start takes a
+process-scoped reservation before service launch and releases it only after
+sender registration. Normal completion/cancellation is serialized through the
+transfer service and releases `dataSync` only after all reservations and
+outbound protocol work drain. A per-file registration/send failure cancels only
+that file and releases its reservation; a service interruption, visibility loss,
+or API-35 timeout failure-isolates local cleanup for every outbound stream.
+Those terminal paths preserve an opted-in `connectedDevice` link, while an
+otherwise unowned link pauses. Timeout preserves a retry-required flag and makes
+no outbound-checkpoint promise. There is no boot receiver and no
+`BOOT_COMPLETED` start.
+These are host-verified invariants; process-kill, timeout, notification-revocation,
+and OEM behavior still require the device matrix.
 
 ### 4. Notification listener
 
@@ -60,14 +78,14 @@ Android permissions are Hyphen's largest platform risk, and they are moving:
 | `ACCESS_LOCAL_NETWORK` (SDK 37+) | Discovery + LAN transport | Runtime, action-triggered |
 | `POST_NOTIFICATIONS` | FGS notification + transfer status | Runtime |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_DATA_SYNC` | §3 | Install-time + Play declaration |
-| `CAMERA` | QR scan during pairing only | Runtime, requested at scan time; denial falls back to manual entry |
+| none for QR capture | The v1 dependency-free path uses the system camera/QR surface to open a host-filtered `hyphen://pair` deep link; Hyphen validates the complete payload before network I/O. Manual paste remains available | No `CAMERA` permission and no scanner SDK in the app |
 | Notification access (special) | Mirroring | Special access screen, §4 |
-| `REQUEST_COMPANION_SELF_MANAGED` | Self-managed CDM association on API 33+ (Hyphen manages the LAN-TLS link itself; CDM records the relationship). API 29–32 (the `minSdk` floor is 29 per ADR-0008): no CDM association — QR-only pairing with conservative background behavior; a BT-filter legacy association remains an open device-spike question. Decided by HYP-M1-007 | ⚠ API 36+ presence-observation specifics still pend HYP-M1-009 |
+| `REQUEST_COMPANION_SELF_MANAGED` | Self-managed CDM association on API 33+ (Hyphen manages the LAN-TLS link itself; CDM records the relationship). API 29–32: no CDM association — QR-only pairing with conservative background behavior | A process-scoped token owns each platform request across Activity recreation, while an unclaimed approval launcher is replayed only to the current visible Activity. A launcher exception abandons that token so the user can retry and makes any late result stale. Association IDs are durably bound to an already trusted SPKI identity; every Activity-era registry operation reloads storage under one process lock, reconciles against `myAssociations`, and returns IDs for best-effort disassociation on trust reset/removal. A duplicate terminal callback for the same ID is idempotent, while stale callbacks, failed bindings, and displaced approval orphans are best-effort disassociated. Android's app-reported self-managed presence methods are hidden `@SystemApi` in SDK 36, while public presence observation does not support Wi-Fi; CDM therefore does **not** provide v1 LAN-session liveness or replace the visible FGS |
 
 Both distribution tracks share this ceiling; the Play build may *reduce* (never extend) it if review demands (ADR-0004).
 
 ## Consequences
 
 - **Positive**: no Play high-risk permission review in v1; permission denial never bricks the product; the resident FGS notification doubles as the privacy transparency indicator; SDK 37 enforcement arrives with a tested code path instead of an emergency.
-- **Negative / accepted**: QR/manual pairing UX is heavier than invisible discovery — accepted per Gate A cut rule. The visible connection notification may annoy some users — accepted as a transparency trade-off. CAMERA adds one more runtime prompt — scoped to the pairing screen.
+- **Negative / accepted**: QR/manual pairing UX is heavier than invisible discovery — accepted per Gate A cut rule. The visible connection notification may annoy some users — accepted as a transparency trade-off. Depending on the system QR surface is device-specific, so manual paste remains the no-permission fallback.
 - **Validation hooks**: HYP-M1-002..009 PoCs confirm every ⚠ above; manifest diffs are reviewed against this ADR, and any new permission requires updating this ADR first.

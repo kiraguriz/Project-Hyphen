@@ -8,6 +8,14 @@
          HYP-M1-005). -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- User-visible Android foreground work (ADR-0003 §3). The connection
+         and user-initiated transfer services are separate so dataSync can
+         terminate independently at completion/timeout. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Self-managed CDM association, API 33+ (ADR-0003 §6, HYP-M1-007). -->
     <uses-permission android:name="android.permission.REQUEST_COMPANION_SELF_MANAGED" />
     <uses-feature
@@ -23,23 +31,33 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Dependency-free QR journey: the system camera/browser opens
+                 the protocol's custom pairing URI; MainActivity still parses
+                 and validates the entire payload before any network action. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="hyphen" android:host="pair" />
+            </intent-filter>
         </activity>
 
-        <!-- System-bound while an observed companion is present
-             (HYP-M1-009; docs/spikes/api36-device-presence.md). -->
         <service
-            android:name=".companion.HyphenCompanionDeviceService"
-            android:exported="true"
-            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
-            <intent-filter>
-                <action android:name="android.companion.CompanionDeviceService" />
-            </intent-filter>
-        </service>
+            android:name=".service.HyphenConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".service.HyphenTransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Android notification mirror entry point (HYP-M3-001).
              The user must enable this service explicitly in system settings;

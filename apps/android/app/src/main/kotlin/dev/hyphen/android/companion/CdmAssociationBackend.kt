@@ -1,7 +1,6 @@
 package dev.hyphen.android.companion
 
 import android.annotation.TargetApi
-import android.app.Activity
 import android.companion.AssociationInfo
 import android.companion.AssociationRequest
 import android.companion.CompanionDeviceManager
@@ -14,10 +13,12 @@ import android.os.Build
  * are SDK-gated by [AssociationController]; the runtime checks here are
  * defense in depth for direct callers.
  */
-class CdmAssociationBackend(private val activity: Activity) : CdmBackend {
+class CdmAssociationBackend(context: Context) : CdmBackend {
+
+    private val appContext = context.applicationContext
 
     private val cdm: CompanionDeviceManager =
-        activity.getSystemService(Context.COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
+        appContext.getSystemService(Context.COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
 
     override fun sdkInt(): Int = Build.VERSION.SDK_INT
 
@@ -38,14 +39,14 @@ class CdmAssociationBackend(private val activity: Activity) : CdmBackend {
 
         cdm.associate(
             request,
-            activity.mainExecutor,
+            appContext.mainExecutor,
             object : CompanionDeviceManager.Callback() {
                 override fun onAssociationPending(intentSender: IntentSender) {
-                    callbacks.onPendingApproval {
+                    callbacks.onPendingApproval(AssociationApprovalRequest { activity ->
                         activity.startIntentSenderForResult(
                             intentSender, ASSOCIATION_REQUEST_CODE, null, 0, 0, 0,
                         )
-                    }
+                    })
                 }
 
                 override fun onAssociationCreated(associationInfo: AssociationInfo) {

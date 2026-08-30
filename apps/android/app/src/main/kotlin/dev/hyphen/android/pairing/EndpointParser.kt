@@ -1,5 +1,8 @@
 package dev.hyphen.android.pairing
 
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.util.Base64
 
 /**
@@ -61,15 +64,28 @@ object EndpointParser {
     private const val SUPPORTED_VERSION = 0
     private const val FINGERPRINT_BYTES = 32
     private const val NONCE_BYTES = 16
+    private const val MAX_DEVICE_NAME_LENGTH = 80
+    private val QR_FIELDS = setOf("v", "ep", "fp", "n", "dn")
 
     /** Parses user-typed `host:port` or `host:port?n=<base64url nonce>`. IPv6 literals are an M2 follow-up. */
     fun parseManual(input: String): ParseResult {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return ParseResult.Rejected(RejectReason.EMPTY)
         if (trimmed.length > MAX_INPUT_LENGTH) return ParseResult.Rejected(RejectReason.TOO_LARGE)
-        val nonceB64 = trimmed.substringAfter('?', missingDelimiterValue = "")
-            .removePrefix("n=")
-            .takeIf { trimmed.contains('?') && it.isNotEmpty() }
+        val hasQuery = trimmed.contains('?')
+        val nonceB64 = if (hasQuery) {
+            if (trimmed.count { it == '?' } != 1) {
+                return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+            }
+            val query = trimmed.substringAfter('?')
+            if (!query.startsWith("n=") || query.contains('&') || query.indexOf('=') != 1) {
+                return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+            }
+            query.removePrefix("n=").takeIf(String::isNotEmpty)
+                ?: return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+        } else {
+            null
+        }
         val hostPortInput = trimmed.substringBefore('?')
         val hostPort = parseHostPort(hostPortInput) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
         if (nonceB64 != null && !isBase64UrlOfLength(nonceB64, NONCE_BYTES)) {
@@ -78,20 +94,30 @@ object EndpointParser {
         return ParseResult.Ok(ParsedEndpoint.Manual(hostPort.first, hostPort.second, nonceB64))
     }
 
-    /** Parses a scanned QR payload. All of v/ep/fp/n are required (§5.1). */
+    /** Parses a scanned QR payload. v/ep/n are required; fp is optional for manual SAS (§5.1). */
     fun parseQr(input: String): ParseResult {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return ParseResult.Rejected(RejectReason.EMPTY)
         if (trimmed.length > MAX_INPUT_LENGTH) return ParseResult.Rejected(RejectReason.TOO_LARGE)
         if (!trimmed.startsWith(QR_PREFIX)) return ParseResult.Rejected(RejectReason.UNKNOWN_SCHEME)
 
+        val rawQuery = trimmed.removePrefix(QR_PREFIX)
+        if (
+            rawQuery.isEmpty() ||
+            rawQuery.startsWith('&') ||
+            rawQuery.endsWith('&') ||
+            "&&" in rawQuery
+        ) {
+            return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+        }
         val params = mutableMapOf<String, String>()
-        for (pair in trimmed.removePrefix(QR_PREFIX).split('&')) {
-            if (pair.isEmpty()) continue
+        for (pair in rawQuery.split('&')) {
+            if (pair.isEmpty()) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
             val eq = pair.indexOf('=')
             if (eq <= 0) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
             val key = pair.substring(0, eq)
             val value = pair.substring(eq + 1)
+            if (key !in QR_FIELDS) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
             if (key in params) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
             params[key] = value
         }
@@ -110,7 +136,17 @@ object EndpointParser {
         }
         if (!isBase64UrlOfLength(n, NONCE_BYTES)) return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
 
-        val deviceName = params["dn"]?.let { urlDecodeOrNull(it) ?: return ParseResult.Rejected(RejectReason.MALFORMED_FIELD) }
+        val deviceName = params["dn"]?.let {
+            if (!isCanonicalPercentEncodedValue(it)) {
+                return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+            }
+            val decoded = percentDecodeUtf8OrNull(it)
+                ?: return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+            if (!isSafeDeviceName(decoded)) {
+                return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
+            }
+            decoded
+        }
 
         return ParseResult.Ok(
             ParsedEndpoint.QrPayload(
@@ -129,7 +165,7 @@ object EndpointParser {
         if (colon <= 0 || colon == value.length - 1) return null
         val host = value.substring(0, colon)
         // PoC scope: reject IPv6 literals (extra colons) instead of mis-parsing.
-        if (host.contains(':') || host.contains('/') || host.any { it.isWhitespace() }) return null
+        if (host.any { !it.isAsciiHostCharacter() }) return null
         if (host.length > 253) return null
         val port = value.substring(colon + 1).toIntOrNull() ?: return null
         if (port !in 1..65535) return null
@@ -138,15 +174,85 @@ object EndpointParser {
 
     private fun isBase64UrlOfLength(value: String, expectedBytes: Int): Boolean =
         try {
-            Base64.getUrlDecoder().decode(value).size == expectedBytes
+            val expectedCharacters = (expectedBytes * 8 + 5) / 6
+            value.length == expectedCharacters &&
+                value.all { it.isLetterOrDigit() && it.code < 128 || it == '-' || it == '_' } &&
+                Base64.getUrlDecoder().decode(value).size == expectedBytes
         } catch (_: IllegalArgumentException) {
             false
         }
 
-    private fun urlDecodeOrNull(value: String): String? =
-        try {
-            java.net.URLDecoder.decode(value, Charsets.UTF_8.name())
-        } catch (_: IllegalArgumentException) {
-            null
+    private fun Char.isAsciiHostCharacter(): Boolean =
+        code < 128 && (isLetterOrDigit() || this == '-' || this == '.')
+
+    private fun isSafeDeviceName(value: String): Boolean =
+        value.isNotEmpty() &&
+            value.codePointCount(0, value.length) <= MAX_DEVICE_NAME_LENGTH &&
+            value.codePoints().allMatch { codePoint ->
+                val type = Character.getType(codePoint)
+                type != Character.CONTROL.toInt() && type != Character.FORMAT.toInt()
+                    && type != Character.SURROGATE.toInt()
+            }
+
+    /** macOS emits raw RFC 3986 unreserved bytes and %HH for everything else. */
+    private fun isCanonicalPercentEncodedValue(value: String): Boolean {
+        var index = 0
+        while (index < value.length) {
+            val current = value[index]
+            if (current == '%') {
+                if (
+                    index + 2 >= value.length ||
+                    Character.digit(value[index + 1], 16) < 0 ||
+                    Character.digit(value[index + 2], 16) < 0
+                ) return false
+                index += 3
+            } else {
+                if (
+                    current.code >= 128 ||
+                    !(current.isLetterOrDigit() || current == '-' || current == '.' || current == '_' || current == '~')
+                ) return false
+                index += 1
+            }
         }
+        return true
+    }
+
+    /** RFC 3986 percent decoding: `%2B` becomes `+` and malformed UTF-8 fails closed. */
+    private fun percentDecodeUtf8OrNull(value: String): String? {
+        val bytes = ByteArrayOutputStream(value.length)
+        var index = 0
+        while (index < value.length) {
+            val current = value[index]
+            if (current == '%') {
+                if (index + 2 >= value.length) return null
+                val high = Character.digit(value[index + 1], 16)
+                val low = Character.digit(value[index + 2], 16)
+                if (high < 0 || low < 0) return null
+                bytes.write((high shl 4) or low)
+                index += 3
+                continue
+            }
+
+            val end = when {
+                Character.isHighSurrogate(current) -> {
+                    if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) {
+                        return null
+                    }
+                    index + 2
+                }
+                Character.isLowSurrogate(current) -> return null
+                else -> index + 1
+            }
+            bytes.write(value.substring(index, end).toByteArray(Charsets.UTF_8))
+            index = end
+        }
+
+        return runCatching {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes.toByteArray()))
+                .toString()
+        }.getOrNull()
+    }
 }

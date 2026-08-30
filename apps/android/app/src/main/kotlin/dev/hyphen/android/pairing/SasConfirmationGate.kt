@@ -34,9 +34,12 @@ class SasConfirmationGate(
      * rejection (a dead pairing session can never become trusted).
      */
     @Synchronized
-    fun confirm(nowEpochMs: Long = System.currentTimeMillis()): Outcome {
+    fun confirm(
+        nowEpochMs: Long = System.currentTimeMillis(),
+        persist: (TrustedPeer) -> Unit = trustStore::add,
+    ): Outcome {
         outcome?.let { return it }
-        trustStore.add(TrustedPeer(peerFingerprint, peerDisplayName, nowEpochMs))
+        persist(TrustedPeer(peerFingerprint.copyOf(), peerDisplayName, nowEpochMs))
         outcome = Outcome.TRUSTED
         return Outcome.TRUSTED
     }

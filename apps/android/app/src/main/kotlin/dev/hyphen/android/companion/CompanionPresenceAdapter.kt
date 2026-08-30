@@ -14,8 +14,8 @@ data class HyphenAssociationRequest(val peerId: PeerId, val displayName: String)
 sealed class PresenceAssociationResult {
     data class Associated(val associationId: Int) : PresenceAssociationResult()
 
-    /** User approval dialog required; invoke [launch] from an Activity. */
-    data class PendingUserApproval(val launch: () -> Unit) : PresenceAssociationResult()
+    /** User approval dialog required; launch it from the current Activity. */
+    data class PendingUserApproval(val approval: AssociationApprovalRequest) : PresenceAssociationResult()
     data class Failed(val message: String) : PresenceAssociationResult()
     object Unsupported : PresenceAssociationResult()
 }
@@ -39,7 +39,7 @@ interface CompanionPresenceAdapter {
     fun disassociate(peerId: PeerId, onResult: (Boolean) -> Unit)
 }
 
-/** Platform feed for API 36+ device-presence events (real impl: HYP-M1-009 spike). */
+/** Compile-spike feed for public API 36 BLE/BT events; not a LAN product feed. */
 interface PresenceSource {
     fun startObserving(peerId: PeerId, onEvent: (PresenceEvent) -> Unit)
     fun stopObserving(peerId: PeerId)
@@ -78,8 +78,8 @@ abstract class CdmBackedPresenceAdapter(
         backend.requestSelfManagedAssociation(
             request.displayName,
             object : CdmCallbacks {
-                override fun onPendingApproval(launch: () -> Unit) {
-                    onResult(PresenceAssociationResult.PendingUserApproval(launch))
+                override fun onPendingApproval(approval: AssociationApprovalRequest) {
+                    onResult(PresenceAssociationResult.PendingUserApproval(approval))
                 }
 
                 override fun onAssociated(associationId: Int, displayName: String?) {
@@ -121,7 +121,7 @@ class LegacyPresenceAdapter(backend: CdmBackend) : CdmBackedPresenceAdapter(back
 }
 
 /**
- * API 36+ (`ObservingDevicePresenceRequest` / `DevicePresenceEvent` path).
+ * Compile-spike API 36+ (`ObservingDevicePresenceRequest` / `DevicePresenceEvent`) path.
  * Consumes a [PresenceSource]; suppresses consecutive duplicate events per
  * peer so flapping radios do not turn into reconnect storms.
  */

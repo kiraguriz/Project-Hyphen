@@ -146,6 +146,8 @@
     <string name="dlg_assoc_remove_title">移除关联 #%1$d？</string>
     <string name="dlg_assoc_remove_msg">这只会移除 Android 的系统伴侣关联。Hyphen 固定的设备信任需在“已配对设备”中单独管理。</string>
     <string name="dlg_assoc_remove_confirm">移除关联</string>
+    <string name="dlg_assoc_requires_peer_title">请先配对 Mac</string>
+    <string name="dlg_assoc_requires_peer_msg">系统伴侣关联只能绑定到一个已通过二维码或 SAS 验证的 Mac。请先完成 Hyphen 配对，再创建关联。</string>
 
     <!-- Dialogs: SAS pairing -->
     <string name="dlg_sas_title">确认配对码</string>
@@ -172,4 +174,47 @@
 
     <!-- Dialogs: diagnostics preview -->
     <string name="dlg_diag_preview_title">诊断预览</string>
+
+    <!-- User-visible foreground companion services -->
+    <string name="fgs_channel_name">Hyphen 伴侣连接</string>
+    <string name="fgs_channel_description">显示与已配对 Mac 的本地连接和用户主动传输。</string>
+    <string name="fgs_connection_title">Hyphen 伴侣连接</string>
+    <string name="fgs_connection_connecting">正在连接已配对的 Mac</string>
+    <string name="fgs_connection_connected">已通过本地 TLS 连接</string>
+    <string name="fgs_connection_degraded">连接不稳定，正在恢复</string>
+    <string name="fgs_connection_paused">连接已暂停；打开 Hyphen 可恢复</string>
+    <string name="fgs_connection_retry_required">传输已停止；打开 Hyphen 并重新选择文件</string>
+    <string name="fgs_disconnect_action">断开</string>
+    <string name="fgs_transfer_title">Hyphen 文件传输</string>
+    <string name="fgs_transfer_active">正在向已配对的 Mac 传输；可在 Hyphen 中取消</string>
+    <string name="fgs_transfer_stopped_title">Hyphen 传输已停止</string>
+    <string name="fgs_transfer_stopped_body">平台时限已到；请打开 Hyphen 并重新选择文件后重试。</string>
+
+    <!-- Companion-link / QR journey -->
+    <string name="perm_companion_title">后台伴侣连接</string>
+    <string name="perm_companion_on_detail">前台服务通知保持可见；可随时断开。</string>
+    <string name="perm_companion_off_detail">仅在你明确开启后维持后台连接。</string>
+    <string name="perm_companion_badge_on">已开启</string>
+    <string name="perm_companion_badge_off">已关闭</string>
+    <string name="perm_btn_companion_on">断开</string>
+    <string name="perm_btn_companion_off">保持连接</string>
+    <string name="perm_qr_title">系统相机扫码</string>
+    <string name="perm_qr_detail">用系统相机扫描 Mac 的 Hyphen 二维码；配对链接会回到本应用校验。</string>
+    <string name="perm_btn_qr_help">如何扫码</string>
+    <string name="dlg_qr_help_title">扫描 Mac 上的二维码</string>
+    <string name="dlg_qr_help_msg">1. 在 Mac 的 Hyphen 菜单中打开“配对新设备”。\n2. 用 Android 系统相机扫描二维码。\n3. 点开 hyphen://pair 链接返回本应用。\n4. 只有两端配对码一致时才确认信任。\n\n该路径不需要 Hyphen 读取相机，也不会添加第三方扫码 SDK。</string>
+    <string name="dlg_companion_title">保持与 Mac 的连接？</string>
+    <string name="dlg_companion_msg">Hyphen 会运行一个 connectedDevice 前台服务，并持续显示通知。连接仅在局域网 TLS 上与已配对 Mac 通信；不会使用云端中继或遥测。你可以随时从通知或本页面断开。</string>
+    <string name="dlg_companion_enable">开启并显示通知</string>
+    <string name="dlg_companion_requires_peer_msg">后台伴侣连接只能连接一个已通过二维码或 SAS 验证的 Mac。请先完成配对。</string>
+    <string name="dlg_companion_settings_title">无法显示伴侣连接通知</string>
+    <string name="dlg_companion_settings_msg">为保持透明，Hyphen 不会在通知不可见时维持后台连接。请在系统设置中允许 Hyphen 通知后重试。</string>
+    <string name="dlg_open_app_notification_settings">打开通知设置</string>
+    <string name="dlg_discovery_none_title">未发现 Mac</string>
+    <string name="dlg_discovery_none_msg">本次局域网发现没有结果。你仍可使用系统相机扫描 Mac 的配对二维码，或粘贴 Mac 配对页面提供的地址与 nonce。</string>
+    <string name="dlg_discovery_found_title">发现 %1$d 台 Mac</string>
+    <string name="dlg_discovery_found_msg">%1$s\n\n发现结果只是局域网提示，不是信任凭据。请在其中一台 Mac 上打开 Hyphen 配对页面并扫描二维码。</string>
+    <string name="dlg_transfer_notification_title">允许显示传输状态？</string>
+    <string name="dlg_transfer_notification_msg">选择文件会暂时离开 Hyphen。为避免隐藏的后台连接，Hyphen 会先开启可见的伴侣连接通知，并在发送期间显示 dataSync 通知。伴侣连接会保持开启，直到你从通知或本页面断开。</string>
+    <string name="dlg_transfer_notification_continue">允许并选择文件</string>
 </resources>

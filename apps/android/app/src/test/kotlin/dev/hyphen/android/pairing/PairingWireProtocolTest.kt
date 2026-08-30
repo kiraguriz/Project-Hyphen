@@ -54,7 +54,9 @@ class PairingWireProtocolTest {
             device = PairingWireProtocol.WireDeviceInfo("android", "0.0.1", "Phone"),
         )
         val clientGate = makeGate(peerFp = macFp, macFp = macFp, androidFp = androidFp, peerName = "Mac")
-        val clientOutcome = PairingCommit.finalize(clientGate.gate, wire.confirm, localAccepted = true)
+        val wireOutcome = PairingCommit.exchange(wire.confirm, localAccepted = true)
+        assertTrue(clientGate.store.allPeers().isEmpty())
+        val clientOutcome = PairingCommit.commitTrust(clientGate.gate, wireOutcome)
 
         assertEquals(PairingCommit.Outcome.TRUSTED, clientOutcome)
         assertEquals(PairingCommit.Outcome.TRUSTED, serverOutcome.poll(5, TimeUnit.SECONDS))

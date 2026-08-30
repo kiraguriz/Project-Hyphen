@@ -4,6 +4,8 @@
 
 本文件只覆盖 `docs/Project-Hyphen-security-architecture-review.md` 中与“产品生命周期和连续性”相关的说法。源评审仅作为未信任输入；下面结论基于当前仓库文件的静态核验，不把源评审、旧 tracker 日志或测试文件存在本身当作事实。
 
+> 时间边界：下方“审计结论表”保留 2026-06-18 初次核验快照；文件末尾带日期的实施更新会覆盖已修复事实。不要把快照中的 `confirmed` 当作 2026-08-30 当前状态。
+
 覆盖源发现：
 
 - A. 功能性、B. 完整性中“产品路径未闭环”的说法。
@@ -238,6 +240,8 @@
 **更新（2026-06-18）**：应安全架构全量实施请求，tracker 已同步 `HYP-M2-013/015`、`HYP-M2-016`、`HYP-M3-011/012/016` 与进度日志；历史 `[x]` 组件证据保留在进度日志中。
 
 **更新（2026-08-30）**：ADR-0009 与两端 `PeerLinkLifecycle` 已落地上述 remembered-endpoint 存储决策。自动化覆盖 exact-trust restore、stale/corrupt fail-closed、重复 restore 所有权、串行 remember/invalidate 和 revoke invalidation；两端 product owner 还用 lock-protected generation（Android 另含唯一 reconnect owner token，macOS 另含 steady-session callback ticket）拒绝撤销后迟到的 listener/session activation 及 envelope/ACK/timeout/close 回调。重新配对会退役旧 owner，以 clear-before-save 串行替换 current route，并在替换尝试完成后才发布新 peer；durable clear 成功后若新 save 失败或中断会留下无 current route，底层 clear 自身失败则记录诊断且仍由 authoritative trust lookup 兜底，不冒充已完成替换。macOS 只有在 generation 验证成功后才替换 callback ticket，跟踪并在 re-pair/revoke 时取消 accepted handshake，旧 generation 的失败不能重装新 listener，resume-token issuance 也受 peer/reset invalidation epoch 约束；Android 的首次目录创建会同步每一层父目录 entry。以上是 host-level store/controller seam 证据，不是真实 app 进程启动证据；kill/relaunch、端口占用、DHCP/Wi-Fi 变化及 Android background/FGS 仍属于 environment-only gate。
+
+**更新（2026-08-30，Android FGS/配对入口）**：A-4 的“没有前台服务产品路径”在 host 代码层已解决。manifest 现在只声明 `connectedDevice` 与 `dataSync` 两类 FGS，并由两个独立 service 承载；前者只在已配对用户明确开启后恢复 pinned LAN-TLS，后者只在用户选定文件后启动，完成/取消/超时独立停止。每个用户启动在 service launch 前取得 process-scoped reservation，直到 sender 注册协议工作后才释放；正常 drain 只有在 reservation 与 outbound work 同时清空后才停止，且 supervisor 不再持自身 state lock 调用 sender monitor。两者启动前检查通知权限、app 开关与 channel 可见性，并以最长 60 秒 watchdog 复查；不可见时暂停 TLS。当前 Android picker 的 `content://` 流没有可重建 source path，因此超时只记录 retry-required，并明确要求用户重新选择文件，不宣称保留了可恢复的 outbound checkpoint。未开启 persistent link 时 Activity 离开前台会取消 provisional pairing 并暂停 session，文件选择会先向用户说明并开启可见 companion notification。系统相机/QR deep link 是 host-filtered、全量解析后才联网的无 CAMERA 权限路径；manual paste 保留。CDM association ID 只绑定已信任 SPKI，不能授权 TLS；platform association request 由 process token 跨 Activity recreation 持有，pending approval 只交给当前可见 Activity，同一 ID 的重复 terminal callback 为幂等。复核 SDK 36 后确认 self-managed appeared/disappeared 报告是隐藏 `@SystemApi`，故 CDM 不能被宣称为第三方 LAN presence 生命周期 owner。以上仍不是设备证明：通知撤销、API-35 timeout、process kill、Doze/OEM、系统相机 handoff 与 API 33+ CDM dialog 均属 environment-only，HYP-M2-016 保持 `[~]`。
 
 ## 本次审计验证状态
 
