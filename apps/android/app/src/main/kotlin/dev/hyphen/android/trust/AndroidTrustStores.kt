@@ -37,12 +37,12 @@ object AndroidTrustStores {
         val lock = locksByCanonicalPath.getOrPut(file.canonicalPath) { Any() }
         return EncryptedFilePeerTrustStore(
             file = file,
-            cipher = AesGcmTrustCipher(getOrCreateKey()),
+            cipher = AesGcmTrustCipher(getOrCreateKeyForLocalStores()),
             crossInstanceLock = lock,
         )
     }
 
-    private fun getOrCreateKey(): SecretKey {
+    internal fun getOrCreateKeyForLocalStores(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)

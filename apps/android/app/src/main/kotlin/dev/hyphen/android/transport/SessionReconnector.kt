@@ -53,7 +53,11 @@ class SessionReconnector(
     }
 
     interface Listener {
-        /** A live session (fresh or resumed). Runs on the dial thread. */
+        /**
+         * An authenticated session (fresh or resumed), ready for owner
+         * adoption. Runs on the dial thread before session I/O starts so a
+         * concurrent trust revoke can reject and close it atomically.
+         */
         fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result)
         fun onRetryScheduled(attempt: Int, delaySeconds: Long) {}
         fun onAttemptFailed(reason: String?) {}
@@ -194,12 +198,12 @@ class SessionReconnector(
             runCatching { connectedSocket.close() }
             return
         }
-        session.start()
+        listener.onSession(session, handshake)
         if (stopped.get()) {
             session.stop()
             return
         }
-        listener.onSession(session, handshake)
+        session.start()
     }
 
     private fun finishAttempt(id: Long) {

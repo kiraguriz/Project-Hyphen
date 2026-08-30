@@ -197,6 +197,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         observer.start()
         sleepWakeObserver = observer
+
+        let controller = ensurePairingController()
+        if controller.restorePersistedLink() {
+            lnpGate.run(action: {
+                controller.requestReconnect()
+            }) { complete in
+                complete(Self.presentLocalNetworkExplanation())
+            }
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -527,33 +536,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a network-touching action (HYP-M1-012 rule).
         lnpGate.run(action: { [weak self] in
             guard let self else { return }
-            if self.pairingController == nil {
-                self.pairingController = PairingController(
-                    diagnosticLogs: self.diagnosticLogs,
-                    notificationPrivacyPolicy: { [weak self] in
-                        self?.notificationPrivacyPolicy() ?? .allowAll
-                    },
-                    onActivity: { [weak self] event in
-                        // A confirmed pairing writes a new trusted peer just
-                        // before the session connects; drop the cache on either
-                        // the peer-identity change or the connect so the settings
-                        // view always resolves the fresh peer.
-                        switch event {
-                        case .peerChanged, .connectionStateChanged(.connected, _):
-                            self?.invalidateTrustedPeerCache()
-                        default:
-                            break
-                        }
-                        self?.appModel.apply(event)
-                    }
-                ) { [weak self] status in
-                    self?.stateItem.title = status
-                }
-            }
-            self.pairingController?.beginPairing()
+            self.ensurePairingController().beginPairing()
         }) { complete in
             complete(Self.presentLocalNetworkExplanation())
         }
+    }
+
+    private func ensurePairingController() -> PairingController {
+        if let pairingController { return pairingController }
+        let controller = PairingController(
+            diagnosticLogs: diagnosticLogs,
+            notificationPrivacyPolicy: { [weak self] in
+                self?.notificationPrivacyPolicy() ?? .allowAll
+            },
+            onActivity: { [weak self] event in
+                // A confirmed pairing writes a new trusted peer just before the
+                // session connects; invalidate the settings cache on identity
+                // or live-connect transitions.
+                switch event {
+                case .peerChanged, .connectionStateChanged(.connected, _):
+                    self?.invalidateTrustedPeerCache()
+                default:
+                    break
+                }
+                self?.appModel.apply(event)
+            }
+        ) { [weak self] status in
+            self?.stateItem.title = status
+        }
+        pairingController = controller
+        return controller
     }
 
     @objc private func sendTextLink(_ sender: NSMenuItem) {

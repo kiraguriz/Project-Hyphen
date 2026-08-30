@@ -8,6 +8,109 @@ import HyphenTransfer
 import Network
 import UniformTypeIdentifiers
 
+protocol InteractiveNotificationPresenter: NotificationPresenter {
+    func setDismissHandler(_ handler: ((String) -> Void)?)
+    func setReplyHandler(_ handler: ((String, Int, String?, String) -> Void)?)
+}
+
+extension UserNotificationCenterPresenter: InteractiveNotificationPresenter {}
+
+protocol TrustedPeerReconnectListener: AnyObject {
+    func start(
+        port: UInt16,
+        queue: DispatchQueue,
+        onState: @escaping (TLSEndpointListener.State) -> Void,
+        onConnection: @escaping (NWConnection) -> Void,
+        onConnectionState: ((NWConnection, NWConnection.State) -> Void)?
+    ) throws
+    func stop()
+}
+
+extension TLSEndpointListener: TrustedPeerReconnectListener {}
+
+typealias SteadyHandshakeResponder = (
+    NWConnection,
+    SessionHandshake.DeviceInfo,
+    Data,
+    ResumeTokenStore,
+    ResumeTokenStore.Issuance,
+    DispatchQueue,
+    @escaping (Result<SessionHandshake.HandshakeResult, Error>) -> Void
+) -> Void
+
+struct SessionCallbackOwnership: Equatable {
+    let token: UUID
+    let generation: UInt64
+    let peerFingerprint: Data
+}
+
+/// Serializes live-session callbacks against replacement and trust revocation.
+/// The recursive lock permits an app callback to synchronously trigger revoke
+/// without deadlocking; revocation still invalidates the ticket before any
+/// later callback can mutate product state.
+final class SessionCallbackOwnershipGate {
+    private let lock = NSRecursiveLock()
+    private var current: SessionCallbackOwnership?
+
+    func activate(_ ownership: SessionCallbackOwnership) {
+        _ = activate(ownership, ifAccepted: { true })
+    }
+
+    /// Replaces the current ticket only after the caller atomically proves the
+    /// candidate still owns the product session. A rejected stale handshake
+    /// must never displace callbacks for a newer live session.
+    @discardableResult
+    func activate(
+        _ ownership: SessionCallbackOwnership,
+        ifAccepted: () -> Bool
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ifAccepted() else { return false }
+        current = ownership
+        return true
+    }
+
+    @discardableResult
+    func withCurrent(_ ownership: SessionCallbackOwnership, action: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard current == ownership else { return false }
+        action()
+        return true
+    }
+
+    @discardableResult
+    func consumeCurrent(_ ownership: SessionCallbackOwnership, action: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard current == ownership else { return false }
+        current = nil
+        action()
+        return true
+    }
+
+    func invalidate() {
+        lock.lock()
+        current = nil
+        lock.unlock()
+    }
+
+    func invalidate(ifCurrent ownership: SessionCallbackOwnership) {
+        lock.lock()
+        if current == ownership {
+            current = nil
+        }
+        lock.unlock()
+    }
+
+    func isCurrent(_ ownership: SessionCallbackOwnership) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return current == ownership
+    }
+}
+
 /// Mac side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
 /// shows the QR (HYP-M2-009), accepts ONE provisional TLS connection —
 /// any client certificate is admitted but its SPKI fingerprint is
@@ -18,9 +121,15 @@ import UniformTypeIdentifiers
 /// owned here (HYP-M2-012/013 product wiring).
 final class PairingController: NSObject {
 
+    private struct PendingSteadyConnection {
+        let connection: NWConnection
+        let generation: UInt64
+        let peerFingerprint: Data
+    }
+
     private let queue = DispatchQueue(label: "hyphen-pairing")
     private var listener: TLSEndpointListener?
-    private var steadyListener: TLSEndpointListener?
+    private var steadyListener: TrustedPeerReconnectListener?
     private var pairingAttemptID: UUID?
     // Section C pairing surface: the design SwiftUI window (QR + SAS) hosted in
     // a borderless window. Only the presentation changed here — the listener,
@@ -33,18 +142,22 @@ final class PairingController: NSObject {
     private var pairingConfirm: PairingWireProtocol.PairingConfirmExchange?
     private var activeSession: ProtocolSession?
     private var activeSessionToken: UUID?
+    private var activeSessionOwnership: SessionCallbackOwnership?
+    private let sessionCallbackGate = SessionCallbackOwnershipGate()
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities?
     private var activeTransferSender: TransferSender?
     private let tokenStore = ResumeTokenStore()
     private let transferCheckpointStore = TransferCheckpointStore()
     // Reconnect/trust state is touched from both `queue` (reconnect listener)
     // and the main thread (trust revoke); `reconnectLock` guards all of it.
-    private let reconnectLock = NSLock()
+    private let reconnectLock = NSRecursiveLock()
     private var rememberedPeerFingerprint: Data?
     private var rememberedDeviceName: String?
     private var rememberedListenPort: UInt16?
     private var stoppedForTrustChange = false
     private var reconnectSessionActive = false
+    private var peerLinkGeneration: UInt64 = 0
+    private var pendingSteadyConnections: [ObjectIdentifier: PendingSteadyConnection] = [:]
     private let textReceiver = TextLinkReceiver()
     private var lastTransferProgress: TransferProgress?
     private lazy var transferReceiver = TransferReceiver(
@@ -59,14 +172,10 @@ final class PairingController: NSObject {
         ),
         checkpointStore: transferCheckpointStore,
         onProgress: { [weak self] progress in
-            DispatchQueue.main.async {
-                self?.lastTransferProgress = progress
-                self?.onStatus(Self.transferProgressLine(progress))
-                self?.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
-            }
+            self?.recordIncomingTransferProgress(progress)
         }
     )
-    private let notificationPresenter = UserNotificationCenterPresenter()
+    private let notificationPresenter: InteractiveNotificationPresenter
     // Mirrors every presented (post-scrub) notification into the activity feed
     // while forwarding to the real system presenter. The receiver below talks to
     // this decorator; `setReply/DismissHandler` still target `notificationPresenter`.
@@ -89,17 +198,53 @@ final class PairingController: NSObject {
         }
     )
     private let diagnosticLogs: LocalStructuredLogStore
+    private let peerLinkLifecycle: PeerLinkLifecycle
+    private let reconnectListenerFactory: (String, SPKIPinVerifier) throws -> TrustedPeerReconnectListener
+    private let steadyHandshakeResponder: SteadyHandshakeResponder
     private let onStatus: (String) -> Void
     private let onActivity: (ActivityEvent) -> Void
     private let notificationPrivacyPolicy: () -> NotificationPrivacyPolicy
 
     init(
         diagnosticLogs: LocalStructuredLogStore = LocalStructuredLogStore(),
+        peerLinkLifecycle: PeerLinkLifecycle = PersistentPeerLinkLifecycle(
+            store: KeychainPeerLinkStore(),
+            trustStore: KeychainTrustStore()
+        ),
+        notificationPresenter: InteractiveNotificationPresenter = UserNotificationCenterPresenter(),
+        reconnectListenerFactory: @escaping (String, SPKIPinVerifier) throws -> TrustedPeerReconnectListener = {
+            deviceName,
+            verifier in
+            let identity = try KeychainIdentityStore().loadOrCreate(commonName: deviceName)
+            return TLSEndpointListener(identity: identity, verifier: verifier)
+        },
+        steadyHandshakeResponder: @escaping SteadyHandshakeResponder = {
+            connection,
+            device,
+            peerFingerprint,
+            tokenStore,
+            tokenIssuance,
+            queue,
+            completion in
+            SessionHandshake.respond(
+                connection: connection,
+                device: device,
+                peerFingerprint: peerFingerprint,
+                tokenStore: tokenStore,
+                tokenIssuance: tokenIssuance,
+                queue: queue,
+                completion: completion
+            )
+        },
         notificationPrivacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll },
         onActivity: @escaping (ActivityEvent) -> Void = { _ in },
         onStatus: @escaping (String) -> Void
     ) {
         self.diagnosticLogs = diagnosticLogs
+        self.peerLinkLifecycle = peerLinkLifecycle
+        self.notificationPresenter = notificationPresenter
+        self.reconnectListenerFactory = reconnectListenerFactory
+        self.steadyHandshakeResponder = steadyHandshakeResponder
         self.notificationPrivacyPolicy = notificationPrivacyPolicy
         self.onActivity = onActivity
         self.onStatus = onStatus
@@ -218,17 +363,22 @@ final class PairingController: NSObject {
     }
 
     func endPairing() {
+        sessionCallbackGate.invalidate()
         listener?.stop()
         listener = nil
         reconnectLock.lock()
         let steady = steadyListener
         steadyListener = nil
+        let pendingSteady = pendingSteadyConnections.values.map(\.connection)
+        pendingSteadyConnections.removeAll()
         reconnectSessionActive = false
         reconnectLock.unlock()
         steady?.stop()
+        pendingSteady.forEach { $0.cancel() }
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
+        activeSessionOwnership = nil
         lastTransferProgress = nil
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
@@ -306,9 +456,60 @@ final class PairingController: NSObject {
         }
     }
 
+    /// Restore the one v0 listener descriptor only after its fingerprint is
+    /// revalidated against the current trust store. Starting the listener stays
+    /// with the app delegate so Local Network onboarding remains the gate.
+    @discardableResult
+    func restorePersistedLink() -> Bool {
+        reconnectLock.lock()
+        let generation = peerLinkGeneration
+        let alreadyOwned = rememberedPeerFingerprint != nil
+            || steadyListener != nil
+            || reconnectSessionActive
+            || activeSession != nil
+            || stoppedForTrustChange
+        reconnectLock.unlock()
+        guard !alreadyOwned else { return false }
+
+        let restored: RestoredPeerLink
+        do {
+            guard let value = try peerLinkLifecycle.restoreTrusted() else { return false }
+            restored = value
+        } catch {
+            recordPeerLinkFailure(code: "trust/peer-link-restore-failed", operation: "restore-link")
+            onStatus("Trusted peer link could not be restored")
+            return false
+        }
+
+        reconnectLock.lock()
+        guard peerLinkGeneration == generation,
+              !stoppedForTrustChange,
+              rememberedPeerFingerprint == nil,
+              steadyListener == nil,
+              !reconnectSessionActive,
+              activeSession == nil
+        else {
+            reconnectLock.unlock()
+            return false
+        }
+        rememberedPeerFingerprint = restored.peer.spkiFingerprint
+        rememberedDeviceName = restored.peer.displayName
+        rememberedListenPort = restored.listenPort
+        reconnectSessionActive = false
+        reconnectLock.unlock()
+
+        let name = restored.peer.displayName.isEmpty ? "Android device" : restored.peer.displayName
+        emitActivity(.peerChanged(isPaired: true, peerName: name))
+        emitActivity(.connectionStateChanged(.reconnecting, latencyMs: nil))
+        onStatus("Restoring trusted peer link…")
+        return true
+    }
+
     func stopAfterTrustChange(invalidateTokensFor peerFingerprint: Data? = nil, invalidateAllTokens: Bool = false) {
+        sessionCallbackGate.invalidate()
         reconnectLock.lock()
         let rememberedFingerprint = rememberedPeerFingerprint
+        peerLinkGeneration &+= 1
         stoppedForTrustChange = true
         rememberedPeerFingerprint = nil
         rememberedDeviceName = nil
@@ -316,8 +517,19 @@ final class PairingController: NSObject {
         reconnectSessionActive = false
         let steady = steadyListener
         steadyListener = nil
+        let pendingSteady = pendingSteadyConnections.values.map(\.connection)
+        pendingSteadyConnections.removeAll()
         reconnectLock.unlock()
         steady?.stop()
+        pendingSteady.forEach { $0.cancel() }
+        do {
+            try peerLinkLifecycle.invalidate()
+        } catch {
+            // Trust has already been revoked by the caller. Even if deletion
+            // fails, restoreTrusted() cannot accept the stale fingerprint.
+            recordPeerLinkFailure(code: "trust/peer-link-invalidate-failed", operation: "invalidate-link")
+            onStatus("Trusted peer recovery state could not be removed")
+        }
         if invalidateAllTokens {
             tokenStore.invalidateAll()
             transferReceiver.invalidateAllCheckpoints()
@@ -329,6 +541,7 @@ final class PairingController: NSObject {
         activeSession?.stop()
         activeSession = nil
         activeSessionToken = nil
+        activeSessionOwnership = nil
         activeCapabilities = nil
         activeTransferSender?.recycleSession()
         activeTransferSender = nil
@@ -340,52 +553,97 @@ final class PairingController: NSObject {
         onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
     }
 
-    private func startReconnectListenerIfNeeded() {
+    private func startReconnectListenerIfNeeded(
+        expectedGeneration: UInt64? = nil,
+        expectedPeerFingerprint: Data? = nil
+    ) {
         reconnectLock.lock()
+        let generation = peerLinkGeneration
         let stopped = stoppedForTrustChange
         let active = reconnectSessionActive
         let peerFp = rememberedPeerFingerprint
         let alreadyListening = steadyListener != nil
         let listenPort = rememberedListenPort ?? 0
         reconnectLock.unlock()
+        guard expectedGeneration == nil || expectedGeneration == generation else { return }
+        guard expectedPeerFingerprint == nil || expectedPeerFingerprint == peerFp else { return }
         guard !stopped, !active, let peerFingerprint = peerFp, !alreadyListening else { return }
         do {
             let deviceName = Host.current().localizedName ?? "Hyphen Mac"
-            let identity = try KeychainIdentityStore().loadOrCreate(commonName: deviceName)
             let verifier = SPKIPinVerifier(isTrusted: { $0 == peerFingerprint })
-            let acceptor = TLSEndpointListener(identity: identity, verifier: verifier)
+            let acceptor = try reconnectListenerFactory(deviceName, verifier)
             reconnectLock.lock()
+            guard peerLinkGeneration == generation,
+                  !stoppedForTrustChange,
+                  !reconnectSessionActive,
+                  rememberedPeerFingerprint == peerFingerprint,
+                  steadyListener == nil
+            else {
+                reconnectLock.unlock()
+                acceptor.stop()
+                return
+            }
             steadyListener = acceptor
-            reconnectLock.unlock()
-            try acceptor.start(
-                port: listenPort,
-                queue: queue,
-                onState: { _ in },
-                onConnection: { [weak self] connection in
-                    self?.acceptReconnect(connection: connection, deviceName: deviceName, peerFingerprint: peerFingerprint)
-                },
-                onConnectionState: { _, state in
-                    if case .failed = state { }
-                }
-            )
+            do {
+                // Start while ownership is locked. Revocation either wins
+                // before this point (the generation guard rejects us), or waits
+                // and then takes/stops the installed listener.
+                try acceptor.start(
+                    port: listenPort,
+                    queue: queue,
+                    onState: { _ in },
+                    onConnection: { [weak self] connection in
+                        self?.acceptReconnect(
+                            connection: connection,
+                            deviceName: deviceName,
+                            peerFingerprint: peerFingerprint,
+                            generation: generation
+                        )
+                    },
+                    onConnectionState: { _, state in
+                        if case .failed = state { }
+                    }
+                )
+                reconnectLock.unlock()
+            } catch {
+                steadyListener = nil
+                reconnectLock.unlock()
+                acceptor.stop()
+                throw error
+            }
             onStatus("Waiting for phone reconnect…")
         } catch {
             // Release the listener slot so a later wake can retry instead of
             // being blocked forever by the `steadyListener != nil` guard.
-            reconnectLock.lock()
-            steadyListener = nil
-            reconnectLock.unlock()
             onStatus("Reconnect listener failed: \(error)")
         }
     }
 
-    private func acceptReconnect(connection: NWConnection, deviceName: String, peerFingerprint: Data) {
+    private func acceptReconnect(
+        connection: NWConnection,
+        deviceName: String,
+        peerFingerprint: Data,
+        generation: UInt64
+    ) {
         reconnectLock.lock()
+        guard peerLinkGeneration == generation,
+              !stoppedForTrustChange,
+              rememberedPeerFingerprint == peerFingerprint
+        else {
+            reconnectLock.unlock()
+            connection.cancel()
+            return
+        }
         let steady = steadyListener
         steadyListener = nil
         reconnectLock.unlock()
         steady?.stop()
-        startSteadySession(connection: connection, deviceName: deviceName, peerFingerprint: peerFingerprint)
+        startSteadySession(
+            connection: connection,
+            deviceName: deviceName,
+            peerFingerprint: peerFingerprint,
+            generation: generation
+        )
     }
 
     private func presentSasConfirmation(
@@ -430,6 +688,7 @@ final class PairingController: NSObject {
                     switch outcome {
                     case .trusted:
                         let connection = self.takeProvisionalConnection()
+                        let generation = self.beginPeerLinkOwnership(peerFingerprint: peerFingerprint)
                         self.pairingConfirm = nil
                         self.onStatus("Paired — fingerprint pinned (\(gate.sas))")
                         self.emitActivity(.pairingNote(message: L("pairing.note.paired"), at: Date()))
@@ -437,7 +696,8 @@ final class PairingController: NSObject {
                         self.startSteadySession(
                             connection: connection,
                             deviceName: deviceName,
-                            peerFingerprint: peerFingerprint
+                            peerFingerprint: peerFingerprint,
+                            generation: generation
                         )
                     case .rejected:
                         self.onStatus("Pairing rejected — nothing stored")
@@ -551,9 +811,34 @@ final class PairingController: NSObject {
         }
     }
 
-    private func startSteadySession(connection: NWConnection?, deviceName: String, peerFingerprint: Data) {
+    private func startSteadySession(
+        connection: NWConnection?,
+        deviceName: String,
+        peerFingerprint: Data,
+        generation: UInt64
+    ) {
         guard let connection else {
             onStatus("Pairing completed but no TLS connection remained")
+            return
+        }
+        let connectionID = ObjectIdentifier(connection)
+        reconnectLock.lock()
+        let ownershipIsCurrent = peerLinkGeneration == generation
+            && !stoppedForTrustChange
+            && rememberedPeerFingerprint == peerFingerprint
+        let tokenIssuance = ownershipIsCurrent
+            ? tokenStore.captureIssuance(for: peerFingerprint)
+            : nil
+        if ownershipIsCurrent {
+            pendingSteadyConnections[connectionID] = PendingSteadyConnection(
+                connection: connection,
+                generation: generation,
+                peerFingerprint: peerFingerprint
+            )
+        }
+        reconnectLock.unlock()
+        guard ownershipIsCurrent, let tokenIssuance else {
+            connection.cancel()
             return
         }
         let device = SessionHandshake.DeviceInfo(
@@ -561,60 +846,95 @@ final class PairingController: NSObject {
             appVersion: HyphenCore.version,
             deviceName: deviceName
         )
-        SessionHandshake.respond(
-            connection: connection,
-            device: device,
-            peerFingerprint: peerFingerprint,
-            tokenStore: tokenStore,
-            queue: queue
+        steadyHandshakeResponder(
+            connection,
+            device,
+            peerFingerprint,
+            tokenStore,
+            tokenIssuance,
+            queue
         ) { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            let handshakeStillOwned = self.finishPendingSteadyHandshake(
+                connectionID: connectionID,
+                generation: generation,
+                peerFingerprint: peerFingerprint
+            )
             switch result {
             case .failure(let error):
                 connection.cancel()
-                DispatchQueue.main.async {
-                    self.onStatus("Session handshake failed: \(error)")
+                guard handshakeStillOwned else { return }
+                DispatchQueue.main.async { self.onStatus("Session handshake failed: \(error)") }
+                // acceptReconnect consumes the one steady listener before the
+                // hello exchange. A transient malformed/dropped hello must
+                // reopen the same generation's trusted port for Android's next
+                // backoff dial. A stale failure must not open the new peer's
+                // listener after re-pair or revocation.
+                self.queue.async { [weak self] in
+                    self?.startReconnectListenerIfNeeded(
+                        expectedGeneration: generation,
+                        expectedPeerFingerprint: peerFingerprint
+                    )
                 }
             case .success(let handshake):
-                let sessionToken = UUID()
+                guard handshakeStillOwned else {
+                    connection.cancel()
+                    return
+                }
+                let sessionOwnership = SessionCallbackOwnership(
+                    token: UUID(),
+                    generation: generation,
+                    peerFingerprint: peerFingerprint
+                )
                 var callbacks = ProtocolSession.Callbacks()
                 callbacks.onEnvelope = { [weak self] envelope in
                     DispatchQueue.main.async {
-                        self?.handleSessionEnvelope(envelope)
+                        guard let self else { return }
+                        _ = self.withCurrentSession(sessionOwnership) {
+                            self.handleSessionEnvelope(envelope)
+                        }
                     }
                 }
                 callbacks.onAck = { [weak self] messageId in
                     DispatchQueue.main.async {
-                        // Advances the outbound transfer window (chunk acks).
-                        try? self?.activeTransferSender?.handleAck(messageId)
+                        guard let self else { return }
+                        _ = self.withCurrentSession(sessionOwnership) {
+                            // Advances the outbound transfer window (chunk acks).
+                            try? self.activeTransferSender?.handleAck(messageId)
+                        }
                     }
                 }
                 callbacks.onAckTimeout = { [weak self] messageId in
                     DispatchQueue.main.async {
-                        self?.activeTransferSender?.handleAckTimeout(messageId)
+                        guard let self else { return }
+                        _ = self.withCurrentSession(sessionOwnership) {
+                            self.activeTransferSender?.handleAckTimeout(messageId)
+                        }
                     }
                 }
                 callbacks.onClosed = { [weak self] in
                     DispatchQueue.main.async {
-                        if self?.activeSessionToken == sessionToken {
-                            self?.activeTransferSender?.recycleSession()
-                            self?.activeSession = nil
-                            self?.activeSessionToken = nil
-                            self?.activeCapabilities = nil
-                            self?.activeTransferSender = nil
-                            self?.lastTransferProgress = nil
-                            self?.transferReceiver.recycleSession()
-                            self?.notificationPresenter.setDismissHandler(nil)
-                            self?.notificationPresenter.setReplyHandler(nil)
-                            if let self {
-                                self.reconnectLock.lock()
-                                self.reconnectSessionActive = false
-                                self.reconnectLock.unlock()
-                            }
+                        guard let self else { return }
+                        let accepted = self.consumeCurrentSession(sessionOwnership) {
+                            self.activeTransferSender?.recycleSession()
+                            self.activeSession = nil
+                            self.activeSessionToken = nil
+                            self.activeSessionOwnership = nil
+                            self.activeCapabilities = nil
+                            self.activeTransferSender = nil
+                            self.lastTransferProgress = nil
+                            self.transferReceiver.recycleSession()
+                            self.notificationPresenter.setDismissHandler(nil)
+                            self.notificationPresenter.setReplyHandler(nil)
+                            self.reconnectSessionActive = false
                         }
-                        self?.onStatus("Phone session closed")
-                        self?.onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
-                        self?.queue.async {
+                        guard accepted else { return }
+                        self.onStatus("Phone session closed")
+                        self.onActivity(.connectionStateChanged(.suspended, latencyMs: nil))
+                        self.queue.async { [weak self] in
                             self?.startReconnectListenerIfNeeded()
                         }
                     }
@@ -631,68 +951,248 @@ final class PairingController: NSObject {
                     )
                 )
                 DispatchQueue.main.async {
-                    self.activeSession?.stop()
-                    self.activeSession = session
-                    self.activeSessionToken = sessionToken
-                    self.activeCapabilities = handshake.negotiatedCapabilities
-                    self.activeTransferSender = TransferSender(
-                        outbox: ProtocolSessionTransferOutbox(session: session),
-                        negotiatedCapabilities: handshake.negotiatedCapabilities,
-                        checkpointStore: self.transferCheckpointStore,
-                        onProgress: { [weak self] progress in
-                            DispatchQueue.main.async {
-                                self?.lastTransferProgress = progress
-                                self?.onStatus(Self.transferProgressLine(progress))
-                                self?.onActivity(.transferProgress(progress, direction: .outgoing, at: Date()))
-                            }
-                        }
-                    )
-                    if NotificationCapabilityGate.canSendDismiss(handshake.negotiatedCapabilities) {
-                        self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
-                            self?.sendNotificationDismissRequest(sbnKey: sbnKey)
-                        }
-                    } else {
-                        self.notificationPresenter.setDismissHandler(nil)
-                    }
-                    if NotificationCapabilityGate.canSendReply(handshake.negotiatedCapabilities) {
-                        self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, actionId, text in
-                            self?.sendNotificationReplyRequest(
-                                sbnKey: sbnKey,
-                                actionIndex: actionIndex,
-                                actionId: actionId,
-                                text: text
+                    var redundantListener: TrustedPeerReconnectListener?
+                    var redundantConnections: [NWConnection] = []
+                    let installed = self.sessionCallbackGate.activate(
+                        sessionOwnership,
+                        ifAccepted: {
+                            self.reconnectLock.lock()
+                            defer { self.reconnectLock.unlock() }
+                            guard self.peerLinkGeneration == generation,
+                                  !self.stoppedForTrustChange,
+                                  self.rememberedPeerFingerprint == peerFingerprint
+                            else { return false }
+                            redundantListener = self.steadyListener
+                            self.steadyListener = nil
+                            redundantConnections = self.pendingSteadyConnections.values.map(\.connection)
+                            self.pendingSteadyConnections.removeAll()
+                            self.activeTransferSender?.recycleSession()
+                            self.activeSession?.stop()
+                            self.activeSession = session
+                            self.activeSessionToken = sessionOwnership.token
+                            self.activeSessionOwnership = sessionOwnership
+                            self.activeCapabilities = handshake.negotiatedCapabilities
+                            self.activeTransferSender = TransferSender(
+                                outbox: ProtocolSessionTransferOutbox(session: session),
+                                negotiatedCapabilities: handshake.negotiatedCapabilities,
+                                checkpointStore: self.transferCheckpointStore,
+                                onProgress: { [weak self] progress in
+                                    DispatchQueue.main.async {
+                                        guard let self else { return }
+                                        _ = self.withCurrentSession(sessionOwnership) {
+                                            self.lastTransferProgress = progress
+                                            self.onStatus(Self.transferProgressLine(progress))
+                                            self.onActivity(.transferProgress(
+                                                progress,
+                                                direction: .outgoing,
+                                                at: Date()
+                                            ))
+                                        }
+                                    }
+                                }
                             )
+                            return true
                         }
-                    } else {
-                        self.notificationPresenter.setReplyHandler(nil)
+                    )
+                    redundantListener?.stop()
+                    redundantConnections.forEach { $0.cancel() }
+                    guard installed else {
+                        session.stop()
+                        return
                     }
-                    session.start(replaying: handshake.leftover)
-                    // Push the current per-app privacy policy so Android filters
-                    // content source-side from the start of the session.
-                    self.syncNotificationPrivacyPolicy()
-                    let name = handshake.peerDeviceName ?? "Android device"
-                    self.reconnectLock.lock()
-                    self.rememberedPeerFingerprint = peerFingerprint
-                    self.rememberedDeviceName = name
-                    self.stoppedForTrustChange = false
-                    self.reconnectSessionActive = true
-                    self.reconnectLock.unlock()
-                    let pendingDeliveries = self.transferReceiver.bindSession(
-                        peerFingerprint: peerFingerprint,
-                        sessionId: handshake.sessionId
-                    )
-                    pendingDeliveries.forEach { self.handleCompletedIncomingTransfer($0) }
-                    self.activeTransferSender?.bindSession(
-                        peerFingerprint: peerFingerprint,
-                        sessionId: handshake.sessionId
-                    )
-                    self.onStatus("Connected to \(name)")
-                    self.onActivity(.peerChanged(isPaired: true, peerName: name))
-                    self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
-                    self.onActivity(.pairingNote(message: L("pairing.note.connected", name), at: Date()))
+
+                    let activated = self.withCurrentSession(sessionOwnership) {
+                        if NotificationCapabilityGate.canSendDismiss(handshake.negotiatedCapabilities) {
+                            self.notificationPresenter.setDismissHandler { [weak self] sbnKey in
+                                self?.sendNotificationDismissRequest(sbnKey: sbnKey)
+                            }
+                        } else {
+                            self.notificationPresenter.setDismissHandler(nil)
+                        }
+                        if NotificationCapabilityGate.canSendReply(handshake.negotiatedCapabilities) {
+                            self.notificationPresenter.setReplyHandler { [weak self] sbnKey, actionIndex, actionId, text in
+                                self?.sendNotificationReplyRequest(
+                                    sbnKey: sbnKey,
+                                    actionIndex: actionIndex,
+                                    actionId: actionId,
+                                    text: text
+                                )
+                            }
+                        } else {
+                            self.notificationPresenter.setReplyHandler(nil)
+                        }
+                        session.start(replaying: handshake.leftover)
+                        let name = handshake.peerDeviceName ?? "Android device"
+                        self.rememberedDeviceName = name
+                        self.reconnectSessionActive = true
+                        // Push the current per-app privacy policy so Android filters
+                        // content source-side from the start of the session.
+                        self.syncNotificationPrivacyPolicy()
+                        let pendingDeliveries = self.transferReceiver.bindSession(
+                            peerFingerprint: peerFingerprint,
+                            sessionId: handshake.sessionId
+                        )
+                        pendingDeliveries.forEach { self.handleCompletedIncomingTransfer($0) }
+                        self.activeTransferSender?.bindSession(
+                            peerFingerprint: peerFingerprint,
+                            sessionId: handshake.sessionId
+                        )
+                        self.onStatus("Connected to \(name)")
+                        self.onActivity(.peerChanged(isPaired: true, peerName: name))
+                        self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
+                        self.onActivity(.pairingNote(
+                            message: L("pairing.note.connected", name),
+                            at: Date()
+                        ))
+                    }
+                    if !activated {
+                        session.stop()
+                    }
                 }
             }
         }
+    }
+
+    private func finishPendingSteadyHandshake(
+        connectionID: ObjectIdentifier,
+        generation: UInt64,
+        peerFingerprint: Data
+    ) -> Bool {
+        reconnectLock.lock()
+        defer { reconnectLock.unlock() }
+        guard let pending = pendingSteadyConnections.removeValue(forKey: connectionID),
+              pending.generation == generation,
+              pending.peerFingerprint == peerFingerprint
+        else { return false }
+        return peerLinkGeneration == generation
+            && !stoppedForTrustChange
+            && rememberedPeerFingerprint == peerFingerprint
+    }
+
+    func beginPeerLinkOwnership(peerFingerprint: Data) -> UInt64 {
+        sessionCallbackGate.invalidate()
+        reconnectLock.lock()
+        let previousListener = steadyListener
+        steadyListener = nil
+        let previousPendingConnections = pendingSteadyConnections.values.map(\.connection)
+        pendingSteadyConnections.removeAll()
+        let previousSession = activeSession
+        activeSession = nil
+        activeSessionToken = nil
+        activeSessionOwnership = nil
+        activeCapabilities = nil
+        let previousTransferSender = activeTransferSender
+        activeTransferSender = nil
+        lastTransferProgress = nil
+        peerLinkGeneration &+= 1
+        // Enter a generation-owned transition before replacing the durable
+        // route. Old callbacks are already invalidated, while the new peer is
+        // not published in memory until clear-before-save has been attempted.
+        stoppedForTrustChange = true
+        rememberedPeerFingerprint = nil
+        rememberedDeviceName = nil
+        reconnectSessionActive = false
+        let listenPort = rememberedListenPort
+        let generation = peerLinkGeneration
+        var persistenceFailure: Error?
+        do {
+            if let listenPort {
+                try peerLinkLifecycle.replaceCurrent(
+                    listenPort: listenPort,
+                    peerFingerprint: peerFingerprint
+                )
+            } else {
+                // No new route can be written, but the old current descriptor
+                // must still be retired before this ownership switch commits.
+                try peerLinkLifecycle.invalidate()
+                throw PeerLinkError.invalidPort
+            }
+        } catch {
+            persistenceFailure = error
+        }
+        rememberedPeerFingerprint = peerFingerprint
+        stoppedForTrustChange = false
+        reconnectLock.unlock()
+        previousListener?.stop()
+        previousPendingConnections.forEach { $0.cancel() }
+        previousSession?.stop()
+        previousTransferSender?.recycleSession()
+        transferReceiver.recycleSession()
+        notificationPresenter.setDismissHandler(nil)
+        notificationPresenter.setReplyHandler(nil)
+        if persistenceFailure != nil {
+            recordPeerLinkFailure(code: "trust/peer-link-persist-failed", operation: "replace-link")
+            onStatus("Trusted peer link could not be saved for cold-start recovery")
+        }
+        return generation
+    }
+
+    @discardableResult
+    private func withCurrentSession(
+        _ ownership: SessionCallbackOwnership,
+        action: () -> Void
+    ) -> Bool {
+        var accepted = false
+        guard sessionCallbackGate.withCurrent(ownership, action: {
+            reconnectLock.lock()
+            defer { reconnectLock.unlock() }
+            guard peerLinkGeneration == ownership.generation,
+                  !stoppedForTrustChange,
+                  rememberedPeerFingerprint == ownership.peerFingerprint,
+                  activeSessionToken == ownership.token
+            else { return }
+            action()
+            accepted = true
+        }) else { return false }
+        return accepted
+    }
+
+    @discardableResult
+    private func consumeCurrentSession(
+        _ ownership: SessionCallbackOwnership,
+        action: () -> Void
+    ) -> Bool {
+        var accepted = false
+        guard sessionCallbackGate.consumeCurrent(ownership, action: {
+            reconnectLock.lock()
+            defer { reconnectLock.unlock() }
+            guard peerLinkGeneration == ownership.generation,
+                  !stoppedForTrustChange,
+                  rememberedPeerFingerprint == ownership.peerFingerprint,
+                  activeSessionToken == ownership.token
+            else { return }
+            action()
+            accepted = true
+        }) else { return false }
+        return accepted
+    }
+
+    private func recordIncomingTransferProgress(_ progress: TransferProgress) {
+        reconnectLock.lock()
+        let ownership = activeSessionOwnership
+        reconnectLock.unlock()
+        guard let ownership else { return }
+        let apply = { [weak self] in
+            guard let self else { return }
+            _ = self.withCurrentSession(ownership) {
+                self.lastTransferProgress = progress
+                self.onStatus(Self.transferProgressLine(progress))
+                self.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
+            }
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    private func recordPeerLinkFailure(code: String, operation: String) {
+        _ = try? diagnosticLogs.recordFailure(
+            code: code,
+            component: "pairing-controller",
+            operation: operation
+        )
     }
 
     /// User-initiated reply from the popover timeline. Routes through the same
@@ -831,9 +1331,7 @@ final class PairingController: NSObject {
     private func handleSessionEnvelope(_ envelope: Envelope) {
         do {
             if envelope.type == Envelope.typeError {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus(Self.peerErrorLine(envelope))
-                }
+                onStatus(Self.peerErrorLine(envelope))
                 return
             }
             if let session = activeSession,
@@ -845,9 +1343,7 @@ final class PairingController: NSObject {
                     code: "plugin/unsupported-capability",
                     message: "Message type was sent under the wrong capability."
                 )
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
-                }
+                onStatus("unsupported capability reported: \(id ?? "session closed")")
                 return
             }
             if let session = activeSession, !isNegotiatedCapability(envelope.capability) {
@@ -857,9 +1353,7 @@ final class PairingController: NSObject {
                     code: "plugin/unsupported-capability",
                     message: "Capability is not negotiated for this session."
                 )
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
-                }
+                onStatus("unsupported capability reported: \(id ?? "session closed")")
                 return
             }
             if let session = activeSession, !isNegotiatedNotificationOption(envelope.type) {
@@ -869,9 +1363,7 @@ final class PairingController: NSObject {
                     code: "plugin/unsupported-capability",
                     message: "Notification action is not negotiated for this session."
                 )
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus("unsupported notification option reported: \(id ?? "session closed")")
-                }
+                onStatus("unsupported notification option reported: \(id ?? "session closed")")
                 return
             }
             if NotificationCapabilityGate.isNotificationEnvelope(type: envelope.type) {
@@ -887,28 +1379,22 @@ final class PairingController: NSObject {
                         code: "plugin/unsupported-capability",
                         message: "Message type was sent under the wrong capability."
                     )
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onStatus("unsupported capability reported: \(id ?? "session closed")")
-                    }
+                    onStatus("unsupported capability reported: \(id ?? "session closed")")
                     return
                 }
             }
             if let action = try notificationReceiver.handle(envelope) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.renderNotificationAction(action)
-                }
+                renderNotificationAction(action)
                 return
             }
             if envelope.capability == TransferProtocol.capability {
                 if envelope.type == TransferProtocol.typeResumeInfo {
                     let info = try TransferResumeInfo(payload: envelope.payload)
-                    DispatchQueue.main.async { [weak self] in
-                        do {
-                            try self?.activeTransferSender?.handleResumeInfo(info)
-                            self?.onStatus("transfer resume continued: \(info.fileId)")
-                        } catch {
-                            self?.onStatus("transfer resume info ignored: \(error)")
-                        }
+                    do {
+                        try activeTransferSender?.handleResumeInfo(info)
+                        onStatus("transfer resume continued: \(info.fileId)")
+                    } catch {
+                        onStatus("transfer resume info ignored: \(error)")
                     }
                     return
                 }
@@ -916,32 +1402,26 @@ final class PairingController: NSObject {
                 case .completed(let completed):
                     handleCompletedIncomingTransfer(completed)
                 case .resumeRequested(let info):
-                    DispatchQueue.main.async { [weak self] in
-                        guard let sender = self?.activeTransferSender else {
-                            self?.onStatus("transfer resume requested without active sender")
-                            return
-                        }
-                        let id = sender.sendResumeInfo(info)
-                        self?.onStatus(
-                            id.map { "transfer resume info sent: \($0)" }
-                                ?? "transfer resume info queued: \(info.fileId)"
-                        )
+                    guard let sender = activeTransferSender else {
+                        onStatus("transfer resume requested without active sender")
+                        return
                     }
+                    let id = sender.sendResumeInfo(info)
+                    onStatus(
+                        id.map { "transfer resume info sent: \($0)" }
+                            ?? "transfer resume info queued: \(info.fileId)"
+                    )
                 case .cancelled(let cancel):
-                    DispatchQueue.main.async { [weak self] in
-                        self?.lastTransferProgress = nil
-                        self?.onStatus("transfer cancelled: \(cancel.fileId)")
-                        self?.onActivity(.transferCancelled(fileId: cancel.fileId, at: Date()))
-                    }
+                    lastTransferProgress = nil
+                    onStatus("transfer cancelled: \(cancel.fileId)")
+                    onActivity(.transferCancelled(fileId: cancel.fileId, at: Date()))
                 case .ignored:
                     break
                 }
                 return
             }
             if let request = try textReceiver.handle(envelope) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.presentTextLinkConfirmation(request)
-                }
+                presentTextLinkConfirmation(request)
                 return
             }
             if Self.isPluginEnvelope(envelope), let session = activeSession {
@@ -951,9 +1431,7 @@ final class PairingController: NSObject {
                     code: "protocol/unknown-type",
                     message: "No handler is registered for this message type."
                 )
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus("unknown type reported: \(id ?? "session closed")")
-                }
+                onStatus("unknown type reported: \(id ?? "session closed")")
             }
         } catch {
             if envelope.type != Envelope.typeError, let session = activeSession {
@@ -964,9 +1442,7 @@ final class PairingController: NSObject {
                     message: "Envelope payload is invalid for its type."
                 )
             }
-            DispatchQueue.main.async { [weak self] in
-                self?.onStatus("session envelope rejected: \(error)")
-            }
+            onStatus("session envelope rejected: \(error)")
         }
     }
 
@@ -1088,29 +1564,23 @@ final class PairingController: NSObject {
         do {
             let delivered = try deliverIncomingFile(completed)
             transferReceiver.markDeliverySucceeded(fileId: completed.manifest.fileId)
-            DispatchQueue.main.async { [weak self] in
-                self?.lastTransferProgress = nil
-                self?.onStatus(
-                    "transfer received: \(completed.manifest.filename) " +
-                        "(\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)"
-                )
-                self?.onActivity(.transferCompleted(
-                    fileId: completed.manifest.fileId,
-                    filename: completed.manifest.filename,
-                    sizeBytes: completed.manifest.sizeBytes,
-                    direction: .incoming,
-                    verified: true,
-                    at: Date()
-                ))
-            }
+            lastTransferProgress = nil
+            onStatus(
+                "transfer received: \(completed.manifest.filename) " +
+                    "(\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)"
+            )
+            onActivity(.transferCompleted(
+                fileId: completed.manifest.fileId,
+                filename: completed.manifest.filename,
+                sizeBytes: completed.manifest.sizeBytes,
+                direction: .incoming,
+                verified: true,
+                at: Date()
+            ))
         } catch {
             transferReceiver.markDeliveryFailed(fileId: completed.manifest.fileId)
-            DispatchQueue.main.async { [weak self] in
-                self?.lastTransferProgress = nil
-                self?.onStatus(
-                    "transfer received but save failed; verified source queued for retry: \(error)"
-                )
-            }
+            lastTransferProgress = nil
+            onStatus("transfer received but save failed; verified source queued for retry: \(error)")
         }
     }
 

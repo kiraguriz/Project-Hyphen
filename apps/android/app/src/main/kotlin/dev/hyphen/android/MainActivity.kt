@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
         supervisor.replayStateTo(sessionListener)
         bindTransferPersistenceIfConnected()
         refreshPairingState()
+        supervisor.restorePersistedLink()
         model.setBetaDiagnostics(betaDiagnosticsEnabled())
         model.updateNotificationPrivacyLabel(notificationPrivacyStatus(HyphenNotificationListenerRuntime.notificationPrivacyMode()))
         model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
@@ -585,7 +586,9 @@ class MainActivity : ComponentActivity() {
                     previousSessionId = null,
                 )
                 val peerName = handshake.peerDevice?.deviceName ?: qr.deviceName ?: "Mac"
-                supervisor.adoptPairedSession(socket, handshake, peerName)
+                check(supervisor.adoptPairedSession(socket, handshake, peerName)) {
+                    "trust changed before paired session activation"
+                }
                 bindTransferPersistenceIfConnected()
                 postToUi {
                     emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))

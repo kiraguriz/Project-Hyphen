@@ -60,6 +60,32 @@ final class ResumeTokenStoreTests: XCTestCase {
         XCTAssertEqual(store.liveCount, 1)
         XCTAssertNil(store.redeem(token: token, peerFingerprint: peerA), "forget peer must void its tokens")
     }
+
+    func testHandshakeStartedBeforeRevocationCannotIssueANewTokenAfterInvalidation() {
+        let issuance = store.captureIssuance(for: peerA)
+
+        store.invalidatePeer(peerA)
+
+        XCTAssertNil(store.issue(
+            sessionId: "s_stale",
+            peerFingerprint: peerA,
+            ifCurrent: issuance
+        ))
+        XCTAssertEqual(store.liveCount, 0)
+    }
+
+    func testHandshakeStartedBeforeResetCannotIssueANewTokenAfterInvalidation() {
+        let issuance = store.captureIssuance(for: peerA)
+
+        store.invalidateAll()
+
+        XCTAssertNil(store.issue(
+            sessionId: "s_stale",
+            peerFingerprint: peerA,
+            ifCurrent: issuance
+        ))
+        XCTAssertEqual(store.liveCount, 0)
+    }
 }
 
 /// HYP-M2-013 acceptance: reconnect after a simulated drop — over real

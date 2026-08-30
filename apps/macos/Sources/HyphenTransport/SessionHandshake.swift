@@ -49,6 +49,22 @@ public enum SessionHandshake {
         /// Bytes the handshake read past the hello — the session must
         /// replay them before reading from the connection.
         public let leftover: Data
+
+        public init(
+            sessionId: String,
+            resumeToken: String?,
+            resumed: Bool,
+            peerDeviceName: String?,
+            negotiatedCapabilities: NegotiatedCapabilities,
+            leftover: Data
+        ) {
+            self.sessionId = sessionId
+            self.resumeToken = resumeToken
+            self.resumed = resumed
+            self.peerDeviceName = peerDeviceName
+            self.negotiatedCapabilities = negotiatedCapabilities
+            self.leftover = leftover
+        }
     }
 
     public struct NegotiatedCapabilities {
@@ -261,9 +277,11 @@ public enum SessionHandshake {
         device: DeviceInfo,
         peerFingerprint: Data,
         tokenStore: ResumeTokenStore,
+        tokenIssuance: ResumeTokenStore.Issuance? = nil,
         queue: DispatchQueue,
         completion: @escaping (Result<HandshakeResult, Error>) -> Void
     ) {
+        let tokenIssuance = tokenIssuance ?? tokenStore.captureIssuance(for: peerFingerprint)
         readHello(connection: connection, queue: queue) { result in
             switch result {
             case .failure(let error):
@@ -288,7 +306,17 @@ public enum SessionHandshake {
                     tokenStore.redeem(token: $0, peerFingerprint: peerFingerprint)
                 }
                 let sessionId = resumedSessionId ?? "s_\(Ulid.generate())"
-                let nextToken = tokenStore.issue(sessionId: sessionId, peerFingerprint: peerFingerprint)
+                guard let nextToken = tokenStore.issue(
+                    sessionId: sessionId,
+                    peerFingerprint: peerFingerprint,
+                    ifCurrent: tokenIssuance
+                ) else {
+                    completion(.failure(HandshakeError(
+                        code: "trust/peer-revoked",
+                        detail: "resume-token issuance invalidated during handshake"
+                    )))
+                    return
+                }
 
                 let reply = Envelope(
                     messageId: Ulid.generate(),

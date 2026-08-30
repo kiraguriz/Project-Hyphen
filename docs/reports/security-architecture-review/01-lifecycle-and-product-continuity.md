@@ -231,11 +231,13 @@
 - **评估**：Android 仍未采用 always-connected FGS；当前策略是 reconnect-on-use + Activity 无关的进程内 supervisor，与 ADR-0001 “continuous companion” 文案仍有张力，需在发布前明确。【来源：评估】
 - Android 产品策略：v1 是否仍要求 always-connected foreground companion，还是改为 conservative reconnect-on-use？这会影响 ADR-0001/0003、manifest、Play FGS declaration 和 README。
 - Manual endpoint 的信任模型：无 QR fingerprint 时是否接受 TOFU + mandatory SAS？是否需要同时在 Mac UI 显示 inbound manual pairing 状态？
-- remembered endpoint 存储位置：是否进入 trust store 记录，还是独立的 encrypted/keychain endpoint store？撤销时如何同步清 endpoint、resume token 和 transfer checkpoint？
+- remembered endpoint 存储位置：**已由 ADR-0009 解决**。路由与 trust/session/transfer 分离；Android 使用 app-private AES-GCM 文件，macOS 使用 non-sync Keychain record。冷启动先按精确 fingerprint 重验 trust，撤销后分别由各 owning store 清理 route、resume token 和 transfer checkpoint。
 - Device matrix：本次未运行 Android 设备、macOS sleep/wake、Wi-Fi 切换、Doze/OEM battery、restricted LAN 或 1 GiB 文件传输；这些结论只能标为 environment-only。
 - Tracker 修改需要单独授权。本文件只给修复计划，没有直接修改 tracker。
 
 **更新（2026-06-18）**：应安全架构全量实施请求，tracker 已同步 `HYP-M2-013/015`、`HYP-M2-016`、`HYP-M3-011/012/016` 与进度日志；历史 `[x]` 组件证据保留在进度日志中。
+
+**更新（2026-08-30）**：ADR-0009 与两端 `PeerLinkLifecycle` 已落地上述 remembered-endpoint 存储决策。自动化覆盖 exact-trust restore、stale/corrupt fail-closed、重复 restore 所有权、串行 remember/invalidate 和 revoke invalidation；两端 product owner 还用 lock-protected generation（Android 另含唯一 reconnect owner token，macOS 另含 steady-session callback ticket）拒绝撤销后迟到的 listener/session activation 及 envelope/ACK/timeout/close 回调。重新配对会退役旧 owner，以 clear-before-save 串行替换 current route，并在替换尝试完成后才发布新 peer；durable clear 成功后若新 save 失败或中断会留下无 current route，底层 clear 自身失败则记录诊断且仍由 authoritative trust lookup 兜底，不冒充已完成替换。macOS 只有在 generation 验证成功后才替换 callback ticket，跟踪并在 re-pair/revoke 时取消 accepted handshake，旧 generation 的失败不能重装新 listener，resume-token issuance 也受 peer/reset invalidation epoch 约束；Android 的首次目录创建会同步每一层父目录 entry。以上是 host-level store/controller seam 证据，不是真实 app 进程启动证据；kill/relaunch、端口占用、DHCP/Wi-Fi 变化及 Android background/FGS 仍属于 environment-only gate。
 
 ## 本次审计验证状态
 

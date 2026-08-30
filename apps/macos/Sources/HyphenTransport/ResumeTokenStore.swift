@@ -20,9 +20,20 @@ public final class ResumeTokenStore {
         let issuedAtMs: Int64
     }
 
+    /// Snapshot taken when an authenticated handshake begins. Revocation
+    /// advances the matching epoch, so work already in flight cannot issue a
+    /// new token after `invalidatePeer`/`invalidateAll` has returned.
+    public struct Issuance: Sendable {
+        fileprivate let peerFingerprint: Data
+        fileprivate let peerEpoch: UInt64
+        fileprivate let globalEpoch: UInt64
+    }
+
     private let ttlMs: Int64
     private let nowMs: () -> Int64
     private var entries: [String: Entry] = [:]
+    private var peerEpochs: [Data: UInt64] = [:]
+    private var globalEpoch: UInt64 = 0
     private let lock = NSLock()
 
     public init(
@@ -44,21 +55,40 @@ public final class ResumeTokenStore {
     }
 
     public func issue(sessionId: String, peerFingerprint: Data) -> String {
-        var bytes = Data(count: 32)
-        let status = bytes.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
-        }
-        precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
-        let token = bytes.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-
+        let token = Self.randomToken()
         lock.lock()
         defer { lock.unlock() }
-        purgeExpiredLocked()
-        entries = entries.filter { $0.value.sessionId != sessionId }
-        entries[token] = Entry(sessionId: sessionId, peerFingerprint: peerFingerprint, issuedAtMs: nowMs())
+        insertLocked(token: token, sessionId: sessionId, peerFingerprint: peerFingerprint)
+        return token
+    }
+
+    public func captureIssuance(for peerFingerprint: Data) -> Issuance {
+        lock.lock()
+        defer { lock.unlock() }
+        return Issuance(
+            peerFingerprint: peerFingerprint,
+            peerEpoch: peerEpochs[peerFingerprint, default: 0],
+            globalEpoch: globalEpoch
+        )
+    }
+
+    /// Issues only if no trust invalidation has occurred since `issuance` was
+    /// captured. A nil result makes the handshake fail before a token reply is
+    /// constructed; an invalidation after insertion still removes the entry
+    /// under the same lock before it can ever be redeemed.
+    public func issue(
+        sessionId: String,
+        peerFingerprint: Data,
+        ifCurrent issuance: Issuance
+    ) -> String? {
+        let token = Self.randomToken()
+        lock.lock()
+        defer { lock.unlock() }
+        guard issuance.peerFingerprint == peerFingerprint,
+              issuance.peerEpoch == peerEpochs[peerFingerprint, default: 0],
+              issuance.globalEpoch == globalEpoch
+        else { return nil }
+        insertLocked(token: token, sessionId: sessionId, peerFingerprint: peerFingerprint)
         return token
     }
 
@@ -78,12 +108,14 @@ public final class ResumeTokenStore {
     public func invalidatePeer(_ peerFingerprint: Data) {
         lock.lock()
         defer { lock.unlock() }
+        peerEpochs[peerFingerprint, default: 0] &+= 1
         entries = entries.filter { $0.value.peerFingerprint != peerFingerprint }
     }
 
     public func invalidateAll() {
         lock.lock()
         defer { lock.unlock() }
+        globalEpoch &+= 1
         entries.removeAll()
     }
 
@@ -97,5 +129,27 @@ public final class ResumeTokenStore {
     private func purgeExpiredLocked() {
         let now = nowMs()
         entries = entries.filter { now - $0.value.issuedAtMs <= ttlMs }
+    }
+
+    private func insertLocked(token: String, sessionId: String, peerFingerprint: Data) {
+        purgeExpiredLocked()
+        entries = entries.filter { $0.value.sessionId != sessionId }
+        entries[token] = Entry(
+            sessionId: sessionId,
+            peerFingerprint: peerFingerprint,
+            issuedAtMs: nowMs()
+        )
+    }
+
+    private static func randomToken() -> String {
+        var bytes = Data(count: 32)
+        let status = bytes.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
+        return bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
