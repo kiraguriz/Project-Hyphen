@@ -73,17 +73,28 @@ final class PairingQRPayloadTests: XCTestCase {
     }
 
     func testInvalidInputsAreRejected() {
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: Data(count: 31), nonce: nonce))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: Data(count: 15)))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: Data(count: 31), nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: fingerprint, nonce: Data(count: 15)))
         XCTAssertNil(PairingQRPayload(host: "", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
         XCTAssertNil(PairingQRPayload(host: "fe80::1", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
         XCTAssertNil(PairingQRPayload(host: "mac%2Flocal", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
         XCTAssertNil(PairingQRPayload(host: "mác.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 0, spkiFingerprint: fingerprint, nonce: nonce))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: ""))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "line\nbreak"))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "\u{202E}txt.exe"))
-        XCTAssertNil(PairingQRPayload(host: "h", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: String(repeating: "x", count: 81)))
+        XCTAssertNil(PairingQRPayload(host: "example.com", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "93.184.216.34", port: 1, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 0, spkiFingerprint: fingerprint, nonce: nonce))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: ""))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "line\nbreak"))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: "\u{202E}txt.exe"))
+        XCTAssertNil(PairingQRPayload(host: "mac.local", port: 1, spkiFingerprint: fingerprint, nonce: nonce, deviceName: String(repeating: "x", count: 81)))
+    }
+
+    func testEndpointHostPolicyMatchesTheV0LanBoundary() {
+        for host in ["10.0.0.2", "172.31.4.5", "192.168.1.20", "169.254.3.4", "127.0.0.1", "mac.local"] {
+            XCTAssertTrue(PairingEndpointHostPolicy.isAllowed(host), host)
+        }
+        for host in ["8.8.8.8", "93.184.216.34", "example.com", "local.evil.example", "100.64.0.1"] {
+            XCTAssertFalse(PairingEndpointHostPolicy.isAllowed(host), host)
+        }
     }
 
     func testNonceIsFreshAndSized() {

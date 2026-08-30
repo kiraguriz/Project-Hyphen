@@ -74,7 +74,15 @@ fun HyphenHome(model: HyphenUiModel, actions: HyphenActions) {
     ) {
         BrandHeader()
         Spacer(Modifier.height(18.dp))
+        if (model.firstUseOnboarding.isVisible) {
+            FirstUseOnboardingCard(actions)
+            Spacer(Modifier.height(12.dp))
+        }
         ConnectionHeader(state.connection)
+        connectionRecoveryPrompt(state.connection)?.let { prompt ->
+            Spacer(Modifier.height(12.dp))
+            ConnectionRecoveryCard(prompt, actions.onRetryConnection)
+        }
         Spacer(Modifier.height(12.dp))
         TimelineCard(
             state = state,
@@ -96,6 +104,106 @@ fun HyphenHome(model: HyphenUiModel, actions: HyphenActions) {
         DiagnosticsCard(betaOn = model.betaDiagnosticsOn, actions = actions)
         Spacer(Modifier.height(12.dp))
         EventLogCard(lines = state.logLines)
+    }
+}
+
+@Composable
+private fun FirstUseOnboardingCard(actions: HyphenActions) {
+    val p = HyphenTheme.palette
+    var payload by remember { mutableStateOf("") }
+    HyphenCard(
+        title = stringResource(R.string.first_use_title),
+        subtitle = stringResource(R.string.first_use_subtitle),
+    ) {
+        StatusRow(
+            stringResource(R.string.first_use_local_title),
+            stringResource(R.string.first_use_local_detail),
+            stringResource(R.string.first_use_local_badge),
+            control = null,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            stringResource(R.string.first_use_camera_step),
+            color = p.text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.first_use_camera_detail), color = p.dim, fontSize = 12.sp)
+        Spacer(Modifier.height(9.dp))
+        HyphenButton(
+            stringResource(R.string.perm_btn_open_camera),
+            primary = true,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = actions.onOpenSystemCamera,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            stringResource(R.string.first_use_paste_step),
+            color = p.text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.first_use_paste_detail), color = p.dim, fontSize = 12.sp)
+        Spacer(Modifier.height(9.dp))
+        HyphenTextField(
+            value = payload,
+            onValueChange = { payload = it },
+            hint = stringResource(R.string.perm_manual_hint),
+            enabled = true,
+            onSend = { if (payload.isNotBlank()) actions.onManualConnect(payload) },
+        )
+        Spacer(Modifier.height(9.dp))
+        HyphenButton(
+            stringResource(R.string.first_use_paste_action),
+            modifier = Modifier.fillMaxWidth(),
+        ) { if (payload.isNotBlank()) actions.onManualConnect(payload) }
+        Spacer(Modifier.height(12.dp))
+        Text(stringResource(R.string.first_use_sas_step), color = p.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.first_use_sas_detail), color = p.dim, fontSize = 12.sp)
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.first_use_optional_detail), color = p.faint, fontSize = 11.sp)
+        Spacer(Modifier.height(12.dp))
+        HyphenButton(
+            stringResource(R.string.first_use_not_now),
+            modifier = Modifier.fillMaxWidth(),
+            onClick = actions.onDismissFirstUse,
+        )
+    }
+}
+
+@Composable
+private fun ConnectionRecoveryCard(
+    prompt: ConnectionRecoveryPrompt,
+    onRetry: () -> Unit,
+) {
+    val p = HyphenTheme.palette
+    val title = when (prompt.kind) {
+        ConnectionRecoveryKind.DEGRADED -> R.string.recovery_degraded_title
+        ConnectionRecoveryKind.RECONNECTING -> R.string.recovery_reconnecting_title
+        ConnectionRecoveryKind.SUSPENDED -> R.string.recovery_suspended_title
+    }
+    val detail = when (prompt.kind) {
+        ConnectionRecoveryKind.DEGRADED -> R.string.recovery_degraded_detail
+        ConnectionRecoveryKind.RECONNECTING -> R.string.recovery_reconnecting_detail
+        ConnectionRecoveryKind.SUSPENDED -> R.string.recovery_suspended_detail
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(p.surface2)
+            .border(1.dp, p.amber.copy(alpha = 0.55f), RoundedCornerShape(16.dp)).padding(12.dp),
+    ) {
+        Text(stringResource(title), color = p.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(3.dp))
+        Text(stringResource(detail), color = p.dim, fontSize = 11.sp)
+        Spacer(Modifier.height(9.dp))
+        HyphenButton(
+            stringResource(R.string.recovery_retry_now),
+            primary = true,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onRetry,
+        )
     }
 }
 
@@ -463,7 +571,15 @@ private fun PermissionsCard(companionEnabled: Boolean, actions: HyphenActions) {
             stringResource(R.string.perm_qr_detail),
             null,
         ) {
-            HyphenButton(stringResource(R.string.perm_btn_qr_help), onClick = actions.onShowQrHelp)
+            Column(horizontalAlignment = Alignment.End) {
+                HyphenButton(
+                    stringResource(R.string.perm_btn_open_camera),
+                    primary = true,
+                    onClick = actions.onOpenSystemCamera,
+                )
+                Spacer(Modifier.height(6.dp))
+                HyphenButton(stringResource(R.string.perm_btn_qr_help), onClick = actions.onShowQrHelp)
+            }
         }
         Spacer(Modifier.height(8.dp))
         StatusRow(
@@ -511,6 +627,12 @@ private fun PermissionsCard(companionEnabled: Boolean, actions: HyphenActions) {
             Spacer(Modifier.width(9.dp))
             HyphenButton(stringResource(R.string.perm_btn_manage_peers), modifier = Modifier.weight(1f), onClick = actions.onManagePeers)
         }
+        Spacer(Modifier.height(10.dp))
+        HyphenButton(
+            stringResource(R.string.first_use_show_action),
+            modifier = Modifier.fillMaxWidth(),
+            onClick = actions.onShowFirstUse,
+        )
     }
 }
 

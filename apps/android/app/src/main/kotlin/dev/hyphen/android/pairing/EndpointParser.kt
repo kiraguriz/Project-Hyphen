@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.Base64
+import dev.hyphen.android.transport.LanEndpointPolicy
 
 /**
  * Fallback endpoint inputs (HYP-M1-006): a scanned `hyphen://pair` QR
@@ -50,6 +51,7 @@ enum class RejectReason {
     MALFORMED_ENDPOINT,
     MALFORMED_FIELD,
     UNSUPPORTED_VERSION,
+    NON_LOCAL_ENDPOINT,
 }
 
 sealed class ParseResult {
@@ -88,6 +90,9 @@ object EndpointParser {
         }
         val hostPortInput = trimmed.substringBefore('?')
         val hostPort = parseHostPort(hostPortInput) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
+        if (!LanEndpointPolicy.isAllowedHostSyntax(hostPort.first)) {
+            return ParseResult.Rejected(RejectReason.NON_LOCAL_ENDPOINT)
+        }
         if (nonceB64 != null && !isBase64UrlOfLength(nonceB64, NONCE_BYTES)) {
             return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
         }
@@ -131,6 +136,9 @@ object EndpointParser {
         if (version != SUPPORTED_VERSION) return ParseResult.Rejected(RejectReason.UNSUPPORTED_VERSION)
 
         val hostPort = parseHostPort(ep) ?: return ParseResult.Rejected(RejectReason.MALFORMED_ENDPOINT)
+        if (!LanEndpointPolicy.isAllowedHostSyntax(hostPort.first)) {
+            return ParseResult.Rejected(RejectReason.NON_LOCAL_ENDPOINT)
+        }
         if (fp != null && !isBase64UrlOfLength(fp, FINGERPRINT_BYTES)) {
             return ParseResult.Rejected(RejectReason.MALFORMED_FIELD)
         }

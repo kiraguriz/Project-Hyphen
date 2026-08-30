@@ -30,11 +30,16 @@ class HyphenUiModel {
         private set
     var transferSourceRetryRequired by mutableStateOf(false)
         private set
+    var firstUseOnboarding by mutableStateOf(FirstUseOnboardingState())
+        private set
 
     private var idCounter = 0L
 
     fun apply(event: ActivityEvent) {
         state = HyphenReducer.reduce(state, event) { idCounter++ }
+        if (event is ActivityEvent.PeerChanged) {
+            firstUseOnboarding = firstUseOnboarding.copy(hasTrustedPeer = event.isPaired)
+        }
     }
 
     /** Replace the auditable event-log lines (the "本机事件流" card). */
@@ -51,4 +56,30 @@ class HyphenUiModel {
     fun setCompanionConnection(enabled: Boolean) { companionConnectionEnabled = enabled }
 
     fun updateTransferSourceRetryRequired(required: Boolean) { transferSourceRetryRequired = required }
+
+    fun initializeFirstUseOnboarding(
+        completedVersion: Int,
+        hasTrustedPeer: Boolean,
+        dismissedForSession: Boolean = false,
+        openedExplicitly: Boolean = false,
+    ) {
+        firstUseOnboarding = FirstUseOnboardingState(
+            completedVersion = completedVersion,
+            hasTrustedPeer = hasTrustedPeer,
+            dismissedForSession = dismissedForSession,
+            openedExplicitly = openedExplicitly,
+        )
+    }
+
+    fun dismissFirstUseOnboardingForSession() {
+        firstUseOnboarding = firstUseOnboarding.dismissForSession()
+    }
+
+    fun reopenFirstUseOnboarding() {
+        firstUseOnboarding = firstUseOnboarding.reopen()
+    }
+
+    fun completeFirstUseOnboarding() {
+        firstUseOnboarding = firstUseOnboarding.complete()
+    }
 }

@@ -86,7 +86,7 @@ class QrScanCompatTest {
             val result = EndpointParser.parseQr(uri)
             assertTrue("$label must be rejected, got $result", result is ParseResult.Rejected)
         }
-        val manualSas = EndpointParser.parseQr("hyphen://pair?v=0&ep=h:1&n=${b64url(nonce)}")
+        val manualSas = EndpointParser.parseQr("hyphen://pair?v=0&ep=mac.local:1&n=${b64url(nonce)}")
         assertTrue(manualSas is ParseResult.Ok)
     }
 }

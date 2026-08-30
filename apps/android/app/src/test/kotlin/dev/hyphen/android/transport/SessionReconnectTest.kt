@@ -152,13 +152,7 @@ class SessionReconnectTest {
         val delays = mutableListOf<Long>()
         var failuresLeft = 6
         val connected = CountDownLatch(1)
-        // Manual scheduler: runs retries inline on the caller thread.
-        val inline = object : SessionReconnector.RetryScheduler {
-            override fun schedule(delayMs: Long, action: () -> Unit) {
-                if (connected.count == 0L) return
-                action()
-            }
-        }
+        val scheduler = RecordingScheduler()
         val tokenStore = ResumeTokenStore()
         val tlsServer = TlsServer(serverIdentity, { it.contentEquals(clientIdentity.spkiFingerprint) })
         server = tlsServer
@@ -175,7 +169,7 @@ class SessionReconnectTest {
                 TlsClient.connect("127.0.0.1", port, clientIdentity, { it.contentEquals(serverIdentity.spkiFingerprint) })
             },
             device = device,
-            scheduler = inline,
+            scheduler = scheduler,
             listener = object : SessionReconnector.Listener {
                 override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
                     connected.countDown()
@@ -187,6 +181,8 @@ class SessionReconnectTest {
             },
         ).also { it.start() }
 
+        // Initial attempt + six failed retries + the successful attempt.
+        repeat(7) { scheduler.runNext() }
         assertTrue(connected.await(5, TimeUnit.SECONDS))
         assertEquals(listOf(1L, 5L, 15L, 30L, 30L, 30L), delays)
     }
@@ -222,6 +218,38 @@ class SessionReconnectTest {
     }
 
     @Test
+    fun `retry now supersedes a pending backoff without allowing its stale callback to dial`() {
+        val scheduler = RecordingScheduler()
+        val dialCount = AtomicInteger(0)
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+
+        reconnector = SessionReconnector(
+            dial = {
+                dialCount.incrementAndGet()
+                liveHandshakeSocket()
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+            },
+        )
+
+        reconnector!!.start()
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+        assertEquals(2, scheduler.scheduledCount())
+
+        scheduler.runNext()
+        assertEquals("superseded callback must be generation-stale", 0, dialCount.get())
+
+        scheduler.runNext()
+        assertNotNull(sessions.poll(1, TimeUnit.SECONDS))
+        assertEquals(1, dialCount.get())
+    }
+
+    @Test
     fun `start is idempotent while an attempt is already connecting`() {
         val scheduler = RecordingScheduler()
         val releaseReply = CountDownLatch(1)
@@ -246,6 +274,12 @@ class SessionReconnectTest {
 
         assertTrue(dialed.await(5, TimeUnit.SECONDS))
         reconnector!!.start()
+
+        assertEquals(
+            "an in-flight handshake must not be duplicated",
+            ReconnectRetryOutcome.ALREADY_IN_PROGRESS,
+            reconnector!!.retryNow(),
+        )
 
         assertEquals("start during an in-flight handshake must not queue another attempt", 0, scheduler.scheduledCount())
         assertEquals(1, dialCount.get())
@@ -294,6 +328,192 @@ class SessionReconnectTest {
             listOf(0 to 1L),
             synchronized(retries) { retries.toList() },
         )
+    }
+
+    @Test
+    fun `retry scheduler rejection rolls back connecting state for a later retry`() {
+        val scheduleCalls = AtomicInteger()
+        val rejectingScheduler = object : SessionReconnector.RetryScheduler {
+            override fun schedule(delayMs: Long, action: () -> Unit) {
+                scheduleCalls.incrementAndGet()
+                throw java.util.concurrent.RejectedExecutionException("scheduler unavailable")
+            }
+        }
+        reconnector = SessionReconnector(
+            dial = { error("a rejected scheduler must never dial") },
+            device = device,
+            scheduler = rejectingScheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) = Unit
+            },
+        )
+
+        assertEquals(ReconnectRetryOutcome.FAILED, reconnector!!.retryNow())
+        assertEquals(ReconnectRetryOutcome.FAILED, reconnector!!.retryNow())
+        assertEquals("the failed submission must leave retry available", 2, scheduleCalls.get())
+    }
+
+    @Test
+    fun `dial failure retry rejection rolls back and permits explicit recovery`() {
+        val scheduler = SelectivelyRejectingScheduler(rejectCalls = setOf(2))
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+        val failures = mutableListOf<String?>()
+        var dialCount = 0
+        reconnector = SessionReconnector(
+            dial = {
+                dialCount += 1
+                if (dialCount == 1) throw java.io.IOException("simulated dial failure")
+                liveHandshakeSocket(sessionId = "s_after_rejection")
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+
+                override fun onAttemptFailed(reason: String?) {
+                    failures += reason
+                }
+            },
+        ).also { it.start() }
+
+        scheduler.runNext()
+        assertEquals(
+            listOf("simulated dial failure", "retry scheduler unavailable"),
+            failures,
+        )
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+        scheduler.runNext()
+
+        assertNotNull(sessions.poll(1, TimeUnit.SECONDS))
+        assertEquals(2, dialCount)
+    }
+
+    @Test
+    fun `session loss retry rejection closes socket and permits explicit recovery`() {
+        val scheduler = SelectivelyRejectingScheduler(rejectCalls = setOf(2))
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+        val sockets = mutableListOf<TrackingSocket>()
+        val failures = mutableListOf<String?>()
+        reconnector = SessionReconnector(
+            dial = {
+                liveHandshakeSocket(sessionId = "s_socket_${sockets.size + 1}").also(sockets::add)
+            },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+
+                override fun onAttemptFailed(reason: String?) {
+                    failures += reason
+                }
+            },
+        ).also { it.start() }
+        scheduler.runNext()
+        val firstSession = sessions.poll(1, TimeUnit.SECONDS)
+        assertNotNull(firstSession)
+
+        firstSession!!.stop()
+
+        assertTrue("terminal callback failure must not skip socket close", sockets.single().closed.get())
+        assertEquals(listOf("retry scheduler unavailable"), failures)
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+        assertEquals(1, scheduler.scheduledCount())
+    }
+
+    @Test
+    fun `throwing attempt failure listener cannot strand automatic retry`() {
+        val scheduler = RecordingScheduler()
+        reconnector = SessionReconnector(
+            dial = { throw java.io.IOException("simulated dial failure") },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) = Unit
+
+                override fun onAttemptFailed(reason: String?) {
+                    error("observer failed")
+                }
+            },
+        ).also { it.start() }
+
+        scheduler.runNext()
+
+        assertEquals("automatic backoff must remain queued", 1, scheduler.scheduledCount())
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+    }
+
+    @Test
+    fun `throwing session loss listener cannot strand automatic retry`() {
+        val scheduler = RecordingScheduler()
+        val sessions = LinkedBlockingQueue<ProtocolSession>()
+        val socket = liveHandshakeSocket(sessionId = "s_throwing_loss")
+        reconnector = SessionReconnector(
+            dial = { socket },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    sessions.put(session)
+                }
+
+                override fun onSessionLost(session: ProtocolSession) {
+                    error("observer failed")
+                }
+            },
+        ).also { it.start() }
+        scheduler.runNext()
+        val session = sessions.poll(1, TimeUnit.SECONDS)
+        assertNotNull(session)
+
+        session!!.stop()
+
+        assertTrue(socket.closed.get())
+        assertEquals("automatic backoff must remain queued", 1, scheduler.scheduledCount())
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+    }
+
+    @Test
+    fun `throwing session adoption listener closes socket and retries`() {
+        val scheduler = RecordingScheduler()
+        val socket = liveHandshakeSocket(sessionId = "s_throwing_adoption")
+        reconnector = SessionReconnector(
+            dial = { socket },
+            device = device,
+            scheduler = scheduler,
+            listener = object : SessionReconnector.Listener {
+                override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
+                    error("owner rejected session")
+                }
+            },
+        ).also { it.start() }
+
+        scheduler.runNext()
+
+        assertTrue(socket.closed.get())
+        assertEquals("failed adoption must enter bounded backoff", 1, scheduler.scheduledCount())
+        assertEquals(ReconnectRetryOutcome.SCHEDULED, reconnector!!.retryNow())
+    }
+
+    @Test
+    fun `throwing terminal listener cannot skip protocol socket close`() {
+        val socket = TrackingSocket(ByteArrayInputStream(ByteArray(0)))
+        val session = ProtocolSession(
+            socket = socket,
+            sessionId = "s_terminal_listener",
+            listener = object : ProtocolSession.Listener {
+                override fun onClosed() {
+                    error("terminal callback failed")
+                }
+            },
+        )
+
+        session.stop()
+
+        assertTrue(socket.closed.get())
     }
 
     @Test
@@ -472,6 +692,30 @@ class SessionReconnectTest {
 
         fun runFirstWithoutRemoving() {
             val action = synchronized(this) { actions.first().second }
+            action()
+        }
+    }
+
+    private class SelectivelyRejectingScheduler(
+        private val rejectCalls: Set<Int>,
+    ) : SessionReconnector.RetryScheduler {
+        private val actions = mutableListOf<() -> Unit>()
+        private var calls = 0
+
+        @Synchronized
+        override fun schedule(delayMs: Long, action: () -> Unit) {
+            calls += 1
+            if (calls in rejectCalls) {
+                throw java.util.concurrent.RejectedExecutionException("scheduler unavailable")
+            }
+            actions += action
+        }
+
+        @Synchronized
+        fun scheduledCount(): Int = actions.size
+
+        fun runNext() {
+            val action = synchronized(this) { actions.removeAt(0) }
             action()
         }
     }

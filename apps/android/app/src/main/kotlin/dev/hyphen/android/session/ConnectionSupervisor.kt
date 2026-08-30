@@ -14,6 +14,7 @@ import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
 import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transport.HeartbeatMonitor
 import dev.hyphen.android.transport.ProtocolSession
+import dev.hyphen.android.transport.ReconnectRetryOutcome
 import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.SessionReconnector
 import dev.hyphen.android.transport.TlsClient
@@ -28,12 +29,20 @@ import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.ConnectionState
 import dev.hyphen.android.service.CompanionConnectionPreferences
 import dev.hyphen.android.service.CompanionConnectionServiceController
+import java.util.IdentityHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.net.ssl.SSLSocket
 
 internal interface TrustedPeerReconnectOwner {
     fun start()
     fun stop()
+    fun retryNow(): ReconnectRetryOutcome = ReconnectRetryOutcome.ALREADY_IN_PROGRESS
+}
+
+enum class ConnectionRetryResult {
+    STARTED,
+    ALREADY_IN_PROGRESS,
+    UNAVAILABLE,
 }
 
 internal data class TrustedPeerReconnectRequest(
@@ -68,6 +77,7 @@ private object DefaultTrustedPeerReconnectFactory : TrustedPeerReconnectFactory 
         return object : TrustedPeerReconnectOwner {
             override fun start() = reconnect.start()
             override fun stop() = reconnect.stop()
+            override fun retryNow(): ReconnectRetryOutcome = reconnect.retryNow()
         }
     }
 }
@@ -85,6 +95,10 @@ class ConnectionSupervisor internal constructor(
     private val beforeReconnectSessionActivation: () -> Unit = {},
     private val beforePairedSessionActivation: () -> Unit = {},
     private val beforeTransferSenderInspection: () -> Unit = {},
+    private val beforeStateReplayDelivery: () -> Unit = {},
+    private val beforePeerLinkConnectionPublished: () -> Unit = {},
+    private val beforeRetryConnectionPublished: () -> Unit = {},
+    private val beforeReconnectStartFailurePublished: () -> Unit = {},
     private val onOutboundReselectStateChanged: (Boolean) -> Unit = {},
     protocolOwnerFactory: (ProtocolOwnerEvents) -> ProtocolEnvelopeOwner = { NoOpProtocolEnvelopeOwner },
 ) {
@@ -103,6 +117,25 @@ class ConnectionSupervisor internal constructor(
         val peerFingerprint: ByteArray?,
     )
 
+    private data class ConnectionEventSnapshot(
+        val peerGeneration: Long,
+        val sequence: Long,
+        val event: ActivityEvent.ConnectionChanged,
+    )
+
+    private data class ConnectionDelivery(
+        val peerGeneration: Long,
+        val sequence: Long,
+        val event: ActivityEvent.ConnectionChanged,
+        val replayPeerName: String? = null,
+        val includesPeerReplay: Boolean = false,
+    )
+
+    private data class UserPause(
+        val reconnector: TrustedPeerReconnectOwner?,
+        val previous: RetiredActiveState,
+    )
+
     interface Listener {
         fun onLog(line: String) {}
         fun onActivityEvent(event: ActivityEvent) {}
@@ -115,11 +148,36 @@ class ConnectionSupervisor internal constructor(
         fun onOutboundReselectRequiredChanged(required: Boolean) {}
     }
 
+    /**
+     * Serializes connection-state callbacks for one observer without holding
+     * the connection-delivery lock while user code executes. A newer state
+     * supersedes an older replay paused between snapshot and delivery.
+     */
+    private class ConnectionDeliverySlot(val listener: Listener) {
+        var lastDeliveredSequence = 0L
+        var inFlightSequence = 0L
+        var pending: ConnectionDelivery? = null
+        var delivering = false
+        var active = true
+    }
+
+    private data class StateReplaySnapshot(
+        val peerGeneration: Long,
+        val connection: ConnectionDelivery?,
+        val transferEvents: List<ActivityEvent>,
+        val reselectRequired: Boolean,
+        val pendingTextConfirmations: List<TextLinkConfirmationRequest>,
+    )
+
     private val stateLock = Any()
     private val ownershipTransitionLock = Any()
     private val peerLinkStorageLock = Any()
+    private val connectionDeliveryLock = Any()
     private val listeners = CopyOnWriteArrayList<Listener>()
+    private val connectionDeliverySlots = IdentityHashMap<Listener, ConnectionDeliverySlot>()
     private var activeSession: ProtocolSession? = null
+    private var latestConnectionEvent: ConnectionEventSnapshot? = null
+    private var connectionEventSequence = 0L
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
     private var activeTransferSender: TransferSender? = null
     private var activeProtocolEpoch: ProtocolSessionEpoch? = null
@@ -156,7 +214,19 @@ class ConnectionSupervisor internal constructor(
     )
 
     fun addListener(listener: Listener) {
-        listeners.add(listener)
+        synchronized(connectionDeliveryLock) {
+            if (listeners.none { it === listener }) listeners.add(listener)
+            connectionDeliverySlots.getOrPut(listener) { ConnectionDeliverySlot(listener) }
+        }
+    }
+
+    /** Atomically subscribes before replay so newer connection events win. */
+    fun addListenerAndReplay(listener: Listener) {
+        val slot = synchronized(connectionDeliveryLock) {
+            if (listeners.none { it === listener }) listeners.add(listener)
+            connectionDeliverySlots.getOrPut(listener) { ConnectionDeliverySlot(listener) }
+        }
+        deliverStateReplay(slot, stateReplaySnapshot())
     }
 
     /**
@@ -164,18 +234,22 @@ class ConnectionSupervisor internal constructor(
      * recreated Activity reflects a live session instead of showing disconnected.
      */
     fun replayStateTo(listener: Listener) {
+        val slot = synchronized(connectionDeliveryLock) {
+            connectionDeliverySlots[listener] ?: ConnectionDeliverySlot(listener)
+        }
+        deliverStateReplay(slot, stateReplaySnapshot())
+    }
+
+    private fun stateReplaySnapshot(): StateReplaySnapshot {
         val peerName: String?
-        val state: ConnectionState?
+        val peerGeneration: Long
+        val hasTrustedPeer: Boolean
         val transferEvents: List<ActivityEvent>
         val reselectRequired: Boolean
         synchronized(stateLock) {
-            state = when {
-                activeSession != null -> ConnectionState.CONNECTED
-                reconnector != null && rememberedEndpoint != null -> ConnectionState.RECONNECTING
-                pausedByUser && rememberedEndpoint != null -> ConnectionState.SUSPENDED
-                else -> null
-            }
             peerName = lastPeerName
+            peerGeneration = peerLinkGeneration
+            hasTrustedPeer = trustedPeerFingerprint != null
             transferEvents = if (
                 trustedPeerFingerprint != null && recentTransferEventsGeneration == peerLinkGeneration
             ) {
@@ -185,17 +259,64 @@ class ConnectionSupervisor internal constructor(
             }
             reselectRequired = pendingOutboundReselect.isNotEmpty()
         }
-        if (state != null) {
-            listener.onActivityEvent(ActivityEvent.PeerChanged(isPaired = true, peerName = peerName ?: "Mac"))
-            listener.onActivityEvent(ActivityEvent.ConnectionChanged(state, null))
+        val connection = synchronized(connectionDeliveryLock) {
+            latestConnectionEvent
+                ?.takeIf { hasTrustedPeer && it.peerGeneration == peerGeneration }
+                ?.let {
+                    ConnectionDelivery(
+                        peerGeneration = it.peerGeneration,
+                        sequence = it.sequence,
+                        event = it.event,
+                        replayPeerName = peerName ?: "Mac",
+                        includesPeerReplay = true,
+                    )
+                }
         }
-        transferEvents.forEach(listener::onActivityEvent)
-        listener.onOutboundReselectRequiredChanged(reselectRequired)
-        protocolOwner.pendingTextConfirmations().forEach(listener::onTextConfirmation)
+        val generationStillCurrent = synchronized(stateLock) {
+            peerLinkGeneration == peerGeneration &&
+                (trustedPeerFingerprint != null) == hasTrustedPeer
+        }
+        return StateReplaySnapshot(
+            peerGeneration = peerGeneration,
+            connection = connection.takeIf { generationStillCurrent },
+            transferEvents = transferEvents.takeIf { generationStillCurrent }.orEmpty(),
+            reselectRequired = reselectRequired && generationStillCurrent,
+            pendingTextConfirmations = if (hasTrustedPeer && generationStillCurrent) {
+                protocolOwner.pendingTextConfirmations()
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun deliverStateReplay(slot: ConnectionDeliverySlot, snapshot: StateReplaySnapshot) {
+        beforeStateReplayDelivery()
+        snapshot.connection?.let { enqueueConnectionDelivery(slot, it) }
+        snapshot.transferEvents.forEach { event ->
+            if (!isReplayDeliveryCurrent(slot, snapshot.peerGeneration)) return
+            runCatching { slot.listener.onActivityEvent(event) }
+        }
+        if (!isReplayDeliveryCurrent(slot, snapshot.peerGeneration)) return
+        runCatching {
+            slot.listener.onOutboundReselectRequiredChanged(snapshot.reselectRequired)
+        }
+        snapshot.pendingTextConfirmations.forEach { request ->
+            if (!isReplayDeliveryCurrent(slot, snapshot.peerGeneration)) return
+            runCatching { slot.listener.onTextConfirmation(request) }
+        }
     }
 
     fun removeListener(listener: Listener) {
-        listeners.remove(listener)
+        synchronized(connectionDeliveryLock) {
+            val index = listeners.indexOfFirst { it === listener }
+            if (index >= 0) listeners.removeAt(index)
+            connectionDeliverySlots.remove(listener)?.let { slot ->
+                synchronized(slot) {
+                    slot.active = false
+                    slot.pending = null
+                }
+            }
+        }
     }
 
     fun activeState(): ActiveState =
@@ -460,6 +581,7 @@ class ConnectionSupervisor internal constructor(
                     stoppedForTrustChange = false
                     pausedByUser = false
                 }
+                beforePeerLinkConnectionPublished()
                 emit(ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null))
             } else {
                 emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
@@ -500,7 +622,7 @@ class ConnectionSupervisor internal constructor(
             return false
         } ?: return false
 
-        val accepted = synchronized(ownershipTransitionLock) {
+        val adoptedGeneration = synchronized(ownershipTransitionLock) {
             val adoptedGeneration = synchronized(stateLock) {
                 if (
                     restoreGeneration != peerLinkGeneration ||
@@ -523,26 +645,49 @@ class ConnectionSupervisor internal constructor(
                 }
             }
             if (adoptedGeneration == null) {
-                false
+                null
             } else {
                 emit(ActivityEvent.PeerChanged(isPaired = true, peerName = restored.peer.displayName.ifBlank { "Mac" }))
                 val ownsAfterPeer = synchronized(stateLock) {
                     ownsPeerLinkLocked(adoptedGeneration, restored.endpoint, restored.peer.spkiFingerprint)
                 }
                 if (!ownsAfterPeer) {
-                    false
+                    null
                 } else {
-                    emit(ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null))
-                    synchronized(stateLock) {
-                        ownsPeerLinkLocked(adoptedGeneration, restored.endpoint, restored.peer.spkiFingerprint)
-                    }
+                    emitConnectionForGeneration(
+                        ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null),
+                        adoptedGeneration,
+                    )
+                    if (
+                        synchronized(stateLock) {
+                            ownsPeerLinkLocked(
+                                adoptedGeneration,
+                                restored.endpoint,
+                                restored.peer.spkiFingerprint,
+                            )
+                        }
+                    ) adoptedGeneration else null
                 }
             }
-        }
-        if (!accepted) return false
+        } ?: return false
 
-        (reconnectAfterRestore ?: ::startReconnector).invoke()
-        return true
+        val reconnectStarted = reconnectAfterRestore?.let { start ->
+            runCatching {
+                start()
+                synchronized(stateLock) {
+                    ownsPeerLinkLocked(adoptedGeneration, restored.endpoint, restored.peer.spkiFingerprint)
+                }
+            }.getOrDefault(false)
+        } ?: startReconnector(expectedGeneration = adoptedGeneration)
+        if (!reconnectStarted) {
+            beforeReconnectStartFailurePublished()
+            emitConnectionForGeneration(
+                ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null),
+                adoptedGeneration,
+            )
+            log("trusted peer route restored, but reconnect owner did not start")
+        }
+        return reconnectStarted
     }
 
     fun adoptPairedSession(
@@ -669,11 +814,24 @@ class ConnectionSupervisor internal constructor(
      * [stopAfterTrustChange] remains the destructive revoke/reset path.
      */
     fun pauseConnection() {
-        data class UserPause(
-            val reconnector: TrustedPeerReconnectOwner?,
-            val previous: RetiredActiveState,
-        )
-        val paused = synchronized(ownershipTransitionLock) {
+        teardownUserPause(retireForUserPause())
+    }
+
+    /**
+     * Activity lifecycle variant: return immediately, then settle any pairing
+     * retirement before publishing the final paused generation and tearing down
+     * potentially blocking transport/socket ownership on a process worker.
+     */
+    fun pauseConnectionForLifecycle(beforePause: () -> Unit = {}): Boolean =
+        launchProcessWorker("hyphen-connection-lifecycle-pause") {
+            // Pairing cancellation may be waiting for a durable route commit.
+            // Finish it first so this pause becomes the final generation write.
+            beforePause()
+            pauseConnection()
+        }
+
+    private fun retireForUserPause(): UserPause =
+        synchronized(ownershipTransitionLock) {
             val captured = synchronized(stateLock) {
                 peerLinkGeneration += 1
                 if (recentTransferEvents.isNotEmpty()) {
@@ -691,6 +849,8 @@ class ConnectionSupervisor internal constructor(
             log("companion connection paused by user")
             captured
         }
+
+    private fun teardownUserPause(paused: UserPause) {
         paused.reconnector?.stop()
         recycleRetiredState(paused.previous)
         paused.previous.session?.stop()
@@ -715,13 +875,90 @@ class ConnectionSupervisor internal constructor(
             val alreadyOwned = synchronized(stateLock) {
                 activeSession != null || reconnector != null
             }
-            if (!alreadyOwned) {
-                emit(ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null))
-                startReconnector()
-            }
-            return true
+            return alreadyOwned || startReconnector()
         }
         return restorePersistedLink()
+    }
+
+    /**
+     * User-visible recovery action. A live but degraded session is closed so
+     * the same trusted-peer generation enters reconnect ownership; a pending
+     * backoff is superseded without permitting stale attempts to publish.
+     */
+    fun retryConnectionNow(): ConnectionRetryResult {
+        val wasPaused = synchronized(stateLock) { pausedByUser && !stoppedForTrustChange }
+        if (wasPaused) {
+            return if (resumeConnection()) ConnectionRetryResult.STARTED else ConnectionRetryResult.UNAVAILABLE
+        }
+
+        val liveSession = synchronized(stateLock) {
+            if (stoppedForTrustChange || pausedByUser) null else activeSession
+        }
+        liveSession?.stop()
+
+        val ownerRetry = synchronized(ownershipTransitionLock) {
+            val ownerAndGeneration = synchronized(stateLock) {
+                if (stoppedForTrustChange || pausedByUser) {
+                    null
+                } else {
+                    reconnector?.let { it to peerLinkGeneration }
+                }
+            } ?: return@synchronized null
+            val (owner, generation) = ownerAndGeneration
+            val outcome = runCatching { owner.retryNow() }
+                .getOrDefault(ReconnectRetryOutcome.FAILED)
+            val stillOwned = synchronized(stateLock) {
+                !stoppedForTrustChange &&
+                    !pausedByUser &&
+                    peerLinkGeneration == generation &&
+                    reconnector === owner
+            }
+            if (!stillOwned) {
+                null
+            } else {
+                when (outcome) {
+                    ReconnectRetryOutcome.SCHEDULED -> {
+                        beforeRetryConnectionPublished()
+                        emitConnectionForGeneration(
+                            ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null),
+                            generation,
+                        )
+                        log("connection retry requested by user")
+                        ConnectionRetryResult.STARTED
+                    }
+
+                    ReconnectRetryOutcome.ALREADY_IN_PROGRESS -> {
+                        log("connection retry already in progress")
+                        ConnectionRetryResult.ALREADY_IN_PROGRESS
+                    }
+
+                    ReconnectRetryOutcome.FAILED -> {
+                        log("connection retry could not be scheduled")
+                        ConnectionRetryResult.UNAVAILABLE
+                    }
+                }
+            }
+        }
+        if (ownerRetry != null) return ownerRetry
+
+        val hasRoute = synchronized(stateLock) {
+            !stoppedForTrustChange &&
+                !pausedByUser &&
+                rememberedEndpoint != null &&
+                trustedPeerFingerprint != null
+        }
+        if (hasRoute) {
+            return if (startReconnector()) {
+                ConnectionRetryResult.STARTED
+            } else {
+                ConnectionRetryResult.UNAVAILABLE
+            }
+        }
+        return if (restorePersistedLink()) {
+            ConnectionRetryResult.STARTED
+        } else {
+            ConnectionRetryResult.UNAVAILABLE
+        }
     }
 
     private fun bindReconnectedSession(
@@ -884,6 +1121,16 @@ class ConnectionSupervisor internal constructor(
             override fun onLiveness(state: HeartbeatMonitor.State) {
                 withPairedSessionOwnership(session, generation) {
                     log("session liveness: $state")
+                    emit(
+                        ActivityEvent.ConnectionChanged(
+                            if (state == HeartbeatMonitor.State.DEGRADED) {
+                                ConnectionState.DEGRADED
+                            } else {
+                                ConnectionState.CONNECTED
+                            },
+                            null,
+                        ),
+                    )
                 }
             }
 
@@ -930,7 +1177,7 @@ class ConnectionSupervisor internal constructor(
         }
     }
 
-    private fun startReconnector() {
+    private fun startReconnector(expectedGeneration: Long? = null): Boolean {
         val endpoint: ParsedEndpoint
         val peerFp: ByteArray
         val seedResumeToken: String?
@@ -938,9 +1185,10 @@ class ConnectionSupervisor internal constructor(
         val generation: Long
         val oldReconnector: TrustedPeerReconnectOwner?
         synchronized(stateLock) {
-            if (stoppedForTrustChange || pausedByUser) return
-            endpoint = rememberedEndpoint ?: return
-            peerFp = trustedPeerFingerprint ?: return
+            if (stoppedForTrustChange || pausedByUser) return false
+            if (expectedGeneration != null && expectedGeneration != peerLinkGeneration) return false
+            endpoint = rememberedEndpoint ?: return false
+            peerFp = trustedPeerFingerprint ?: return false
             seedResumeToken = resumeToken
             seedSessionId = lastSessionId
             generation = peerLinkGeneration
@@ -948,15 +1196,16 @@ class ConnectionSupervisor internal constructor(
             reconnector = null
             reconnectOwnerToken = null
         }
-        oldReconnector?.stop()
+        runCatching { oldReconnector?.stop() }
         val ownerToken = Any()
-        val reconnect = reconnectFactory.create(
-            TrustedPeerReconnectRequest(
-                endpoint = endpoint,
-                peerFingerprint = peerFp.copyOf(),
-                initialResumeToken = seedResumeToken,
-                initialPreviousSessionId = seedSessionId,
-                listener = object : SessionReconnector.Listener {
+        val reconnect = runCatching {
+            reconnectFactory.create(
+                TrustedPeerReconnectRequest(
+                    endpoint = endpoint,
+                    peerFingerprint = peerFp.copyOf(),
+                    initialResumeToken = seedResumeToken,
+                    initialPreviousSessionId = seedSessionId,
+                    listener = object : SessionReconnector.Listener {
                     override fun onSession(session: ProtocolSession, handshake: SessionHandshake.Result) {
                         val activated = runCatching {
                             beforeReconnectSessionActivation()
@@ -969,35 +1218,45 @@ class ConnectionSupervisor internal constructor(
                         }
                     }
 
-                    override fun onEnvelope(envelope: Envelope) {
-                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                    override fun onEnvelope(session: ProtocolSession, envelope: Envelope) {
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken, session) ?: return
                         protocolOwner.handleEnvelope(ownerSession.epoch, envelope)
                     }
 
-                    override fun onAck(messageId: String) {
-                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                    override fun onAck(session: ProtocolSession, messageId: String) {
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken, session) ?: return
                         runCatching { ownerSession.transferSender?.handleAck(messageId) }
                         protocolOwner.handleAck(ownerSession.epoch, messageId)
                         HyphenNotificationListenerRuntime.onTransportAcknowledged(messageId)
                         HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
                     }
 
-                    override fun onAckTimeout(messageId: String) {
-                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                    override fun onAckTimeout(session: ProtocolSession, messageId: String) {
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken, session) ?: return
                         runCatching { ownerSession.transferSender?.handleAckTimeout(messageId) }
                         protocolOwner.handleAckTimeout(ownerSession.epoch, messageId)
                         HyphenNotificationListenerRuntime.onTransportAckTimeout(messageId)
                         HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
                     }
 
-                    override fun onLiveness(state: HeartbeatMonitor.State) {
-                        withReconnectOwnership(generation, ownerToken) {
+                    override fun onLiveness(session: ProtocolSession, state: HeartbeatMonitor.State) {
+                        withReconnectSessionOwnership(generation, ownerToken, session) {
                             log("session liveness: $state")
+                            emit(
+                                ActivityEvent.ConnectionChanged(
+                                    if (state == HeartbeatMonitor.State.DEGRADED) {
+                                        ConnectionState.DEGRADED
+                                    } else {
+                                        ConnectionState.CONNECTED
+                                    },
+                                    null,
+                                ),
+                            )
                         }
                     }
 
-                    override fun onProtocolError(code: String, detail: String) {
-                        withReconnectOwnership(generation, ownerToken) {
+                    override fun onProtocolError(session: ProtocolSession, code: String, detail: String) {
+                        withReconnectSessionOwnership(generation, ownerToken, session) {
                             log("session protocol error: $code $detail")
                         }
                     }
@@ -1014,12 +1273,16 @@ class ConnectionSupervisor internal constructor(
                         }
                     }
 
-                    override fun onSessionLost() {
-                        handleReconnectSessionLost(generation, ownerToken)
+                    override fun onSessionLost(session: ProtocolSession) {
+                        handleReconnectSessionLost(generation, ownerToken, session)
                     }
-                },
-            ),
-        )
+                    },
+                ),
+            )
+        }.getOrElse {
+            log("reconnect owner could not be created")
+            return false
+        }
         val started = synchronized(ownershipTransitionLock) {
             val proceed = synchronized(stateLock) {
                 if (
@@ -1046,7 +1309,10 @@ class ConnectionSupervisor internal constructor(
                 }.getOrDefault(false)
                 if (didStart) {
                     log("reconnect owner started for trusted peer")
-                    emit(ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null))
+                    emitConnectionForGeneration(
+                        ActivityEvent.ConnectionChanged(ConnectionState.RECONNECTING, null),
+                        generation,
+                    )
                 } else {
                     synchronized(stateLock) {
                         if (reconnectOwnerToken === ownerToken) {
@@ -1059,8 +1325,9 @@ class ConnectionSupervisor internal constructor(
             }
         }
         if (!started) {
-            reconnect.stop()
+            runCatching { reconnect.stop() }
         }
+        return started
     }
 
     private fun ownsReconnectLocked(generation: Long, ownerToken: Any): Boolean =
@@ -1093,6 +1360,20 @@ class ConnectionSupervisor internal constructor(
             if (owns) {
                 action()
             }
+        }
+    }
+
+    private inline fun withReconnectSessionOwnership(
+        generation: Long,
+        ownerToken: Any,
+        session: ProtocolSession,
+        action: () -> Unit,
+    ) {
+        synchronized(ownershipTransitionLock) {
+            val owns = synchronized(stateLock) {
+                ownsReconnectLocked(generation, ownerToken) && activeSession === session
+            }
+            if (owns) action()
         }
     }
 
@@ -1129,8 +1410,11 @@ class ConnectionSupervisor internal constructor(
     private fun reconnectProtocolOwnerSession(
         generation: Long,
         ownerToken: Any,
+        session: ProtocolSession,
     ): ProtocolOwnerSession? = protocolOwnerSessionSnapshot {
-        ownsReconnectLocked(generation, ownerToken) && activeSessionReconnectToken === ownerToken
+        ownsReconnectLocked(generation, ownerToken) &&
+            activeSessionReconnectToken === ownerToken &&
+            activeSession === session
     }
 
     private fun protocolOwnerSessionSnapshot(owns: () -> Boolean): ProtocolOwnerSession? =
@@ -1168,12 +1452,17 @@ class ConnectionSupervisor internal constructor(
         }.getOrDefault(false)
     }
 
-    private fun handleReconnectSessionLost(generation: Long, ownerToken: Any) {
+    private fun handleReconnectSessionLost(
+        generation: Long,
+        ownerToken: Any,
+        session: ProtocolSession,
+    ) {
         val retired = synchronized(ownershipTransitionLock) {
             val accepted = synchronized(stateLock) {
                 if (
                     !ownsReconnectLocked(generation, ownerToken) ||
-                    activeSessionReconnectToken !== ownerToken
+                    activeSessionReconnectToken !== ownerToken ||
+                    activeSession !== session
                 ) {
                     null
                 } else {
@@ -1292,8 +1581,157 @@ class ConnectionSupervisor internal constructor(
 
     private fun emit(event: ActivityEvent) {
         recordTransferEvent(event)
-        listeners.forEach { it.onActivityEvent(event) }
+        if (event is ActivityEvent.ConnectionChanged) {
+            val generation = synchronized(stateLock) { peerLinkGeneration }
+            emitConnectionForGeneration(event, generation)
+        } else {
+            listeners.forEach { it.onActivityEvent(event) }
+        }
     }
+
+    /** Rejects a delayed connection result once another peer generation owns UI state. */
+    private fun emitConnectionForGeneration(
+        event: ActivityEvent.ConnectionChanged,
+        expectedGeneration: Long,
+    ): Boolean {
+        var deliveries = emptyList<Pair<ConnectionDeliverySlot, ConnectionDelivery>>()
+        val accepted = synchronized(ownershipTransitionLock) {
+            val isCurrent = synchronized(stateLock) {
+                expectedGeneration == peerLinkGeneration
+            }
+            if (!isCurrent) {
+                false
+            } else {
+                synchronized(connectionDeliveryLock) {
+                    val sequence = ++connectionEventSequence
+                    latestConnectionEvent = ConnectionEventSnapshot(expectedGeneration, sequence, event)
+                    val delivery = ConnectionDelivery(expectedGeneration, sequence, event)
+                    deliveries = listeners.mapNotNull { listener ->
+                        connectionDeliverySlots[listener]?.let { it to delivery }
+                    }
+                }
+                true
+            }
+        }
+        if (accepted) {
+            deliveries.forEach { (slot, delivery) ->
+                enqueueConnectionDelivery(slot, delivery)
+            }
+        }
+        return accepted
+    }
+
+    /**
+     * Drains one observer outside the connection-delivery lock. If a callback
+     * re-enters a transition while another thread publishes, the publisher
+     * only replaces [ConnectionDeliverySlot.pending] and never waits for
+     * callback completion.
+     */
+    private fun enqueueConnectionDelivery(
+        slot: ConnectionDeliverySlot,
+        delivery: ConnectionDelivery,
+    ) {
+        val shouldDrain = synchronized(slot) {
+            if (!slot.active) return@synchronized false
+            val newestKnown = maxOf(
+                slot.lastDeliveredSequence,
+                slot.inFlightSequence,
+                slot.pending?.sequence ?: 0L,
+            )
+            if (delivery.sequence <= newestKnown) {
+                false
+            } else {
+                slot.pending = delivery
+                if (slot.delivering) {
+                    false
+                } else {
+                    slot.delivering = true
+                    true
+                }
+            }
+        }
+        if (!shouldDrain) return
+
+        while (true) {
+            val next = synchronized(slot) {
+                if (!slot.active) {
+                    slot.pending = null
+                    slot.inFlightSequence = 0L
+                    slot.delivering = false
+                    return@synchronized null
+                }
+                val pending = slot.pending
+                if (pending == null) {
+                    slot.delivering = false
+                    null
+                } else {
+                    slot.pending = null
+                    slot.inFlightSequence = pending.sequence
+                    pending
+                }
+            } ?: return
+
+            val mayDeliver = synchronized(slot) {
+                slot.active && slot.inFlightSequence == next.sequence
+            }
+            val connectionHandled = if (!mayDeliver) {
+                false
+            } else if (!isCurrentPeerGeneration(next.peerGeneration)) {
+                // Generations only increase, so a stale delivery can never
+                // become current again and is safe to retire permanently.
+                true
+            } else {
+                if (next.includesPeerReplay) {
+                    runCatching {
+                        slot.listener.onActivityEvent(
+                            ActivityEvent.PeerChanged(
+                                isPaired = true,
+                                peerName = next.replayPeerName ?: "Mac",
+                            ),
+                        )
+                    }
+                }
+                runCatching { slot.listener.onActivityEvent(next.event) }.isSuccess
+            }
+            val continueDraining = synchronized(slot) {
+                if (slot.inFlightSequence == next.sequence) {
+                    slot.inFlightSequence = 0L
+                    if (connectionHandled) {
+                        slot.lastDeliveredSequence = maxOf(
+                            slot.lastDeliveredSequence,
+                            next.sequence,
+                        )
+                    }
+                }
+                when {
+                    !slot.active -> {
+                        slot.pending = null
+                        slot.delivering = false
+                        false
+                    }
+
+                    !connectionHandled && slot.pending == null -> {
+                        // Do not spin on a faulty observer. A later explicit
+                        // replay may retry this same sequence.
+                        slot.delivering = false
+                        false
+                    }
+
+                    else -> true
+                }
+            }
+            if (!continueDraining) return
+        }
+    }
+
+    private fun isCurrentPeerGeneration(expectedGeneration: Long): Boolean =
+        synchronized(stateLock) { expectedGeneration == peerLinkGeneration }
+
+    private fun isReplayDeliveryCurrent(
+        slot: ConnectionDeliverySlot,
+        expectedGeneration: Long,
+    ): Boolean =
+        synchronized(slot) { slot.active } && isCurrentPeerGeneration(expectedGeneration)
 
     private fun recordTransferEvent(event: ActivityEvent) {
         transferEventFileId(event)?.let { fileId ->

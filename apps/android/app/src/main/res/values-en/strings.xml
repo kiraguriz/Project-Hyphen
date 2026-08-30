@@ -4,6 +4,36 @@
 <resources>
     <string name="brand_tagline">Local-first · Auditable · Continuous Mac × Android link</string>
 
+    <!-- First use and connection recovery -->
+    <string name="first_use_title">Set up your local companion</string>
+    <string name="first_use_subtitle">Pair first. Optional permissions stay off until you choose them.</string>
+    <string name="first_use_local_title">Local-only by design</string>
+    <string name="first_use_local_detail">Your phone connects directly to your Mac over LAN TLS. There is no account, cloud relay, or default telemetry.</string>
+    <string name="first_use_local_badge">No cloud</string>
+    <string name="first_use_camera_step">1 · Open the system camera</string>
+    <string name="first_use_camera_detail">Show the pairing QR on the Mac. If your camera recognizes custom links, tap the hyphen://pair result to return here. Camera support varies by device.</string>
+    <string name="first_use_paste_step">2 · Or paste the pairing payload</string>
+    <string name="first_use_paste_detail">Paste the complete pairing link, or the address and nonce shown by the Mac. Both paths use the same strict parser.</string>
+    <string name="first_use_paste_action">Validate and pair</string>
+    <string name="first_use_sas_step">3 · Compare both pairing codes</string>
+    <string name="first_use_sas_detail">Trust only if the six-digit code is identical on the phone and Mac. Both devices must confirm before trust is saved.</string>
+    <string name="first_use_optional_detail">After pairing, notification mirroring and the persistent companion link remain optional. Each explains its access before opening Android settings or showing a foreground notification.</string>
+    <string name="first_use_not_now">Finish later</string>
+    <string name="first_use_show_action">Open setup guide</string>
+    <string name="recovery_degraded_title">The connection is unstable</string>
+    <string name="recovery_degraded_detail">Restart the authenticated LAN session now instead of waiting for the current link to recover.</string>
+    <string name="recovery_reconnecting_title">Still reconnecting?</string>
+    <string name="recovery_reconnecting_detail">Skip the pending backoff and try the current trusted Mac again now.</string>
+    <string name="recovery_suspended_title">The companion link is paused</string>
+    <string name="recovery_suspended_detail">Retry the saved, fingerprint-pinned route. If the route is unavailable, Hyphen will ask you to pair again.</string>
+    <string name="recovery_retry_now">Retry now</string>
+    <string name="recovery_unavailable_title">Pairing route unavailable</string>
+    <string name="recovery_unavailable_detail">The trusted Mac no longer has a usable local route on this phone. Open the Mac pairing screen and pair again.</string>
+    <string name="pairing_restart_required_title">Pairing was interrupted</string>
+    <string name="pairing_restart_required_detail">Android restarted Hyphen while pairing was active. Scan or paste the current pairing code again; Hyphen will not guess which earlier link was in progress.</string>
+    <string name="camera_unavailable_title">System camera unavailable</string>
+    <string name="camera_unavailable_detail">Hyphen could not open a system camera app. Paste the pairing link or address from the Mac instead; Hyphen does not request camera access.</string>
+
     <!-- Connection header -->
     <string name="conn_paired_fallback">Paired device</string>
     <string name="conn_unpaired_title">Not paired</string>
@@ -83,6 +113,7 @@
     <string name="perm_localnet_detail">Finds and connects to your Mac over Wi-Fi; never scans the internet.</string>
     <string name="perm_localnet_badge">Local</string>
     <string name="perm_btn_find_mac">Find Mac</string>
+    <string name="perm_btn_open_camera">Open camera</string>
     <string name="perm_manual_title">Manual pairing</string>
     <string name="perm_manual_detail">Paste a host:port or hyphen://pair payload through the same verification path.</string>
     <string name="perm_manual_hint">host:port or hyphen://pair</string>

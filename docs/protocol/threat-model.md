@@ -39,6 +39,7 @@
 | MITM during QR pairing | A2/A3 | Fingerprint travels inside the QR (out-of-band channel); connection to a key not matching `fp` aborts with `trust/fingerprint-mismatch` | Designed |
 | MITM during manual-IP pairing (no QR fingerprint) | A2/A3 | Mandatory, non-skippable SAS comparison on both devices (§5.3); transcript binds nonce + both SPKI fps + version, so a relay attacker cannot present matching codes | Designed; SAS vectors in HYP-M2-004 |
 | Attacker tricks user into pairing with attacker's device (social engineering, swapped QR) | A3 | Both-sides SAS confirm + device names shown at confirm time; pairing requires explicit user action on both devices; residual risk documented in onboarding copy | Partial — residual |
+| Browsable intent or pasted payload induces a public-Internet dial | A3 | Mac QR construction filters out public/overlay interface addresses; Android rejects public literals and non-`.local` names before dialing; runtime resolution selects and pins one LAN/link-local/loopback/IPv6-ULA address, so DNS rebinding cannot move the socket to a public answer | Implemented; bilateral negative policy tests in HYP-M2-010 |
 | Protocol downgrade during pairing | A2 | `protocolVersion` is part of the SAS transcript; mismatch changes the SAS | Designed |
 | MITM after pairing (key substitution) | A2 | mTLS with SPKI pinning both directions; changed key ⇒ hard failure + prominent re-verify UX, never silent re-pin | Designed |
 | Replay of captured frames / stolen resume token | A1/A2 | TLS 1.3 anti-replay; resume tokens single-use, 10-min expiry, pin-check-first (§4.6) | Designed |
@@ -96,7 +97,7 @@ DoS by a determined on-LAN attacker is **accepted** for v0: Hyphen treats availa
 
 1. TLS pinning negative tests: wrong cert, swapped peer certs, renewed-cert-same-key (must pass), new-key (must fail) — HYP-M2-007/008.
 2. SAS/transcript deterministic vectors, including downgrade-attempt vectors — HYP-M2-004.
-3. QR parser fuzz/negative cases: unknown scheme, missing fields, oversized values — HYP-M2-010.
+3. QR parser fuzz/negative cases: unknown scheme, missing fields, oversized values, public literals/global hostnames, and mixed public/private resolution with exact-address LAN pinning — HYP-M2-010.
 4. Redaction unit tests: synthetic bundle contains no notification bodies/file names/IPs — HYP-M4-002/003.
 5. Resume-token reuse and expiry tests — HYP-M2-013.
 6. Frame-cap enforcement test — HYP-M2-007/008.

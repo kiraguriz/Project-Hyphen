@@ -101,7 +101,8 @@ object TlsClient {
         val socket = HyphenTls.context(identity, isTrusted)
             .socketFactory.createSocket() as SSLSocket
         try {
-            socket.connect(InetSocketAddress(host, port), timeoutMillis)
+            val address = LanEndpointPolicy.resolveAllowed(host)
+            socket.connect(InetSocketAddress(address, port), timeoutMillis)
             socket.soTimeout = timeoutMillis
             socket.enabledProtocols = arrayOf(HyphenTls.PROTOCOL)
             socket.startHandshake()

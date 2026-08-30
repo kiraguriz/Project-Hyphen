@@ -224,7 +224,7 @@ class ProtocolSession(
         if (closed.getAndSet(true)) return
         if (::scheduler.isInitialized) scheduler.shutdownNow()
         // onClosed reports terminal session state; socket close is best-effort and may block in JSSE.
-        listener.onClosed()
+        runCatching { listener.onClosed() }
         runCatching { socket.close() }
     }
 }

@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -46,11 +47,15 @@ import dev.hyphen.android.pairing.PairingAttemptToken
 import dev.hyphen.android.pairing.PairingCommit
 import dev.hyphen.android.pairing.PairingIntentRoute
 import dev.hyphen.android.pairing.PairingIntentRouter
+import dev.hyphen.android.pairing.PairingRecreationDecision
+import dev.hyphen.android.pairing.PairingRecreationRetirement
+import dev.hyphen.android.pairing.PairingRestoreAction
 import dev.hyphen.android.pairing.PairingTranscript
 import dev.hyphen.android.pairing.PairingWireProtocol
 import dev.hyphen.android.pairing.ParseResult
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.pairing.SasConfirmationGate
+import dev.hyphen.android.pairing.pairingRestoreAction
 import dev.hyphen.android.service.CompanionConnectionPreferences
 import dev.hyphen.android.service.CompanionConnectionServiceController
 import dev.hyphen.android.service.dispatchCompletedOutboundTransfer
@@ -59,6 +64,7 @@ import dev.hyphen.android.service.TransferWorkerForegroundCleanup
 import dev.hyphen.android.service.TransferWorkerSenderCleanup
 import dev.hyphen.android.service.planTransferWorkerFailure
 import dev.hyphen.android.session.ConnectionSupervisor
+import dev.hyphen.android.session.ConnectionRetryResult
 import dev.hyphen.android.text.ProtocolSessionTextLinkOutbox
 import dev.hyphen.android.text.TextLinkConfirmationRequest
 import dev.hyphen.android.text.TextConfirmationQueue
@@ -81,12 +87,14 @@ import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.HyphenActions
 import dev.hyphen.android.ui.HyphenHome
 import dev.hyphen.android.ui.HyphenUiModel
+import dev.hyphen.android.ui.FirstUseOnboardingPreferences
 import dev.hyphen.android.ui.TextDirection
 import dev.hyphen.android.ui.TextKind
 import dev.hyphen.android.ui.TransferDirection
 import dev.hyphen.android.ui.theme.HyphenTheme
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
 
 // Compose host + controller (frontend UX plan Track B). The UI is Jetpack
@@ -104,7 +112,9 @@ class MainActivity : ComponentActivity() {
     private var discoveryActive = false
     private val discoveredServices = linkedMapOf<String, DiscoveredService>()
     private val pairingAttemptToken = AtomicReference<PairingAttemptToken?>()
+    private val pairingAttemptPayload = AtomicReference<ParsedEndpoint.QrPayload?>()
     private var consumedPairingIntentToken: String? = null
+    private var pairingWasActiveAtLastSave = false
     private var pendingNotificationAction: PendingNotificationAction? = null
     private val supervisor by lazy { ConnectionSupervisor.getInstance(this) }
     private val diagnosticLogs = DiagnosticsRuntime.forActivityActions()
@@ -127,6 +137,8 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var activityDestroyed = false
     private val model = HyphenUiModel()
+    private val firstUsePreferences by lazy { FirstUseOnboardingPreferences(applicationContext) }
+    private val connectionRetryWorkerActive = AtomicBoolean(false)
     private val textConfirmationQueue = TextConfirmationQueue()
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -146,13 +158,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        consumedPairingIntentToken = savedInstanceState?.getString(STATE_CONSUMED_PAIRING_TOKEN)
+        val recreationDecision = PairingAttemptRuntime.recreationHandoff.take()
+        val pairingWasActive = savedInstanceState?.getBoolean(STATE_PAIRING_WAS_ACTIVE) == true
+        pairingWasActiveAtLastSave = pairingWasActive
+        consumedPairingIntentToken = savedInstanceState
+            ?.getString(STATE_CONSUMED_PAIRING_TOKEN)
         HyphenNotificationListenerRuntime.setNotificationPrivacyMode(
             NotificationPrivacyPreferences.localFloor(applicationContext),
         )
-        supervisor.addListener(sessionListener)
-        supervisor.replayStateTo(sessionListener)
+        supervisor.addListenerAndReplay(sessionListener)
         refreshPairingState()
+        initializeFirstUseOnboarding(savedInstanceState)
         model.setBetaDiagnostics(betaDiagnosticsEnabled())
         model.updateNotificationPrivacyLabel(notificationPrivacyStatus())
         model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
@@ -169,14 +185,34 @@ class MainActivity : ComponentActivity() {
         if (transferRetryRequired) {
             append("transfer stopped: reselect the file to retry; no restorable content source is retained")
         }
-        consumePairingIntent(intent)
+        when (pairingRestoreAction(pairingWasActive, recreationDecision)) {
+            PairingRestoreAction.RESTART_HANDOFF -> {
+                check(recreationDecision is PairingRecreationDecision.Restart)
+                append("pairing restarted after configuration change")
+                startPairing(recreationDecision.payload)
+            }
+            PairingRestoreAction.SUPPRESS ->
+                append("pairing recreation suppressed after the prior attempt ended")
+            PairingRestoreAction.REQUIRE_FRESH_INPUT -> {
+                // Do not auto-reconsume the Activity's stale launch Intent,
+                // but allow the next explicit scan of the same current code.
+                consumedPairingIntentToken = null
+                append("pairing interrupted by process restart; scan or paste the current code again")
+                showPairingRestartRequired()
+            }
+            PairingRestoreAction.CONSUME_LAUNCH_INTENT -> consumePairingIntent(intent)
+        }
     }
 
     private fun buildActions(): HyphenActions =
         HyphenActions(
             onFindMac = { startWindow() },
+            onOpenSystemCamera = { openSystemCameraForPairing() },
             onShowQrHelp = { showQrHelp() },
             onManualConnect = { probeManualEndpoint(it) },
+            onDismissFirstUse = { model.dismissFirstUseOnboardingForSession() },
+            onShowFirstUse = { model.reopenFirstUseOnboarding() },
+            onRetryConnection = { retryConnectionNow() },
             onToggleCompanionConnection = { toggleCompanionConnection() },
             onCreateAssociation = { createAssociationForCurrentPeer() },
             onListAssociations = { showAssociations() },
@@ -208,6 +244,31 @@ class MainActivity : ComponentActivity() {
         }.getOrNull()
         val name = peer?.displayName?.ifBlank { getString(R.string.conn_paired_fallback) }
         emit(ActivityEvent.PeerChanged(isPaired = peer != null, peerName = name))
+    }
+
+    private fun initializeFirstUseOnboarding(savedInstanceState: Bundle?) {
+        val hasTrustedPeer = currentTrustedPeer() != null
+        if (hasTrustedPeer &&
+            firstUsePreferences.completedVersion() < dev.hyphen.android.ui.FirstUseOnboardingContract.CURRENT_VERSION
+        ) {
+            firstUsePreferences.markCurrentVersionCompleted()
+        }
+        model.initializeFirstUseOnboarding(
+            completedVersion = firstUsePreferences.completedVersion(),
+            hasTrustedPeer = hasTrustedPeer,
+            dismissedForSession = savedInstanceState
+                ?.getBoolean(STATE_FIRST_USE_DISMISSED_FOR_SESSION) == true,
+            openedExplicitly = savedInstanceState
+                ?.getBoolean(STATE_FIRST_USE_OPENED_EXPLICITLY) == true,
+        )
+    }
+
+    private fun completeFirstUseOnboarding() {
+        if (!firstUsePreferences.markCurrentVersionCompleted()) {
+            append("first-use completion could not be saved")
+            return
+        }
+        postToUi { model.completeFirstUseOnboarding() }
     }
 
     private val sessionListener = object : ConnectionSupervisor.Listener {
@@ -461,8 +522,78 @@ class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.dlg_qr_help_title)
             .setMessage(R.string.dlg_qr_help_msg)
-            .setPositiveButton(R.string.dlg_ok, null)
+            .setPositiveButton(R.string.perm_btn_open_camera) { _, _ -> openSystemCameraForPairing() }
+            .setNegativeButton(R.string.dlg_close, null)
             .show()
+    }
+
+    private fun showPairingRestartRequired() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.pairing_restart_required_title)
+            .setMessage(R.string.pairing_restart_required_detail)
+            .setPositiveButton(R.string.perm_btn_qr_help) { _, _ -> showQrHelp() }
+            .setNegativeButton(R.string.dlg_close, null)
+            .show()
+    }
+
+    /**
+     * Launches an external camera surface. Hyphen receives no camera permission
+     * or pixels; supported camera apps expose the scanned custom URI for the
+     * user to tap, which returns through the manifest deep-link filter.
+     */
+    private fun openSystemCameraForPairing() {
+        val candidates = listOf(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))
+        val cameraIntent = candidates.firstOrNull { it.resolveActivity(packageManager) != null }
+        if (cameraIntent == null) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.camera_unavailable_title)
+                .setMessage(R.string.camera_unavailable_detail)
+                .setPositiveButton(R.string.dlg_ok, null)
+                .show()
+            append("system camera entry unavailable; pairing paste fallback remains available")
+            return
+        }
+        try {
+            startActivity(cameraIntent)
+            append("system camera opened for user-driven QR handoff")
+        } catch (error: ActivityNotFoundException) {
+            append("system camera entry failed: ${error.message}")
+            AlertDialog.Builder(this)
+                .setTitle(R.string.camera_unavailable_title)
+                .setMessage(R.string.camera_unavailable_detail)
+                .setPositiveButton(R.string.dlg_ok, null)
+                .show()
+        }
+    }
+
+    private fun retryConnectionNow() {
+        if (!connectionRetryWorkerActive.compareAndSet(false, true)) {
+            append("connection recovery request already being processed")
+            return
+        }
+        val launched = launchWorker("hyphen-connection-retry") {
+            try {
+                when (supervisor.retryConnectionNow()) {
+                    ConnectionRetryResult.STARTED -> append("connection recovery requested")
+                    ConnectionRetryResult.ALREADY_IN_PROGRESS ->
+                        append("connection recovery already in progress")
+                    ConnectionRetryResult.UNAVAILABLE -> postToUi { showConnectionRecoveryUnavailable() }
+                }
+            } finally {
+                connectionRetryWorkerActive.set(false)
+            }
+        }
+        if (!launched) connectionRetryWorkerActive.set(false)
+    }
+
+    private fun showConnectionRecoveryUnavailable() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.recovery_unavailable_title)
+            .setMessage(R.string.recovery_unavailable_detail)
+            .setPositiveButton(R.string.perm_btn_qr_help) { _, _ -> showQrHelp() }
+            .setNegativeButton(R.string.dlg_close, null)
+            .show()
+        append("connection recovery unavailable; a verified pairing route is required")
     }
 
     private fun renderCdm(event: AssociationEvent) = renderCdm(null, event)
@@ -771,6 +902,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         consumedPairingIntentToken?.let { outState.putString(STATE_CONSUMED_PAIRING_TOKEN, it) }
+        pairingWasActiveAtLastSave = pairingAttemptToken.get() != null
+        outState.putBoolean(STATE_PAIRING_WAS_ACTIVE, pairingWasActiveAtLastSave)
+        outState.putBoolean(
+            STATE_FIRST_USE_DISMISSED_FOR_SESSION,
+            model.firstUseOnboarding.dismissedForSession,
+        )
+        outState.putBoolean(
+            STATE_FIRST_USE_OPENED_EXPLICITLY,
+            model.firstUseOnboarding.openedExplicitly,
+        )
         super.onSaveInstanceState(outState)
     }
 
@@ -839,6 +980,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         pairingAttemptToken.set(attempt)
+        pairingAttemptPayload.set(qr)
         append("pairing: provisional TLS to ${qr.host}:${qr.port} …")
         val launched = launchWorker("hyphen-pairing") {
             var socket: SSLSocket? = null
@@ -929,9 +1071,25 @@ class MainActivity : ComponentActivity() {
                                     } ==
                                         PairingCommit.Outcome.TRUSTED,
                                 ) { "SAS trust gate rejected an accepted pairing" }
+                                check(PairingAttemptRuntime.coordinator.markTrustCommitted(attempt)) {
+                                    "pairing attempt ended before trust commit was recorded"
+                                }
                                 Unit
                             } != null) { "pairing attempt no longer active" }
+                            if (PairingAttemptRuntime.coordinator.isCancellationRequested(attempt)) {
+                                cancelPairingAttempt(attempt, socket)
+                                return@runCatching
+                            }
+                            if (PairingAttemptRuntime.coordinator.isRecreationRequested(attempt)) {
+                                // Configuration teardown must not wait for the
+                                // durable commit. Retire on this worker, then
+                                // reconnect from the route that was just saved.
+                                cancelPairingAttempt(attempt, socket)
+                                supervisor.resumeConnection()
+                                return@runCatching
+                            }
                             append("paired — fingerprint pinned (${gate.sas})")
+                            completeFirstUseOnboarding()
                             emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_paired), System.currentTimeMillis()))
                             startSteadySession(attempt, qr, socket)
                         }.onFailure { error ->
@@ -1017,12 +1175,32 @@ class MainActivity : ComponentActivity() {
 
     private fun cancelPairingAttempt(attempt: PairingAttemptToken, socket: SSLSocket? = null) {
         PairingAttemptRuntime.coordinator.cancel(attempt, socket)
-        pairingAttemptToken.compareAndSet(attempt, null)
+        if (pairingAttemptToken.compareAndSet(attempt, null)) {
+            pairingAttemptPayload.set(null)
+        }
+    }
+
+    /** Lifecycle cancellation never waits for durable storage or TLS close. */
+    private fun cancelPairingAttemptForLifecycle(attempt: PairingAttemptToken) {
+        val retire = requestPairingAttemptCancellation(attempt)
+        supervisor.launchProcessWorker("hyphen-pairing-lifecycle-close", retire)
+    }
+
+    private fun requestPairingAttemptCancellation(attempt: PairingAttemptToken): () -> Unit {
+        PairingAttemptRuntime.coordinator.requestCancellation(attempt)
+        if (pairingAttemptToken.compareAndSet(attempt, null)) {
+            pairingAttemptPayload.set(null)
+        }
+        return {
+            PairingAttemptRuntime.coordinator.retire(attempt).closeSockets()
+        }
     }
 
     private fun completePairingAttempt(attempt: PairingAttemptToken) {
         PairingAttemptRuntime.coordinator.complete(attempt)
-        pairingAttemptToken.compareAndSet(attempt, null)
+        if (pairingAttemptToken.compareAndSet(attempt, null)) {
+            pairingAttemptPayload.set(null)
+        }
     }
 
     private fun pickFileToSend() {
@@ -1561,13 +1739,39 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        val activePairingAttempt = pairingAttemptToken.get()
+        if (isChangingConfigurations) {
+            val retirement = if (activePairingAttempt != null) {
+                PairingAttemptRuntime.coordinator.tryCancelForRecreation(
+                    activePairingAttempt,
+                    pairingAttemptPayload.get(),
+                )
+            } else if (pairingWasActiveAtLastSave) {
+                PairingRecreationRetirement(PairingRecreationDecision.Suppress, emptyList())
+            } else {
+                null
+            }
+            retirement?.decision?.let(PairingAttemptRuntime.recreationHandoff::offer)
+            retirement?.let { captured ->
+                supervisor.launchProcessWorker("hyphen-pairing-recreation-close") {
+                    activePairingAttempt?.let { attempt ->
+                        PairingAttemptRuntime.coordinator.retire(attempt).closeSockets()
+                    }
+                    captured.closeSockets()
+                }
+            }
+            if (activePairingAttempt != null) {
+                pairingAttemptToken.compareAndSet(activePairingAttempt, null)
+                pairingAttemptPayload.set(null)
+            }
+        }
         val workers = synchronized(workerLock) {
             activityDestroyed = true
             activeWorkers.toList().also { activeWorkers.clear() }
         }
         workers.forEach { it.interrupt() }
         AssociationAttemptRuntime.coordinator.detachApprovalListener(associationApprovalListener)
-        pairingAttemptToken.get()?.let { cancelPairingAttempt(it) }
+        pairingAttemptToken.get()?.let { cancelPairingAttemptForLifecycle(it) }
         supervisor.removeListener(sessionListener)
         super.onDestroy()
         manager?.stop()
@@ -1577,8 +1781,10 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations &&
             !CompanionConnectionServiceController.keepConnected(this)
         ) {
-            pairingAttemptToken.get()?.let { cancelPairingAttempt(it) }
-            supervisor.pauseConnection()
+            val pairingRetirement = pairingAttemptToken.get()
+                ?.let(::requestPairingAttemptCancellation)
+                ?: {}
+            supervisor.pauseConnectionForLifecycle(pairingRetirement)
         }
         super.onStop()
     }
@@ -1590,5 +1796,8 @@ class MainActivity : ComponentActivity() {
         const val DEFAULT_TRANSFER_CHUNK_BYTES = 256 * 1024
         const val MAX_LOG_LINES = 500
         const val STATE_CONSUMED_PAIRING_TOKEN = "consumed_pairing_token"
+        const val STATE_PAIRING_WAS_ACTIVE = "pairing_was_active"
+        const val STATE_FIRST_USE_DISMISSED_FOR_SESSION = "first_use_dismissed_for_session"
+        const val STATE_FIRST_USE_OPENED_EXPLICITLY = "first_use_opened_explicitly"
     }
 }

@@ -7,6 +7,36 @@
     <string name="app_name">Hyphen</string>
     <string name="brand_tagline">本地优先 · 可审计 · Mac × Android 持续连接层</string>
 
+    <!-- 首次使用与连接恢复 -->
+    <string name="first_use_title">设置本地伴侣连接</string>
+    <string name="first_use_subtitle">先完成配对；所有可选权限都会保持关闭，直到你主动开启。</string>
+    <string name="first_use_local_title">设计上仅限本地</string>
+    <string name="first_use_local_detail">手机通过局域网 TLS 直接连接 Mac；无需账号、没有云端中继，也不默认启用遥测。</string>
+    <string name="first_use_local_badge">无云端</string>
+    <string name="first_use_camera_step">1 · 打开系统相机</string>
+    <string name="first_use_camera_detail">在 Mac 上显示配对二维码。如果本机相机支持自定义链接识别，请点按 hyphen://pair 结果返回这里。不同设备的相机支持可能不同。</string>
+    <string name="first_use_paste_step">2 · 或粘贴配对载荷</string>
+    <string name="first_use_paste_detail">粘贴完整配对链接，或 Mac 显示的地址与 nonce。两条路径使用同一套严格解析器。</string>
+    <string name="first_use_paste_action">校验并配对</string>
+    <string name="first_use_sas_step">3 · 对比两端配对码</string>
+    <string name="first_use_sas_detail">只有手机和 Mac 的六位数字完全一致时才信任。两端都确认后才会保存信任。</string>
+    <string name="first_use_optional_detail">配对后，通知镜像和后台伴侣连接仍是可选项。每项都会先解释访问范围，再打开 Android 设置或显示前台通知。</string>
+    <string name="first_use_not_now">稍后完成</string>
+    <string name="first_use_show_action">打开设置指南</string>
+    <string name="recovery_degraded_title">连接不稳定</string>
+    <string name="recovery_degraded_detail">立即重启已认证的局域网会话，不必继续等待当前连接自行恢复。</string>
+    <string name="recovery_reconnecting_title">仍在重新连接？</string>
+    <string name="recovery_reconnecting_detail">跳过当前退避等待，立即重试这台已信任的 Mac。</string>
+    <string name="recovery_suspended_title">伴侣连接已暂停</string>
+    <string name="recovery_suspended_detail">重试已保存且固定指纹的路由；如果路由已不可用，Hyphen 会提示重新配对。</string>
+    <string name="recovery_retry_now">立即重试</string>
+    <string name="recovery_unavailable_title">配对路由不可用</string>
+    <string name="recovery_unavailable_detail">本机已没有可用于该受信任 Mac 的本地路由。请打开 Mac 配对页面并重新配对。</string>
+    <string name="pairing_restart_required_title">配对已中断</string>
+    <string name="pairing_restart_required_detail">Android 在配对期间重启了 Hyphen。请重新扫描或粘贴当前配对码；Hyphen 不会猜测之前正在处理哪一个链接。</string>
+    <string name="camera_unavailable_title">系统相机不可用</string>
+    <string name="camera_unavailable_detail">Hyphen 无法打开系统相机。请改为粘贴 Mac 的配对链接或地址；Hyphen 不会申请相机权限。</string>
+
     <!-- Connection header -->
     <string name="conn_paired_fallback">已配对设备</string>
     <string name="conn_unpaired_title">尚未配对</string>
@@ -86,6 +116,7 @@
     <string name="perm_localnet_detail">在 Wi-Fi 上查找并连接你的 Mac，不扫描互联网。</string>
     <string name="perm_localnet_badge">本地</string>
     <string name="perm_btn_find_mac">查找 Mac</string>
+    <string name="perm_btn_open_camera">打开相机</string>
     <string name="perm_manual_title">手动配对</string>
     <string name="perm_manual_detail">粘贴 host:port 或 hyphen://pair 载荷，走同一条校验链路。</string>
     <string name="perm_manual_hint">host:port 或 hyphen://pair</string>

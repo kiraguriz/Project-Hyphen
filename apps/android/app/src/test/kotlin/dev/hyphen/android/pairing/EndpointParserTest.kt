@@ -133,6 +133,34 @@ class EndpointParserTest {
     }
 
     @Test
+    fun `public and globally resolved endpoint shapes are rejected before dialing`() {
+        listOf(
+            "93.184.216.34:443",
+            "example.com:443",
+            "8.8.8.8:53",
+        ).forEach { endpoint ->
+            assertEquals(
+                RejectReason.NON_LOCAL_ENDPOINT,
+                rejected(EndpointParser.parseQr(qr(ep = endpoint))),
+            )
+            assertEquals(
+                RejectReason.NON_LOCAL_ENDPOINT,
+                rejected(EndpointParser.parseManual(endpoint)),
+            )
+        }
+
+        listOf(
+            "10.0.0.7:48273",
+            "172.16.0.7:48273",
+            "192.168.1.7:48273",
+            "169.254.2.3:48273",
+            "macbook-pro.local:48273",
+        ).forEach { endpoint ->
+            assertTrue(EndpointParser.parseManual(endpoint) is ParseResult.Ok)
+        }
+    }
+
+    @Test
     fun `device name uses strict utf8 scalar decoding and canonical percent encoding`() {
         listOf("%ED%A0%80", "%C3%28", "\uD800")
             .forEach { name ->

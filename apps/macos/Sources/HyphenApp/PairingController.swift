@@ -1793,8 +1793,9 @@ final class PairingController: NSObject {
 
 }
 
-/// First active non-loopback IPv4, preferring en* interfaces (Wi-Fi/
-/// Ethernet) — the address that goes into the QR endpoint.
+/// First active protocol-v0 LAN IPv4, preferring en* interfaces (Wi-Fi/
+/// Ethernet) — the address that goes into the QR endpoint. Public and overlay
+/// addresses are skipped so Android will never reject a QR emitted here.
 enum LocalIPv4 {
     static func first() -> String? {
         var addrs: UnsafeMutablePointer<ifaddrs>?
@@ -1814,6 +1815,7 @@ enum LocalIPv4 {
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
             let address = String(cString: host)
+            guard PairingEndpointHostPolicy.isAllowed(address) else { continue }
             if String(cString: ifa.pointee.ifa_name).hasPrefix("en") {
                 return address
             }

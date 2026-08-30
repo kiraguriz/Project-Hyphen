@@ -35,9 +35,7 @@ public struct PairingQRPayload: Equatable {
     ) {
         guard spkiFingerprint.count == Self.fingerprintLength,
               nonce.count == Self.nonceLength,
-              !host.isEmpty,
-              host.count <= 253,
-              host.unicodeScalars.allSatisfy({ Self.asciiHost.contains($0) }),
+              PairingEndpointHostPolicy.isAllowed(host),
               port >= 1,
               deviceName.map(Self.isSafeDeviceName) ?? true
         else { return nil }
@@ -64,10 +62,6 @@ public struct PairingQRPayload: Equatable {
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
     )
 
-    private static let asciiHost = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-."
-    )
-
     private static func isSafeDeviceName(_ value: String) -> Bool {
         guard !value.isEmpty, value.unicodeScalars.count <= 80 else { return false }
         return value.unicodeScalars.allSatisfy { scalar in
@@ -75,6 +69,59 @@ public struct PairingQRPayload: Equatable {
             return category != .control && category != .format
         }
     }
+}
+
+/// The protocol-v0 LAN boundary shared by QR construction and the app's
+/// interface selection. It deliberately excludes public IPv4 addresses and
+/// global DNS names before a pairing payload can be displayed.
+public enum PairingEndpointHostPolicy {
+    public static func isAllowed(_ host: String) -> Bool {
+        guard !host.isEmpty,
+              host.count <= 253,
+              host.unicodeScalars.allSatisfy({ asciiHost.contains($0) })
+        else { return false }
+
+        let normalized = host.lowercased().hasSuffix(".")
+            ? String(host.lowercased().dropLast())
+            : host.lowercased()
+        if let octets = parseIPv4(normalized) {
+            return octets[0] == 10 ||
+                (octets[0] == 172 && (16...31).contains(octets[1])) ||
+                (octets[0] == 192 && octets[1] == 168) ||
+                (octets[0] == 169 && octets[1] == 254) ||
+                octets[0] == 127
+        }
+        guard normalized.hasSuffix(".local") else { return false }
+        return normalized.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            guard !label.isEmpty,
+                  label.count <= 63,
+                  label.first != "-",
+                  label.last != "-"
+            else { return false }
+            return label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+    }
+
+    private static func parseIPv4(_ host: String) -> [Int]? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [Int] = []
+        for part in parts {
+            guard !part.isEmpty,
+                  part.count <= 3,
+                  part.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  !(part.count > 1 && part.first == "0"),
+                  let value = Int(part),
+                  (0...255).contains(value)
+            else { return nil }
+            octets.append(value)
+        }
+        return octets
+    }
+
+    private static let asciiHost = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-."
+    )
 }
 
 public enum PairingNonce {

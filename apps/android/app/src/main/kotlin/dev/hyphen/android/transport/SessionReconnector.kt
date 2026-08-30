@@ -6,6 +6,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
 
+enum class ReconnectRetryOutcome {
+    SCHEDULED,
+    ALREADY_IN_PROGRESS,
+    FAILED,
+}
+
 /**
  * Client-side reconnect with protocol §4.5 backoff (HYP-M2-013): dial →
  * handshake (presenting the held resume token) → session; on loss, retry
@@ -62,13 +68,13 @@ class SessionReconnector(
         fun onRetryScheduled(attempt: Int, delaySeconds: Long) {}
         fun onAttemptFailed(reason: String?) {}
         /** Forwarded from the active session. */
-        fun onEnvelope(envelope: Envelope) {}
-        fun onLiveness(state: HeartbeatMonitor.State) {}
-        fun onAck(messageId: String) {}
-        fun onAckTimeout(messageId: String) {}
-        fun onProtocolError(code: String, detail: String) {}
+        fun onEnvelope(session: ProtocolSession, envelope: Envelope) {}
+        fun onLiveness(session: ProtocolSession, state: HeartbeatMonitor.State) {}
+        fun onAck(session: ProtocolSession, messageId: String) {}
+        fun onAckTimeout(session: ProtocolSession, messageId: String) {}
+        fun onProtocolError(session: ProtocolSession, code: String, detail: String) {}
         /** Active session closed; a retry may follow unless [stop] was called. */
-        fun onSessionLost() {}
+        fun onSessionLost(session: ProtocolSession) {}
     }
 
     private val stopped = AtomicBoolean(false)
@@ -90,7 +96,36 @@ class SessionReconnector(
                 scheduleAttemptLocked(0)
             }
         }
-        attempt?.let { scheduler.schedule(it.delayMs) { attempt(it.id) } }
+        attempt?.let {
+            try {
+                scheduler.schedule(it.delayMs) { attempt(it.id) }
+            } catch (failure: RuntimeException) {
+                rollbackUnsubmittedAttempt(it.id)
+                throw failure
+            }
+        }
+    }
+
+    /**
+     * Supersedes a queued backoff with an immediate attempt. The monotonically
+     * increasing attempt id makes an already-delivered stale scheduler callback
+     * harmless. An in-flight handshake is never duplicated.
+     */
+    fun retryNow(): ReconnectRetryOutcome {
+        val attempt = synchronized(stateLock) {
+            when {
+                stopped.get() -> return ReconnectRetryOutcome.FAILED
+                activeSession != null || attemptInFlight -> return ReconnectRetryOutcome.ALREADY_IN_PROGRESS
+                else -> scheduleAttemptLocked(0)
+            }
+        }
+        return try {
+            scheduler.schedule(attempt.delayMs) { attempt(attempt.id) }
+            ReconnectRetryOutcome.SCHEDULED
+        } catch (_: RuntimeException) {
+            rollbackUnsubmittedAttempt(attempt.id)
+            ReconnectRetryOutcome.FAILED
+        }
     }
 
     fun stop() {
@@ -147,7 +182,7 @@ class SessionReconnector(
             )
         } catch (e: Exception) {
             runCatching { socket?.close() }
-            listener.onAttemptFailed(e.message)
+            runCatching { listener.onAttemptFailed(e.message) }
             scheduleRetryAfterFailedAttempt(snapshot.id)
             return
         }
@@ -158,8 +193,8 @@ class SessionReconnector(
         }
         val connectedSocket = checkNotNull(socket)
 
-        var sessionRef: ProtocolSession? = null
-        val session = ProtocolSession(
+        lateinit var session: ProtocolSession
+        session = ProtocolSession(
             socket = connectedSocket,
             sessionId = handshake.sessionId,
             config = sessionConfig.copy(
@@ -167,19 +202,18 @@ class SessionReconnector(
                 startingSeq = 1,
             ),
             listener = object : ProtocolSession.Listener {
-                override fun onEnvelope(envelope: Envelope) = listener.onEnvelope(envelope)
-                override fun onLiveness(state: HeartbeatMonitor.State) = listener.onLiveness(state)
-                override fun onAck(messageId: String) = listener.onAck(messageId)
-                override fun onAckTimeout(messageId: String) = listener.onAckTimeout(messageId)
+                override fun onEnvelope(envelope: Envelope) = listener.onEnvelope(session, envelope)
+                override fun onLiveness(state: HeartbeatMonitor.State) = listener.onLiveness(session, state)
+                override fun onAck(messageId: String) = listener.onAck(session, messageId)
+                override fun onAckTimeout(messageId: String) = listener.onAckTimeout(session, messageId)
                 override fun onProtocolError(code: String, detail: String) =
-                    listener.onProtocolError(code, detail)
+                    listener.onProtocolError(session, code, detail)
 
                 override fun onClosed() {
-                    sessionRef?.let { scheduleRetryAfterSessionClosed(it) }
+                    scheduleRetryAfterSessionClosed(session)
                 }
             },
         )
-        sessionRef = session
         val assigned = synchronized(stateLock) {
             attemptInFlight = false
             connecting = false
@@ -198,7 +232,16 @@ class SessionReconnector(
             runCatching { connectedSocket.close() }
             return
         }
-        listener.onSession(session, handshake)
+        val listenerAccepted = runCatching {
+            listener.onSession(session, handshake)
+        }.isSuccess
+        if (!listenerAccepted) {
+            // A throwing owner callback must not strand an assigned socket in
+            // activeSession. Closing the session clears ownership through the
+            // normal terminal callback and schedules the next bounded retry.
+            session.stop()
+            return
+        }
         if (stopped.get()) {
             session.stop()
             return
@@ -229,15 +272,18 @@ class SessionReconnector(
     }
 
     private fun scheduleRetryAfterSessionClosed(session: ProtocolSession) {
+        var accepted = false
         val retry = synchronized(stateLock) {
             if (activeSession !== session) {
                 null
             } else {
+                accepted = true
                 activeSession = null
                 if (stopped.get() || connecting) null else nextRetryLocked()
             }
         }
-        listener.onSessionLost()
+        if (!accepted) return
+        runCatching { listener.onSessionLost(session) }
         retry?.schedule()
     }
 
@@ -258,8 +304,27 @@ class SessionReconnector(
         return ScheduledAttempt(id, delayMs)
     }
 
+    /** Restores retryability when a scheduler rejects work before accepting it. */
+    private fun rollbackUnsubmittedAttempt(id: Long) {
+        synchronized(stateLock) {
+            if (id == nextAttemptId && activeSession == null && !attemptInFlight) {
+                connecting = false
+            }
+        }
+    }
+
     private fun RetryPlan.schedule() {
-        listener.onRetryScheduled(attemptNumber, delaySeconds)
-        scheduler.schedule(attempt.delayMs) { attempt(attempt.id) }
+        val accepted = try {
+            scheduler.schedule(attempt.delayMs) { attempt(attempt.id) }
+            true
+        } catch (_: RuntimeException) {
+            rollbackUnsubmittedAttempt(attempt.id)
+            false
+        }
+        if (accepted) {
+            runCatching { listener.onRetryScheduled(attemptNumber, delaySeconds) }
+        } else {
+            runCatching { listener.onAttemptFailed("retry scheduler unavailable") }
+        }
     }
 }
