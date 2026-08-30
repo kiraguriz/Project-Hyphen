@@ -166,4 +166,17 @@ final class EnvelopeAndFrameTests: XCTestCase {
         XCTAssertEqual(timeouts, ["B"])
         XCTAssertEqual(tracker.pendingCount, 0)
     }
+
+    func testAckTrackerAppliesBoundedBackpressureAndRecoversAfterAck() {
+        let tracker = AckTracker(timeoutMs: 10_000, maxPending: 2) { _ in }
+
+        XCTAssertTrue(tracker.registerSent(messageId: "A", nowMs: 0))
+        XCTAssertTrue(tracker.registerSent(messageId: "B", nowMs: 0))
+        XCTAssertFalse(tracker.registerSent(messageId: "C", nowMs: 0))
+        XCTAssertEqual(tracker.pendingCount, 2)
+
+        XCTAssertTrue(tracker.ackReceived("A"))
+        XCTAssertTrue(tracker.registerSent(messageId: "C", nowMs: 1))
+        XCTAssertEqual(tracker.pendingCount, 2)
+    }
 }

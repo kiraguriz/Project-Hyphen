@@ -2,6 +2,11 @@ package dev.hyphen.android.transfer
 
 import dev.hyphen.android.transport.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 
 /**
  * Peer-bound durable transfer checkpoints (dimension 02 P2). Stores manifest,
@@ -14,6 +19,7 @@ class TransferCheckpointStore(
     private val root: File,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val ttlMs: Long = DEFAULT_TTL_MS,
+    private val syncDirectory: (Path) -> Unit = ::syncDirectoryDurably,
 ) {
     data class Record(
         val fileId: String,
@@ -32,11 +38,34 @@ class TransferCheckpointStore(
 
     init {
         require(root.exists() || root.mkdirs()) { "transfer checkpoint storage unavailable" }
+        cleanupStagedFiles()
     }
 
     @Synchronized
     fun save(record: Record) {
-        File(root, fileName(record.fileId)).writeText(encode(record))
+        val target = File(root, fileName(record.fileId)).toPath()
+        val staged = Files.createTempFile(root.toPath(), STAGED_PREFIX, STAGED_SUFFIX)
+        try {
+            FileOutputStream(staged.toFile()).use { output ->
+                output.write(encode(record).toByteArray(StandardCharsets.UTF_8))
+                output.fd.sync()
+            }
+            // Fail closed if the provider cannot atomically replace: the old
+            // checkpoint remains intact and the staged file is removed below.
+            Files.move(
+                staged,
+                target,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+            // The file fsync protects contents; syncing the containing
+            // directory makes the atomic name replacement power-loss durable.
+            // If a provider cannot do this, save fails instead of claiming a
+            // durable checkpoint that only survived process crashes.
+            syncDirectory(root.toPath())
+        } finally {
+            Files.deleteIfExists(staged)
+        }
     }
 
     @Synchronized
@@ -80,11 +109,35 @@ class TransferCheckpointStore(
     }
 
     @Synchronized
+    fun invalidateAll() {
+        root.listFiles()?.forEach { file ->
+            if (file.isFile && file.name.endsWith(".json")) {
+                file.delete()
+            }
+        }
+    }
+
+    @Synchronized
     fun purgeExpired() {
+        cleanupStagedFiles()
         root.listFiles()?.forEach { file ->
             if (!file.isFile || !file.name.endsWith(".json")) return@forEach
             val record = runCatching { decode(file.readText()) }.getOrNull()
             if (record == null || isExpired(record)) {
+                file.delete()
+            }
+        }
+    }
+
+    private fun cleanupStagedFiles() {
+        val orphanCutoffMs = System.currentTimeMillis() - STAGED_ORPHAN_AGE_MS
+        root.listFiles()?.forEach { file ->
+            if (
+                file.isFile &&
+                file.name.startsWith(STAGED_PREFIX) &&
+                file.name.endsWith(STAGED_SUFFIX) &&
+                file.lastModified() <= orphanCutoffMs
+            ) {
                 file.delete()
             }
         }
@@ -147,6 +200,9 @@ class TransferCheckpointStore(
     }
 
     companion object {
+        private const val STAGED_PREFIX = ".checkpoint-"
+        private const val STAGED_SUFFIX = ".tmp"
+        private const val STAGED_ORPHAN_AGE_MS = 60L * 60 * 1000
         const val DEFAULT_TTL_MS = 7L * 24 * 60 * 60 * 1000
 
         fun defaultRoot(context: android.content.Context): File =

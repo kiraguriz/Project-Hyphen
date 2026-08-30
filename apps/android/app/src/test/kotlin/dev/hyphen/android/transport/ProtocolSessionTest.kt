@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLSocket
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -208,6 +209,57 @@ class ProtocolSessionTest {
             clientListener.ackTimeoutLatch.await(3, TimeUnit.SECONDS),
         )
         assertEquals(messageId, clientListener.ackTimeout.get())
+    }
+
+    @Test
+    fun `requiresAck sends fail closed when the session ack window is full`() {
+        val serverListener = RecordingListener()
+        val clientListener = RecordingListener()
+        val quiet = fast.copy(heartbeatIntervalMs = 60_000, ackTimeoutMs = 60_000)
+        val pair = connectedPair(
+            serverConfig = quiet.copy(autoAck = false),
+            clientConfig = quiet.copy(maxUnackedMessages = 2),
+            serverListener = serverListener,
+            clientListener = clientListener,
+        )
+
+        pair.second.send("text.send", requiresAck = true, capability = "text.v1")
+        pair.second.send("text.send", requiresAck = true, capability = "text.v1")
+        val rejected = assertThrows(ProtocolSession.SendRejected::class.java) {
+            pair.second.send("text.send", requiresAck = true, capability = "text.v1")
+        }
+
+        assertEquals("protocol/flow-control", rejected.code)
+        assertEquals("protocol/flow-control", clientListener.protocolError.get())
+    }
+
+    @Test
+    fun `local oversized send does not consume sequence or close the session`() {
+        val serverListener = RecordingListener()
+        val clientListener = RecordingListener()
+        val quiet = fast.copy(heartbeatIntervalMs = 60_000, ackTimeoutMs = 60_000)
+        val pair = connectedPair(quiet, quiet, serverListener, clientListener)
+
+        assertThrows(FrameIO.FrameTooLarge::class.java) {
+            pair.second.send(
+                type = "text.send",
+                payload = Json.obj("value" to Json.Str("x".repeat(FrameIO.MAX_FRAME_BYTES))),
+                requiresAck = true,
+                capability = "text.v1",
+            )
+        }
+        assertEquals("transport/frame-too-large", clientListener.protocolError.get())
+
+        pair.second.send(
+            type = "text.send",
+            payload = Json.obj("value" to Json.Str("still connected")),
+            requiresAck = true,
+            capability = "text.v1",
+        )
+
+        assertTrue("valid send after local rejection must arrive", serverListener.envelopeLatch.await(3, TimeUnit.SECONDS))
+        assertEquals(1L, synchronized(serverListener.envelopes) { serverListener.envelopes.single().seq })
+        assertTrue(!clientListener.closedLatch.await(200, TimeUnit.MILLISECONDS))
     }
 
     @Test

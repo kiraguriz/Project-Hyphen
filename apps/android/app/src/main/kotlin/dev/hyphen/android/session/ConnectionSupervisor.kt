@@ -105,17 +105,18 @@ class ConnectionSupervisor private constructor(
         synchronized(stateLock) { transferCheckpointStore = store }
     }
 
-    fun bindTransferPersistence(receiver: TransferReceiver) {
+    fun bindTransferPersistence(receiver: TransferReceiver): List<dev.hyphen.android.transfer.TransferCompleted> {
         val peerFingerprint: ByteArray
         val sessionId: String
         synchronized(stateLock) {
-            peerFingerprint = trustedPeerFingerprint ?: return
-            sessionId = lastSessionId ?: return
+            peerFingerprint = trustedPeerFingerprint ?: return emptyList()
+            sessionId = lastSessionId ?: return emptyList()
         }
-        receiver.bindSession(peerFingerprint, sessionId)
+        val pendingDeliveries = receiver.bindSession(peerFingerprint, sessionId)
         synchronized(stateLock) {
             activeTransferSender?.bindSession(peerFingerprint, sessionId)
         }
+        return pendingDeliveries
     }
 
     fun invalidateTransferCheckpoints(
@@ -126,6 +127,13 @@ class ConnectionSupervisor private constructor(
         synchronized(stateLock) {
             activeTransferSender?.invalidatePeerCheckpoints(peerFingerprint)
             transferCheckpointStore?.invalidatePeer(peerFingerprint)
+        }
+    }
+
+    fun invalidateAllTransferCheckpoints(receiver: TransferReceiver) {
+        receiver.invalidateAllCheckpoints()
+        synchronized(stateLock) {
+            transferCheckpointStore?.invalidateAll()
         }
     }
 

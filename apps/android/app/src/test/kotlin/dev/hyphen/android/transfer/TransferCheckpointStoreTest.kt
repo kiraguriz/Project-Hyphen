@@ -1,6 +1,7 @@
 package dev.hyphen.android.transfer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -90,6 +91,89 @@ class TransferCheckpointStoreTest {
         now = 11
         store.purgeExpired()
         assertTrue(store.loadActiveForPeer(peerA).isEmpty())
+    }
+
+    @Test
+    fun `save atomically replaces a read-only checkpoint file`() {
+        val now = 2_000L
+        val root = temp.newFolder("atomic-checkpoints")
+        val store = TransferCheckpointStore(root, nowMs = { now })
+        val manifest = TransferManifest.fromJson(
+            manifestPayload(
+                fileId = "f_atomic_checkpoint123",
+                sizeBytes = 3,
+                chunkSizeBytes = 1024,
+                chunkCount = 1,
+            ),
+        )
+        fun record(nextChunkIndex: Int) = TransferCheckpointStore.Record(
+            fileId = manifest.fileId,
+            manifest = manifest,
+            peerFingerprintHex = peerA.toHexLower(),
+            sessionId = "s_test",
+            nextChunkIndex = nextChunkIndex,
+            receivedRanges = if (nextChunkIndex == 0) emptyList() else listOf(0 until 1),
+            updatedAtMs = now,
+            expiresAtMs = now + TransferCheckpointStore.DEFAULT_TTL_MS,
+        )
+
+        store.save(record(0))
+        val checkpoint = root.resolve("${manifest.fileId}.json")
+        assertTrue("test fixture must become read-only", checkpoint.setReadOnly())
+        try {
+            store.save(record(1))
+        } finally {
+            checkpoint.setWritable(true)
+        }
+
+        assertEquals(1, store.load(manifest.fileId)?.nextChunkIndex)
+        assertEquals(listOf(checkpoint.name), root.list()?.sorted())
+    }
+
+    @Test
+    fun `opening a store scavenges an orphaned staged checkpoint`() {
+        val root = temp.newFolder("orphan-checkpoints")
+        val orphan = root.resolve(".checkpoint-crash.tmp").apply { writeText("partial") }
+        assertTrue(orphan.setLastModified(System.currentTimeMillis() - 2 * 60 * 60 * 1000))
+
+        TransferCheckpointStore(root)
+
+        assertFalse(orphan.exists())
+    }
+
+    @Test
+    fun `save syncs the checkpoint directory after atomic replacement`() {
+        val root = temp.newFolder("directory-sync-checkpoints")
+        var synced: java.nio.file.Path? = null
+        val store = TransferCheckpointStore(
+            root = root,
+            nowMs = { 2_000L },
+            syncDirectory = { synced = it },
+        )
+        val manifest = TransferManifest.fromJson(
+            manifestPayload(
+                fileId = "f_directory_sync012345",
+                sizeBytes = 0,
+                chunkSizeBytes = 1024,
+                chunkCount = 0,
+            ),
+        )
+
+        store.save(
+            TransferCheckpointStore.Record(
+                fileId = manifest.fileId,
+                manifest = manifest,
+                peerFingerprintHex = peerA.toHexLower(),
+                sessionId = "s_test",
+                nextChunkIndex = 0,
+                receivedRanges = emptyList(),
+                updatedAtMs = 2_000L,
+                expiresAtMs = 2_000L + TransferCheckpointStore.DEFAULT_TTL_MS,
+            ),
+        )
+
+        assertEquals(root.toPath(), synced)
+        assertEquals(manifest.fileId, store.load(manifest.fileId)?.fileId)
     }
 
     private fun manifestPayload(

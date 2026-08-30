@@ -312,6 +312,88 @@ final class ProtocolSessionTests: XCTestCase {
         XCTAssertEqual(clientRecorder.ackTimeoutId, messageId)
     }
 
+    func testRequiresAckSendsFailClosedWhenTheSessionAckWindowIsFull() throws {
+        let serverRecorder = Recorder()
+        let clientRecorder = Recorder()
+        var serverConfig = ProtocolSession.Config()
+        serverConfig.heartbeatIntervalMs = 60_000
+        serverConfig.ackTimeoutMs = 60_000
+        serverConfig.autoAck = false
+        var clientConfig = serverConfig
+        clientConfig.autoAck = true
+        clientConfig.maxUnackedMessages = 2
+        let pair = try connectedPair(
+            serverConfig: serverConfig,
+            clientConfig: clientConfig,
+            serverRecorder: serverRecorder,
+            clientRecorder: clientRecorder
+        )
+
+        XCTAssertNotNil(pair.client.send(type: "text.send", requiresAck: true, capability: "text.v1"))
+        XCTAssertNotNil(pair.client.send(type: "text.send", requiresAck: true, capability: "text.v1"))
+        XCTAssertNil(pair.client.send(type: "text.send", requiresAck: true, capability: "text.v1"))
+
+        wait(for: [clientRecorder.protocolErrored], timeout: 1)
+        XCTAssertEqual(clientRecorder.protocolErrorCode, "protocol/flow-control")
+    }
+
+    func testLocalEncodeFailureDoesNotConsumeAnOnWireSequence() throws {
+        let serverRecorder = Recorder()
+        let clientRecorder = Recorder()
+        let pair = try connectedPair(
+            serverConfig: fast,
+            clientConfig: fast,
+            serverRecorder: serverRecorder,
+            clientRecorder: clientRecorder
+        )
+
+        XCTAssertNil(pair.client.send(type: "text.send", payload: ["invalid": Date()]))
+        wait(for: [clientRecorder.protocolErrored], timeout: 1)
+
+        XCTAssertNotNil(pair.client.send(type: "text.send", payload: ["kind": "text"]))
+        wait(for: [serverRecorder.envelopeReceived], timeout: 3)
+        XCTAssertEqual(serverRecorder.envelopes.count, 1)
+        XCTAssertEqual(serverRecorder.envelopes.first?.seq, 1)
+    }
+
+    func testLocalOversizedFrameDoesNotConsumeSequenceOrCloseSession() throws {
+        let serverRecorder = Recorder()
+        let clientRecorder = Recorder()
+        var quiet = ProtocolSession.Config()
+        quiet.heartbeatIntervalMs = 60_000
+        quiet.ackTimeoutMs = 60_000
+        let pair = try connectedPair(
+            serverConfig: quiet,
+            clientConfig: quiet,
+            serverRecorder: serverRecorder,
+            clientRecorder: clientRecorder
+        )
+
+        XCTAssertNil(
+            pair.client.send(
+                type: "text.send",
+                payload: ["value": String(repeating: "x", count: FrameCodec.maxFrameBytes)],
+                requiresAck: true,
+                capability: "text.v1"
+            )
+        )
+        wait(for: [clientRecorder.protocolErrored], timeout: 1)
+        XCTAssertEqual(clientRecorder.protocolErrorCode, "transport/frame-too-large")
+
+        XCTAssertNotNil(
+            pair.client.send(
+                type: "text.send",
+                payload: ["value": "still connected"],
+                requiresAck: true,
+                capability: "text.v1"
+            )
+        )
+        wait(for: [serverRecorder.envelopeReceived], timeout: 3)
+        XCTAssertEqual(serverRecorder.envelopes.count, 1)
+        XCTAssertEqual(serverRecorder.envelopes.first?.seq, 1)
+        XCTAssertFalse(clientRecorder.waitForClosed(timeout: 0.2))
+    }
+
     func testOversizedFrameSurfacesFrameTooLarge() throws {
         let serverRecorder = Recorder()
         let clientRecorder = Recorder()

@@ -46,12 +46,21 @@ class HeartbeatMonitor(
 class AckTracker(
     private val timeoutMs: Long,
     private val onTimeout: (messageId: String) -> Unit,
+    private val maxPending: Int = DEFAULT_MAX_PENDING,
 ) {
     private val pending = LinkedHashMap<String, Long>()
 
+    init {
+        require(maxPending in 1..DEFAULT_MAX_PENDING) {
+            "maxPending must be between 1 and $DEFAULT_MAX_PENDING"
+        }
+    }
+
     @Synchronized
-    fun registerSent(messageId: String, nowMs: Long) {
+    fun registerSent(messageId: String, nowMs: Long): Boolean {
+        if (messageId !in pending && pending.size >= maxPending) return false
         pending[messageId] = nowMs
+        return true
     }
 
     @Synchronized
@@ -73,4 +82,8 @@ class AckTracker(
 
     @Synchronized
     fun pendingCount(): Int = pending.size
+
+    companion object {
+        const val DEFAULT_MAX_PENDING = 64
+    }
 }

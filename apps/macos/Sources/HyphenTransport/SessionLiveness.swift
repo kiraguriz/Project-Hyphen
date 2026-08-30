@@ -50,22 +50,41 @@ public final class HeartbeatMonitor {
 /// `timeoutMs` is `protocol/ack-timeout`, fired exactly once per id.
 public final class AckTracker {
 
+    public static let defaultMaxPending = 64
+
     private var pending: [String: Int64] = [:]
     private let timeoutMs: Int64
+    private let maxPending: Int
     private let onTimeout: (String) -> Void
 
-    public init(timeoutMs: Int64, onTimeout: @escaping (String) -> Void) {
+    public init(
+        timeoutMs: Int64,
+        maxPending: Int = AckTracker.defaultMaxPending,
+        onTimeout: @escaping (String) -> Void
+    ) {
+        precondition(
+            (1...AckTracker.defaultMaxPending).contains(maxPending),
+            "maxPending must be between 1 and \(AckTracker.defaultMaxPending)"
+        )
         self.timeoutMs = timeoutMs
+        self.maxPending = maxPending
         self.onTimeout = onTimeout
     }
 
-    public func registerSent(messageId: String, nowMs: Int64) {
+    @discardableResult
+    public func registerSent(messageId: String, nowMs: Int64) -> Bool {
+        if pending[messageId] == nil, pending.count >= maxPending { return false }
         pending[messageId] = nowMs
+        return true
     }
 
     @discardableResult
     public func ackReceived(_ ackOf: String) -> Bool {
         pending.removeValue(forKey: ackOf) != nil
+    }
+
+    public func unregisterSent(_ messageId: String) {
+        pending.removeValue(forKey: messageId)
     }
 
     public func tick(nowMs: Int64) {

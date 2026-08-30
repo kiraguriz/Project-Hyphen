@@ -55,6 +55,7 @@ import dev.hyphen.android.transfer.TransferCompleted
 import dev.hyphen.android.transfer.TransferEvent
 import dev.hyphen.android.transfer.FileTransferStorage
 import dev.hyphen.android.transfer.TransferCheckpointStore
+import dev.hyphen.android.transfer.ReceivedFileDelivery
 import dev.hyphen.android.transfer.StreamTransferByteSource
 import dev.hyphen.android.transfer.TransferProgress
 import dev.hyphen.android.transfer.TransferProtocol
@@ -110,7 +111,10 @@ class MainActivity : ComponentActivity() {
     }
     private val transferReceiver by lazy {
         TransferReceiver(
-            FileTransferStorage(File(cacheDir, "transfers")),
+            FileTransferStorage(
+                File(cacheDir, "transfers"),
+                isCheckpointActive = { fileId -> checkpointStore.load(fileId) != null },
+            ),
             checkpointStore = checkpointStore,
         ) { progress ->
             updateLastTransferProgress(progress)
@@ -345,8 +349,7 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.dlg_reset_msg, count))
             .setPositiveButton(R.string.dlg_reset_confirm) { _, _ ->
                 try {
-                    val peers = AndroidTrustStores.openDefault(applicationContext).allPeers()
-                    peers.forEach { supervisor.invalidateTransferCheckpoints(it.spkiFingerprint, transferReceiver) }
+                    supervisor.invalidateAllTransferCheckpoints(transferReceiver)
                     AndroidTrustStores.openDefault(applicationContext).removeAll()
                     stopCurrentSessionAfterTrustChange()
                     append("paired devices reset: $count removed")
@@ -365,7 +368,31 @@ class MainActivity : ComponentActivity() {
 
     private fun bindTransferPersistenceIfConnected() {
         if (supervisor.activeState().session == null) return
-        supervisor.bindTransferPersistence(transferReceiver)
+        supervisor.bindTransferPersistence(transferReceiver).forEach(::handleCompletedIncomingTransfer)
+    }
+
+    private fun handleCompletedIncomingTransfer(completed: TransferCompleted) {
+        updateLastTransferProgress(null)
+        try {
+            val delivered = deliverIncomingFile(completed)
+            transferReceiver.markDeliverySucceeded(completed.manifest.fileId)
+            val line = transferCompletedLine(completed, delivered)
+            val manifest = completed.manifest
+            append(line)
+            emit(ActivityEvent.TransferCompleted(
+                fileId = manifest.fileId,
+                filename = manifest.filename,
+                sizeBytes = manifest.sizeBytes,
+                direction = TransferDirection.INCOMING,
+                verified = true,
+                atMillis = System.currentTimeMillis(),
+            ))
+        } catch (e: Exception) {
+            runCatching { transferReceiver.markDeliveryFailed(completed.manifest.fileId) }
+            append(
+                "transfer received but save failed; verified source queued for retry: ${e.message}",
+            )
+        }
     }
 
     private fun peerLabel(peer: TrustedPeer): String =
@@ -618,30 +645,19 @@ class MainActivity : ComponentActivity() {
                 }
                 when (val event = transferReceiver.handle(envelope)) {
                     is TransferEvent.Completed -> {
-                        updateLastTransferProgress(null)
-                        try {
-                            val delivered = deliverIncomingFile(event.completed)
-                            val line = transferCompletedLine(event.completed, delivered)
-                            val manifest = event.completed.manifest
-                            append(line)
-                            emit(ActivityEvent.TransferCompleted(
-                                fileId = manifest.fileId,
-                                filename = manifest.filename,
-                                sizeBytes = manifest.sizeBytes,
-                                direction = TransferDirection.INCOMING,
-                                verified = true,
-                                atMillis = System.currentTimeMillis(),
-                            ))
-                        } catch (e: Exception) {
-                            append(
-                                "transfer received but save failed; original retained for retry: ${e.message}",
-                            )
-                        }
+                        handleCompletedIncomingTransfer(event.completed)
                     }
                     is TransferEvent.ResumeRequested -> {
-                        if (session != null) {
-                            val id = TransferSender(ProtocolSessionTransferOutbox(session)).sendResumeInfo(event.info)
-                            append("transfer resume info sent: $id (${event.info.fileId})")
+                        val sender = state.transferSender
+                        if (session != null && sender != null) {
+                            val id = sender.sendResumeInfo(event.info)
+                            append(
+                                if (id != null) {
+                                    "transfer resume info sent: $id (${event.info.fileId})"
+                                } else {
+                                    "transfer resume info queued: ${event.info.fileId}"
+                                },
+                            )
                         } else {
                             append("transfer resume requested without active session")
                         }
@@ -877,15 +893,16 @@ class MainActivity : ComponentActivity() {
             "(${progress.completedChunks}/${progress.totalChunks})"
 
     private fun deliverIncomingFile(completed: TransferCompleted): File {
-        // External app-private storage is unavailable when the volume is not
-        // mounted; fall back to internal storage so a verified file is never lost.
-        val baseDir = getExternalFilesDir(null) ?: filesDir
-        val downloads = File(baseDir, "received").apply { mkdirs() }
-        val target = File(downloads, completed.manifest.filename)
-        if (target.exists()) target.delete()
-        completed.file.copyTo(target, overwrite = true)
-        completed.file.delete()
-        return target
+        // External app-private storage can live on a filesystem without hard
+        // links. Prefer it, but retry atomically in internal storage when the
+        // volume cannot satisfy ReceivedFileDelivery's no-partial/no-clobber
+        // publication contract.
+        val destinations = listOfNotNull(getExternalFilesDir(null), filesDir)
+            .distinctBy { it.absolutePath }
+            .map { File(it, "received") }
+        return ReceivedFileDelivery(destinations) {
+            append("transfer cleanup: verified source retained for age-based cleanup")
+        }.deliver(completed)
     }
 
     private fun transferCompletedLine(completed: TransferCompleted, delivered: File): String =

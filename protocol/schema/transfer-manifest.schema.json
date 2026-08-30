@@ -14,9 +14,9 @@
     },
     "filename": {
       "type": "string",
-      "pattern": "^[^/\\\\]+$",
+      "pattern": "^(?=.*[^ ])[^/\\\\\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]+$",
       "maxLength": 255,
-      "description": "Display filename only; receivers choose the destination path."
+      "description": "Display filename only, capped at 255 Unicode scalar values; must contain a non-ASCII-space scalar; excludes unpaired surrogates, path separators, and C0/C1 controls while allowing other Unicode format characters such as ZWJ. Receivers choose the destination path."
     },
     "sizeBytes": {
       "type": "integer",

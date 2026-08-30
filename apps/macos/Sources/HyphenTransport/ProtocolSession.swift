@@ -14,6 +14,7 @@ public final class ProtocolSession {
         public var heartbeatIntervalMs: Int64 = 10_000
         public var missThreshold: Int64 = 2
         public var ackTimeoutMs: Int64 = 10_000
+        public var maxUnackedMessages = AckTracker.defaultMaxPending
         /// Test hook only: false simulates a protocol-violating silent peer.
         public var autoAck = true
         /// Seq already consumed on this connection (1 after a hello).
@@ -55,6 +56,10 @@ public final class ProtocolSession {
         config: Config = Config(),
         callbacks: Callbacks
     ) {
+        precondition(
+            (1...AckTracker.defaultMaxPending).contains(config.maxUnackedMessages),
+            "maxUnackedMessages must be between 1 and \(AckTracker.defaultMaxPending)"
+        )
         self.connection = connection
         self.sessionId = sessionId
         self.config = config
@@ -75,7 +80,11 @@ public final class ProtocolSession {
                 startedAtMs: Self.monotonicNowMs(),
                 onStateChange: callbacks.onLiveness
             )
-            ackTracker = AckTracker(timeoutMs: config.ackTimeoutMs, onTimeout: callbacks.onAckTimeout)
+            ackTracker = AckTracker(
+                timeoutMs: config.ackTimeoutMs,
+                maxPending: config.maxUnackedMessages,
+                onTimeout: callbacks.onAckTimeout
+            )
 
             let heartbeat = DispatchSource.makeTimerSource(queue: queue)
             heartbeat.schedule(
@@ -147,13 +156,22 @@ public final class ProtocolSession {
         guard !closed else { return nil }
         let wallNow = Self.wallNowMs()
         let timeoutNow = Self.monotonicNowMs()
-        seq += 1
+        let messageId = Ulid.generate()
+        if requiresAck,
+           !ackTracker.registerSent(messageId: messageId, nowMs: timeoutNow) {
+            callbacks.onProtocolError(
+                "protocol/flow-control",
+                "outbound ack window is full (\(config.maxUnackedMessages))"
+            )
+            return nil
+        }
+        let nextSeq = seq + 1
         let envelope = Envelope(
-            messageId: Ulid.generate(),
+            messageId: messageId,
             sessionId: sessionId,
             type: type,
             capability: capability,
-            seq: seq,
+            seq: nextSeq,
             ackOf: ackOf,
             sentAtUnixMs: wallNow,
             requiresAck: requiresAck,
@@ -161,14 +179,21 @@ public final class ProtocolSession {
         )
         do {
             let frame = try FrameCodec.encode(try envelope.encode())
-            if requiresAck { ackTracker.registerSent(messageId: envelope.messageId, nowMs: timeoutNow) }
+            // Commit the sequence only after all local validation/encoding has
+            // succeeded; refused local sends must not create an on-wire gap.
+            seq = nextSeq
             connection.send(content: frame, completion: .contentProcessed { [weak self] error in
                 guard error != nil else { return }
                 self?.queue.async { [weak self] in
                     self?.close()
                 }
             })
+        } catch let error as FrameError {
+            if requiresAck { ackTracker.unregisterSent(envelope.messageId) }
+            callbacks.onProtocolError("transport/frame-too-large", "\(error)")
+            return nil
         } catch {
+            if requiresAck { ackTracker.unregisterSent(envelope.messageId) }
             callbacks.onProtocolError("protocol/invalid-envelope", "encode failed: \(error)")
             return nil
         }

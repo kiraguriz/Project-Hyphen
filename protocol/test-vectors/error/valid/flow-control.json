@@ -1,0 +1,6 @@
+{
+  "code": "protocol/flow-control",
+  "message": "Outbound ack window is full.",
+  "regarding": null,
+  "retryable": true
+}

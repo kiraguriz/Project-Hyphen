@@ -95,6 +95,9 @@ public struct Envelope {
         if let capability { dict["capability"] = capability }
         if let ackOf { dict["ackOf"] = ackOf }
         if let trace { dict["trace"] = trace }
+        guard JSONSerialization.isValidJSONObject(dict) else {
+            throw EnvelopeError("envelope contains a non-JSON value")
+        }
         return try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
     }
 

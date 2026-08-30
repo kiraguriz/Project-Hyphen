@@ -49,7 +49,13 @@ final class PairingController: NSObject {
     private var lastTransferProgress: TransferProgress?
     private lazy var transferReceiver = TransferReceiver(
         storage: FileTransferStorage(
-            root: FileManager.default.temporaryDirectory.appendingPathComponent("hyphen-transfer", isDirectory: true)
+            root: FileManager.default.temporaryDirectory.appendingPathComponent(
+                "hyphen-transfer",
+                isDirectory: true
+            ),
+            isCheckpointActive: { [weak self] fileId in
+                self?.transferCheckpointStore.load(fileId: fileId) != nil
+            }
         ),
         checkpointStore: transferCheckpointStore,
         onProgress: { [weak self] progress in
@@ -314,7 +320,7 @@ final class PairingController: NSObject {
         steady?.stop()
         if invalidateAllTokens {
             tokenStore.invalidateAll()
-            transferCheckpointStore.invalidateAll()
+            transferReceiver.invalidateAllCheckpoints()
         } else if let fingerprint = peerFingerprint ?? rememberedFingerprint {
             tokenStore.invalidatePeer(fingerprint)
             transferCheckpointStore.invalidatePeer(fingerprint)
@@ -671,10 +677,11 @@ final class PairingController: NSObject {
                     self.stoppedForTrustChange = false
                     self.reconnectSessionActive = true
                     self.reconnectLock.unlock()
-                    self.transferReceiver.bindSession(
+                    let pendingDeliveries = self.transferReceiver.bindSession(
                         peerFingerprint: peerFingerprint,
                         sessionId: handshake.sessionId
                     )
+                    pendingDeliveries.forEach { self.handleCompletedIncomingTransfer($0) }
                     self.activeTransferSender?.bindSession(
                         peerFingerprint: peerFingerprint,
                         sessionId: handshake.sessionId
@@ -907,42 +914,18 @@ final class PairingController: NSObject {
                 }
                 switch try transferReceiver.handle(envelope) {
                 case .completed(let completed):
-                    // Delivery is a local I/O step, not a protocol fault: handle
-                    // its failure here so a verified file is never reported as a
-                    // rejected envelope, and the received bytes are not dropped.
-                    let delivered: URL
-                    do {
-                        delivered = try deliverIncomingFile(completed)
-                    } catch {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.lastTransferProgress = nil
-                            self?.onStatus("transfer received but save failed; original retained for retry: \(error)")
-                        }
-                        return
-                    }
-                    DispatchQueue.main.async { [weak self] in
-                        self?.lastTransferProgress = nil
-                        self?.onStatus("transfer received: \(completed.manifest.filename) (\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)")
-                        // The receiver only reaches `.completed` after every chunk's
-                        // SHA-256 verified, so the feed marks it verified.
-                        self?.onActivity(.transferCompleted(
-                            fileId: completed.manifest.fileId,
-                            filename: completed.manifest.filename,
-                            sizeBytes: completed.manifest.sizeBytes,
-                            direction: .incoming,
-                            verified: true,
-                            at: Date()
-                        ))
-                    }
+                    handleCompletedIncomingTransfer(completed)
                 case .resumeRequested(let info):
-                    let session = activeSession
                     DispatchQueue.main.async { [weak self] in
-                        guard let session else {
-                            self?.onStatus("transfer resume requested without active session")
+                        guard let sender = self?.activeTransferSender else {
+                            self?.onStatus("transfer resume requested without active sender")
                             return
                         }
-                        let id = TransferSender(outbox: ProtocolSessionTransferOutbox(session: session)).sendResumeInfo(info)
-                        self?.onStatus("transfer resume info sent: \(id ?? "session closed")")
+                        let id = sender.sendResumeInfo(info)
+                        self?.onStatus(
+                            id.map { "transfer resume info sent: \($0)" }
+                                ?? "transfer resume info queued: \(info.fileId)"
+                        )
                     }
                 case .cancelled(let cancel):
                     DispatchQueue.main.async { [weak self] in
@@ -1091,13 +1074,44 @@ final class PairingController: NSObject {
         guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
         }
-        let target = downloads.appendingPathComponent(completed.manifest.filename)
-        if FileManager.default.fileExists(atPath: target.path) {
-            try FileManager.default.removeItem(at: target)
+        return try ReceivedFileDelivery(
+            destinationDirectory: downloads,
+            onSourceCleanupFailure: { [weak self] in
+                self?.onStatus("transfer cleanup: verified source retained for age-based cleanup")
+            }
+        ).deliver(completed)
+    }
+
+    private func handleCompletedIncomingTransfer(_ completed: TransferCompleted) {
+        // Delivery is local I/O, not a protocol fault. The receiver keeps the
+        // verified checkpoint/source pending until this publication succeeds.
+        do {
+            let delivered = try deliverIncomingFile(completed)
+            transferReceiver.markDeliverySucceeded(fileId: completed.manifest.fileId)
+            DispatchQueue.main.async { [weak self] in
+                self?.lastTransferProgress = nil
+                self?.onStatus(
+                    "transfer received: \(completed.manifest.filename) " +
+                        "(\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)"
+                )
+                self?.onActivity(.transferCompleted(
+                    fileId: completed.manifest.fileId,
+                    filename: completed.manifest.filename,
+                    sizeBytes: completed.manifest.sizeBytes,
+                    direction: .incoming,
+                    verified: true,
+                    at: Date()
+                ))
+            }
+        } catch {
+            transferReceiver.markDeliveryFailed(fileId: completed.manifest.fileId)
+            DispatchQueue.main.async { [weak self] in
+                self?.lastTransferProgress = nil
+                self?.onStatus(
+                    "transfer received but save failed; verified source queued for retry: \(error)"
+                )
+            }
         }
-        try FileManager.default.copyItem(at: completed.fileURL, to: target)
-        try? FileManager.default.removeItem(at: completed.fileURL)
-        return target
     }
 
     private static func transferProgressLine(_ progress: TransferProgress) -> String {

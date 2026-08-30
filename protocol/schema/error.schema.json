@@ -13,6 +13,7 @@
         "protocol/invalid-envelope",
         "protocol/unknown-type",
         "protocol/ack-timeout",
+        "protocol/flow-control",
         "transport/tls-failure",
         "transport/heartbeat-timeout",
         "transport/frame-too-large",

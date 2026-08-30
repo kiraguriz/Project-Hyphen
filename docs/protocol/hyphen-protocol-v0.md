@@ -309,7 +309,7 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 | Field | Type | Required | Rule |
 |---|---|---:|---|
 | `fileId` | string | yes | Sender-generated opaque id matching `^f_[A-Za-z0-9_-]{8,128}$`; stable across resume attempts |
-| `filename` | string | yes | Display filename only, max 255 chars, no `/` or `\`; receivers choose the destination path |
+| `filename` | string | yes | Display filename only, max 255 Unicode scalar values; must include at least one scalar other than ASCII space; no unpaired surrogate, `/`, `\`, or U+0000–U+001F/U+007F–U+009F control; other format characters such as ZWJ/U+200B remain valid; receivers choose the destination path |
 | `sizeBytes` | integer | yes | Whole-file size in bytes; 0..1073741824 (v0 default max transfer size is exactly 1 GiB) |
 | `mimeType` | string | yes | Lowercase normalized media type; use `application/octet-stream` if unknown |
 | `sha256` | string | yes | Whole-file SHA-256, lowercase hex |
@@ -317,6 +317,8 @@ The normative schema is `protocol/schema/transfer-manifest.schema.json`.
 | `chunkCount` | integer | yes | Number of `transfer.chunk` payloads expected; empty files use 0; maximum 1048576 |
 
 Schema validation intentionally does not encode cross-field arithmetic such as `chunkCount == ceil(sizeBytes / chunkSizeBytes)`. Sender and receiver implementations MUST enforce that relationship when creating chunk state. Receivers MUST reject manifests that exceed the v0 transfer-size or chunk-count bounds before allocating per-chunk receive state.
+
+`filename` is display metadata, not a promise that the same byte sequence is a valid local basename. A receiver MUST derive a plain local candidate that fits its filesystem name-byte limit, preserves extension/collision-suffix space where possible, and never replaces an existing file. A completed receive MUST be copied to same-directory staging, fsynced, and revalidated against the manifest byte count and whole-file SHA-256 immediately before the final basename is atomically published. The hidden staging link MUST be removed before the containing directory is synced so one directory durability boundary records the intended namespace: final link present, staging link absent. The verified source/checkpoint MUST NOT be released until that sync succeeds. If the sync fails, the complete candidate and verified source remain pending; a retry MUST recognize an exact size/SHA match at that candidate and retry the directory sync rather than manufacture a false collision. A different pre-existing candidate still advances to a collision-safe suffix and is never replaced. If a preferred destination volume cannot supply the required atomic no-replace primitive, the receiver MUST fail closed or use an app-private fallback volume that can preserve these invariants. Crash-orphan staging payloads MUST be age-reclaimed without touching fresh active work or an inode that is also linked by a published final file. Since POSIX cannot conditionally unlink by inode identity, an implementation MAY retain a zero-byte hidden tombstone after descriptor-bound truncation. This local mapping does not relax the manifest scalar, path-separator, or C0/C1 rules.
 
 ### 7.4 `transfer.chunk` payload
 
@@ -338,7 +340,7 @@ Schema validation intentionally does not encode cross-field arithmetic such as `
 | `dataBase64` | string | yes | Base64 chunk bytes; decoded byte count must match the manifest-derived expected size |
 | `chunkSha256` | string | yes | SHA-256 of decoded chunk bytes, lowercase hex |
 
-Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, chunk-hash mismatch, or decoded-size mismatch. For every non-final chunk, decoded byte count MUST equal `manifest.chunkSizeBytes`; for the final chunk it MUST equal `manifest.sizeBytes - chunkIndex * manifest.chunkSizeBytes`. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 covers corrupted whole-file and corrupted-chunk rejection on both platforms.
+Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, invalid base64, chunk-hash mismatch, or decoded-size mismatch. For every non-final chunk, decoded byte count MUST equal `manifest.chunkSizeBytes`; for the final chunk it MUST equal `manifest.sizeBytes - chunkIndex * manifest.chunkSizeBytes`. After accepting a chunk, an implementation that persists resume checkpoints MUST sync the corresponding `.part` payload before advancing the durable checkpoint; a checkpoint must never promise bytes that can still be lost independently in a power failure. Whole-file verification against manifest `sha256` happens when all chunks are assembled; HYP-M3-013 covers corrupted whole-file and corrupted-chunk rejection on both platforms.
 
 ### 7.5 `transfer.resume.request` / `transfer.resume.info` payloads
 
@@ -364,9 +366,9 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 | `nextChunkIndex` | integer | `resume.info` only | Highest contiguous verified chunk index plus one |
 | `needsManifest` | boolean | no | `resume.info` only; omitted or `false` means the receiver has active/completed manifest state, `true` means the sender must retransmit the original `transfer.manifest` before sending chunks |
 
-If the receiver has no active or completed checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` with `needsManifest: true`, or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. The sender MUST retransmit the original `transfer.manifest` before chunk 0 when `needsManifest` is true; it MUST NOT send bare chunks for an unknown receiver state. If the receiver already completed the transfer, it SHOULD report `nextChunkIndex == chunkCount` and `needsManifest` omitted/false so the sender sends no more chunks. In v0, chunk bytes are written to receiver-owned temporary files and the checkpoint is in memory; persistent partial checkpoints across app restarts are outside HYP-M3-012's MVP and belong to later hardening.
+If the receiver has no active or completed checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` with `needsManifest: true`, or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. The sender MUST retransmit the original `transfer.manifest` before chunk 0 when `needsManifest` is true; it MUST NOT send bare chunks for an unknown receiver state. If the receiver already completed the transfer, it SHOULD report `nextChunkIndex == chunkCount` and `needsManifest` omitted/false so the sender sends no more chunks. Chunk bytes live in receiver-owned temporary files. The implementations additionally persist peer-bound partial and fully verified-but-not-yet-published checkpoints with a bounded TTL; binding a session purges expired records and their matching in-memory pending source before offering retry. This local durability behavior does not change the v0 wire payload.
 
-The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex,needsManifest?)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data.
+The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex,needsManifest?)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. Resume and cancel control messages participate in the same bounded `requiresAck` flow control as transfer data: a locally rejected control remains queued until capacity returns, while an on-wire ACK timeout retries up to three total wire attempts before the control is dropped. This prevents both healthy-session closure on local pressure and unbounded retry traffic from an unacknowledging peer. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data. When the receiver reports `nextChunkIndex == chunkCount`, the sender MUST release the matching registry entry and durable outbound checkpoint after recording terminal completion.
 
 ### 7.6 `transfer.cancel` payload and local progress
 
@@ -382,7 +384,7 @@ The implemented wire path is: receiver handles `transfer.resume.request`, return
 | Field | Type | Required | Rule |
 |---|---|---:|---|
 | `fileId` | string | yes | Transfer id being cancelled |
-| `discard` | boolean | yes | `true` means the receiver drops any in-memory checkpoint; `false` lets the receiver keep partial state for resume |
+| `discard` | boolean | yes | `true` means the receiver drops matching in-memory and durable checkpoint state; `false` lets the receiver keep partial state for resume |
 
 Transfer progress is local UI state derived from `transfer.manifest` and accepted/sent chunks. It is not a separate wire message in v0.
 
@@ -392,7 +394,7 @@ Error payload: `{ "code": "category/short-code", "message": "human readable, no 
 
 | Category | Codes (initial set) |
 |---|---|
-| `protocol/` | `version-unsupported`, `invalid-envelope`, `unknown-type`, `ack-timeout` |
+| `protocol/` | `version-unsupported`, `invalid-envelope`, `unknown-type`, `ack-timeout`, `flow-control` |
 | `transport/` | `tls-failure`, `heartbeat-timeout`, `frame-too-large`, `malformed-frame`, `connection-lost` |
 | `trust/` | `unknown-peer`, `fingerprint-mismatch`, `sas-rejected`, `peer-revoked`, `resume-token-invalid` |
 | `permission/` | `local-network-denied`, `notifications-denied`, `storage-denied`, `background-restricted` |
@@ -418,6 +420,7 @@ These decisions document the Android and macOS behavior frozen for the current v
 
 - Heartbeat interval defaults to 10 s; two missed intervals move the liveness monitor to degraded.
 - `requiresAck` envelopes use a 10 s ack timeout; each timeout fires once.
+- Each session tracks at most 64 in-flight `requiresAck` envelopes. A 65th send is refused locally as `protocol/flow-control` until an ack or timeout frees a slot; flow-control and local encoding/frame rejections do not consume a sequence number or reach the wire. Transfer senders retain bounded manifest, chunk, resume, and cancel work across that local refusal and pump it when capacity returns.
 - Session `seq` is per sender and per connection. The handshake `hello` consumes `seq: 1`; `ProtocolSession` starts subsequent traffic at `seq: 2`; reconnecting starts a new connection at `seq: 1` and preserves the logical `sessionId` only when resume succeeds.
 - Resume tokens are responder-side random 32-byte handles, base64url encoded without padding, bound to one session and one peer SPKI fingerprint.
 - Resume tokens are single-use, consumed on failed redemption, expire after 10 minutes, are invalidated on peer trust revocation, and are in-memory only.
@@ -439,7 +442,7 @@ These decisions document the Android and macOS behavior frozen for the current v
 - Notification identity is `StatusBarNotification.getKey()` only. `postTime` is not a wire identity field.
 - Mac-side dismiss and Quick Reply use request/result pairs under `notifications.v1`; result payloads return explicit v0 error codes when Android cannot act.
 - `text.send` is bidirectional under `text.v1` and requires receiver-side user confirmation before copy/open.
-- Transfer resume checkpoints are in-memory in v0; persistent checkpoints across app restarts are post-v0 hardening.
+- Transfer resume wire semantics remain v0; implementations persist peer-bound checkpoints locally with TTL, trust-revocation, and resource limits.
 - Transfer progress is local UI state, not a wire message.
 
 ## 10. Post-v0 protocol questions
@@ -448,5 +451,4 @@ These questions are explicitly outside the frozen v0 wire behavior:
 
 1. Whether `hello` should carry a protocol feature bitmap separate from capabilities for faster version gating.
 2. Heartbeat interval adaptivity on battery saver (Android FGS constraints may force >=15 s).
-3. Max in-flight unacked messages and flow control. Current v0 code tracks pending ack ids but does not enforce a 64-message cap yet.
-4. Persistent transfer checkpoints across app restarts.
+3. Whether a later protocol minor should negotiate the fixed 64-message ack window rather than using the v0 local constant.

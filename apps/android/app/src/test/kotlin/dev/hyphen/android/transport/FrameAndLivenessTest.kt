@@ -6,6 +6,8 @@ import java.io.EOFException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -80,5 +82,26 @@ class FrameAndLivenessTest {
         assertEquals(listOf("BBBBBBBBBBBBBBBBBBBBBBBBBB"), timeouts)
         assertEquals(0, tracker.pendingCount())
         assertEquals(false, tracker.ackReceived("BBBBBBBBBBBBBBBBBBBBBBBBBB"))
+    }
+
+    @Test
+    fun `ack tracker applies bounded backpressure and recovers after ack`() {
+        val tracker = AckTracker(timeoutMs = 10_000, maxPending = 2, onTimeout = {})
+
+        assertTrue(tracker.registerSent("A", nowMs = 0))
+        assertTrue(tracker.registerSent("B", nowMs = 0))
+        assertFalse(tracker.registerSent("C", nowMs = 0))
+        assertEquals(2, tracker.pendingCount())
+
+        assertTrue(tracker.ackReceived("A"))
+        assertTrue(tracker.registerSent("C", nowMs = 1))
+        assertEquals(2, tracker.pendingCount())
+    }
+
+    @Test
+    fun `ack tracker cannot exceed the protocol maximum window`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AckTracker(timeoutMs = 10_000, maxPending = 65, onTimeout = {})
+        }
     }
 }

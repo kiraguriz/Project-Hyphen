@@ -27,6 +27,7 @@ class ProtocolSession(
         val heartbeatIntervalMs: Long = 10_000,
         val missThreshold: Int = 2,
         val ackTimeoutMs: Long = 10_000,
+        val maxUnackedMessages: Int = AckTracker.DEFAULT_MAX_PENDING,
         /** Test hook only: false simulates a protocol-violating silent peer. */
         val autoAck: Boolean = true,
         /** Seq already consumed on this connection (1 after a hello). */
@@ -44,6 +45,8 @@ class ProtocolSession(
         fun onClosed() {}
     }
 
+    class SendRejected(val code: String, detail: String) : IllegalStateException(detail)
+
     private val seq = AtomicLong(config.startingSeq)
     private val closed = AtomicBoolean(false)
     private val writeLock = Any()
@@ -56,7 +59,11 @@ class ProtocolSession(
         startedAtMs = monotonicNowMs(),
         onStateChange = listener::onLiveness,
     )
-    private val ackTracker = AckTracker(config.ackTimeoutMs, listener::onAckTimeout)
+    private val ackTracker = AckTracker(
+        timeoutMs = config.ackTimeoutMs,
+        onTimeout = listener::onAckTimeout,
+        maxPending = config.maxUnackedMessages,
+    )
 
     @Synchronized
     fun start() {
@@ -97,30 +104,44 @@ class ProtocolSession(
         requiresAck: Boolean = false,
         capability: String? = null,
         ackOf: String? = null,
-    ): String {
+    ): String = synchronized(writeLock) {
         val wallNow = wallNowMs()
         val timeoutNow = monotonicNowMs()
+        val messageId = Ulid.generate(wallNow)
+        val nextSeq = seq.get() + 1
         val envelope = Envelope(
-            messageId = Ulid.generate(wallNow),
+            messageId = messageId,
             sessionId = sessionId,
             type = type,
             capability = capability,
-            seq = seq.incrementAndGet(),
+            seq = nextSeq,
             ackOf = ackOf,
             sentAtUnixMs = wallNow,
             requiresAck = requiresAck,
             payload = payload,
         )
         val bytes = envelope.encode()
-        if (requiresAck) ackTracker.registerSent(envelope.messageId, timeoutNow)
+        if (bytes.size > FrameIO.MAX_FRAME_BYTES) {
+            val rejected = FrameIO.FrameTooLarge(bytes.size.toLong())
+            listener.onProtocolError("transport/frame-too-large", rejected.message ?: "")
+            throw rejected
+        }
+        if (requiresAck && !ackTracker.registerSent(messageId, timeoutNow)) {
+            val detail = "outbound ack window is full (${config.maxUnackedMessages})"
+            listener.onProtocolError("protocol/flow-control", detail)
+            throw SendRejected("protocol/flow-control", detail)
+        }
+        // Commit only after all local encoding/frame checks and ack-window
+        // admission succeed; local refusal must not create an on-wire seq gap.
+        seq.set(nextSeq)
         try {
-            synchronized(writeLock) { FrameIO.write(socket.outputStream, bytes) }
+            FrameIO.write(socket.outputStream, bytes)
         } catch (e: IOException) {
             if (requiresAck) ackTracker.unregisterSent(envelope.messageId)
             close()
             throw e
         }
-        return envelope.messageId
+        envelope.messageId
     }
 
     fun stop() = close()
