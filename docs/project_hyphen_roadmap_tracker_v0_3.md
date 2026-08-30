@@ -16,7 +16,28 @@
 | `[~]` | In progress |
 | `[?]` | Blocked; reason required |
 | `[R]` | Ready for review |
-| `[x]` | Done; acceptance criteria met, tests run, docs/ADR updated |
+| `[x]` | Scoped task done; its row acceptance criteria are met, but this alone is not runtime or release proof |
+
+### Evidence-layer legend
+
+Task status and release readiness are deliberately separate. The
+release-critical ledger in section 14 records four non-inheriting layers:
+
+| Layer | Meaning |
+|---|---|
+| Implementation | The scoped code/docs exist in a local commit. |
+| Automated | Named host-side tests or deterministic checks pass. |
+| Runtime | The behavior was observed on the named UI/device/OS/network required by the claim. |
+| Release | The exact signed/distributed build passed its release gate or cohort. |
+
+The layer markers use `[x]`, `[~]`, `[?]`, `[ ]`, and `[-]` (not applicable).
+A later layer never upgrades an earlier one, local tests never imply device
+proof, and a release layer cannot pass while any applicable earlier layer is
+open. `scripts/check_roadmap_tracker.py` validates these rules and the task
+counts used by section 14. It also pins the v0.3 inventory to 98 task IDs and
+11 release-critical journeys, including each journey's exact task mapping, so
+adding/removing/reassigning either requires an explicit validator and
+regression-test update rather than a silent table edit.
 
 ### Priority legend
 
@@ -29,14 +50,18 @@
 
 ### Definition of Done
 
-A task is done only when all apply:
+A scoped task is done only when all apply:
 
 - Implementation is merged or committed locally.
-- Relevant unit/integration/manual tests have run.
+- The unit/integration/manual checks required by that row's acceptance have run.
 - Failure modes are handled, not just the happy path.
 - Docs, ADRs, or protocol schemas are updated if behavior changed.
 - This roadmap row is updated with status, notes, and commit hash if available.
 - No secrets, credentials, or personal data were introduced.
+
+`[x]` is not a product-wide or release-ready claim. Any user journey that needs
+real hardware, assistive technology, signing, distribution, or beta feedback
+must remain open in the corresponding section-14 evidence layer.
 
 ### Claude Code operating rule
 
@@ -355,19 +380,44 @@ claude -p "Read docs/project_hyphen_roadmap_tracker_v0_3.md and CLAUDE.md. Imple
 
 ## 14. Current progress summary
 
+### Task-count summary
+
+<!-- roadmap-summary:start -->
 | Area | Done | In progress | Blocked | Remaining |
 |---|---:|---:|---:|---:|
 | M0 Scope/Ops | 15 | 0 | 0 | 0 |
 | M1 Platform PoCs | 12 | 0 | 3 | 0 |
 | M2 Core Transport | 13 | 4 | 0 | 0 |
-| M3 Feature MVP | 6 | 0 | 9 | 0 |
+| M3 Feature MVP | 9 | 3 | 7 | 0 |
 | M4 Beta Hardening | 4 | 0 | 8 | 0 |
 | M5 Distribution | 7 | 0 | 3 | 0 |
 | M6 Stabilization | 3 | 0 | 7 | 0 |
+<!-- roadmap-summary:end -->
 
-Update this summary after each milestone review.
+This table counts scoped task rows only. The repository check rejects a stale
+or hand-edited count; it must not be used as a release-readiness rollup.
+
+### Release-critical evidence ledger
+
+<!-- roadmap-evidence:start -->
+| Journey | Task IDs | Implementation | Automated | Runtime | Release | Evidence / blocker |
+|---|---|---|---|---|---|---|
+| Pairing entry and bilateral SAS | HYP-M2-010, HYP-M2-011, HYP-M2-011b | `[x]` | `[x]` | `[?]` | `[?]` | Strict parser, external-camera handoff, and bilateral trust invariants are tested; named OEM camera tap-through and a real two-device SAS/mismatch/retry drill remain open. See [pairing/trust review](reports/security-architecture-review/04-pairing-trust-and-identity-state.md). |
+| Persistent connection and recovery | HYP-M2-013, HYP-M2-016, HYP-M4-007, HYP-M6-003 | `[x]` | `[x]` | `[?]` | `[?]` | Lifecycle ownership, backoff, stale-generation fences, and explicit retry are tested; killed-process, background/OEM, Wi-Fi transition, and 20-cycle Mac sleep/wake evidence remain open. See [lifecycle review](reports/security-architecture-review/01-lifecycle-and-product-continuity.md). |
+| Notification mirror, privacy, and actions | HYP-M3-001, HYP-M3-002, HYP-M3-003, HYP-M3-004, HYP-M3-005, HYP-M3-006, HYP-M3-007, HYP-M4-008, HYP-M6-005 | `[~]` | `[~]` | `[?]` | `[?]` | Source-side privacy, reliable removals, coalescing, and action-result invariants have tests; real Notification Center, LAN redaction capture, 10-app, dismiss, reply, and OEM listener-lifecycle matrices remain open. See [notification review](reports/security-architecture-review/03-notification-privacy-and-queueing.md). |
+| Bidirectional text and links | HYP-M3-008, HYP-M3-009 | `[x]` | `[x]` | `[?]` | `[?]` | Process-owned bounded delivery and explicit confirmation are implemented/tested; a real paired Android/Mac send-copy-open flow is not recorded. |
+| Transfer queue, delivery, and restart resume | HYP-M3-010, HYP-M3-011, HYP-M3-012, HYP-M3-013, HYP-M3-014, HYP-M3-015, HYP-M3-016, HYP-M3-017, HYP-M3-018, HYP-M3-019, HYP-M6-004 | `[x]` | `[x]` | `[?]` | `[?]` | Queue/cancel/reselect/checkpoint/delivery/integrity/resource invariants are tested; paired multi-file interruption, user-visible destinations, process restart, and 1 GiB across three combinations remain open. See [transfer review](reports/security-architecture-review/02-file-transfer-lifecycle-and-resource-limits.md) and [1 GiB plan](test-plans/hyp-m3-015-1gb-transfer-test.md). |
+| Diagnostics preview, export, delete, and opt-in | HYP-M4-001, HYP-M4-002, HYP-M4-003, HYP-M4-004 | `[x]` | `[x]` | `[?]` | `[?]` | Preview/export share one redacted snapshot and deletion/default-off behavior is tested; Android chooser, macOS save panel/cancel, and a real beta issue attachment remain open. |
+| Accessibility and localization | HYP-M4-005, HYP-M4-006, HYP-M4-009 | `[x]` | `[x]` | `[~]` | `[?]` | Bilingual parity and semantic contracts pass; Android 17 emulator bilingual/visible-region smoke exists, while TalkBack, VoiceOver, keyboard, full large-text, macOS bilingual runtime, and device matrices remain open. See [a11y/localization matrix](reports/hyp-m4-accessibility-localization-matrix.md). |
+| Compatibility and reliability matrices | HYP-M4-005, HYP-M4-006, HYP-M4-007, HYP-M4-008, HYP-M6-003 | `[~]` | `[~]` | `[?]` | `[?]` | Templates and deterministic storm/reconnect invariants exist, but the execution harness/evidence set is incomplete; five Android devices, three Mac combinations, network cases, and 20 sleep/wake cycles are not complete. See [compatibility matrix](compatibility-matrix.md). |
+| Packaging and distribution | HYP-M5-001, HYP-M5-002, HYP-M5-003, HYP-M5-004, HYP-M5-005, HYP-M5-006, HYP-M5-007, HYP-M5-008, HYP-M5-009, HYP-M5-010, HYP-M6-008 | `[~]` | `[~]` | `[?]` | `[?]` | Local packaging/docs/policy work exists; signed Android release, notarization, installed-GUI smoke, formal license files, store/channel evidence, and public beta remain blocked. See [platform/release review](reports/security-architecture-review/06-platform-ci-packaging-and-release-gates.md). |
+| Evidence beta cohort | HYP-M4-011, HYP-M4-012, HYP-M6-001, HYP-M6-002 | `[~]` | `[-]` | `[?]` | `[?]` | Release notes/intake exist, but no accepted 3–5 person pilot, real feedback corpus, failure ranking, or crash-free denominator exists yet. See [private beta packet](release/private-beta-feedback.md). |
+| Release candidate and v1 tag | HYP-M6-009, HYP-M6-010 | `[?]` | `[?]` | `[?]` | `[?]` | RC prerequisites remain open; no RC artifact, checksums, signed/notarized build, release cohort, or v1 tag exists. See [RC readiness review](reports/hyp-m6-009-rc-readiness-review.md). |
+<!-- roadmap-evidence:end -->
 
 ### Progress log
+
+- 2026-08-30 — Phase 8 layered roadmap evidence gate — Split scoped task completion from Implementation, Automated, Runtime, and Release evidence, corrected the generated milestone summary to the current 98-task inventory, and added an 11-journey release-critical ledger with exact task mappings and actionable blockers. `scripts/check_roadmap_tracker.py` is now part of the repository gate and pins the production task-table schema, task/journey inventories, summary counts, journey mappings, evidence-marker grammar and monotonicity, approved N/A scope, and M6 release closure. Twenty-four independent GPT-5.6 Sol medium adversarial reviews/lanes were run before acceptance; failed rounds closed task and journey deletion/reassignment, premature RC/tag completion, malformed or hidden GFM tables, list/lazy/raw-HTML/code-fence containers, pipe/backtick/line-boundary ambiguities, evidence-layer inversion, and visually empty Markdown/Unicode blockers. Final independent structure and semantics lanes passed; 44 adversarial regression tests, the live 98-task/11-journey checker, shell syntax, and diff checks are green. **Runtime/release residue `[?]`:** this static gate cannot manufacture device, accessibility, signed-build, distribution, or beta-cohort proof; the ledger intentionally remains Runtime `10×[?] + 1×[~]` and Release `11×[?]`.
 
 - 2026-08-30 — Phase 7 accessibility and localization gate — Added exact English/Simplified-Chinese key-parity tests on Android and macOS, moved the Android notification-listener service label into localized resources, replaced custom split text-field semantics with the standard Material 3 labelled editable control, and added stable macOS automation identifiers and localized semantics for pairing QR/payload/SAS/actions and diagnostics trace/preview/export/delete controls. An independent adversarial pass found the original Android label on a separate node and a macOS manual payload whose custom label hid its value; the fixes removed the custom content-description wrapper, produced one focusable Android `EditText` with a non-focusable localized label in the runtime hierarchy, suppressed the duplicate macOS heading, and preserved the payload as an accessibility value. Focused Android and Swift tests passed. Runtime smoke on a Pixel 10 Pro XL Android 17 emulator rendered the first-use surface in English and Simplified Chinese and showed no observed clipping in the visible first-use region at 200% font scale; the per-app locale override and font scale were restored afterward. Evidence and boundaries are recorded in `docs/reports/hyp-m4-accessibility-localization-matrix.md`. **Manual/device residue `[?]`:** TalkBack and VoiceOver focus/announcement/order, full keyboard operation, macOS bilingual runtime, real paired surfaces, OEM notification-access labels, full-screen large-text sweeps, and the required five-device/three-Mac compatibility matrices remain unproven.
 

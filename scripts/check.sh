@@ -25,8 +25,8 @@ skip_check() {
   fi
 }
 
-# --- [1/5] markdown relative links -----------------------------------------
-echo "[1/5] markdown relative links"
+# --- [1/6] markdown relative links -----------------------------------------
+echo "[1/6] markdown relative links"
 broken=0
 while IFS= read -r -d '' f; do
   dir=$(dirname "$f")
@@ -45,8 +45,13 @@ while IFS= read -r -d '' f; do
 done < <(find . -name '*.md' -not -path './.git/*' -print0)
 if [ "$broken" -eq 0 ]; then echo "  OK"; else fail=1; fi
 
-# --- [2/5] secret patterns ---------------------------------------------------
-echo "[2/5] secret patterns"
+# --- [2/6] roadmap counts/evidence -----------------------------------------
+echo "[2/6] roadmap counts and evidence layers"
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_roadmap_tracker.py || fail=1
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_roadmap_tracker.py || fail=1
+
+# --- [3/6] secret patterns ---------------------------------------------------
+echo "[3/6] secret patterns"
 secret_hits=$(grep -rInE \
   -e 'BEGIN [A-Z ]*PRIVATE KEY' \
   -e 'AKIA[0-9A-Z]{16}' \
@@ -61,16 +66,16 @@ else
   fail=1
 fi
 
-# --- [3/5] android ----------------------------------------------------------
-echo "[3/5] android unit tests"
+# --- [4/6] android ----------------------------------------------------------
+echo "[4/6] android unit tests"
 if [ -x apps/android/gradlew ]; then
   (cd apps/android && ./gradlew --quiet test) || fail=1
 else
   skip_check "no Gradle project yet (pending HYP-M1-001)"
 fi
 
-# --- [4/5] macos ------------------------------------------------------------
-echo "[4/5] macos build/tests"
+# --- [5/6] macos ------------------------------------------------------------
+echo "[5/6] macos build/tests"
 if compgen -G 'apps/macos/*.xcodeproj' >/dev/null || [ -f apps/macos/Package.swift ]; then
   if [ "$(uname -s)" != "Darwin" ]; then
     # The macOS app targets Apple-only frameworks (AppKit/Security/Network/
@@ -90,8 +95,8 @@ else
   skip_check "no macOS project yet (pending HYP-M1-010)"
 fi
 
-# --- [5/5] protocol schemas ---------------------------------------------------
-echo "[5/5] protocol schemas and test vectors"
+# --- [6/6] protocol schemas -------------------------------------------------
+echo "[6/6] protocol schemas and test vectors"
 if [ -x scripts/test-protocol.sh ]; then
   ./scripts/test-protocol.sh || fail=1
 else
