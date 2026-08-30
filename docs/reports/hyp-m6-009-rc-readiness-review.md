@@ -32,7 +32,7 @@ The broader release surface is also not RC-ready:
 | macOS signing/notarization | Blocked by missing Developer ID identity and notary credentials. |
 | Android release signing | Blocked by missing release/upload keystore. |
 | Play/F-Droid channels | Play review/channel access unavailable; F-Droid metadata disabled draft only. |
-| Private beta cohort | Recruiting plan and template exist, but no accepted 20-50 tester cohort exists. |
+| Private beta cohort | A local 3-5 person evidence-pilot kit exists, but no pilot is authorized or completed, no exit-review `GO` exists, and no accepted 20-50 tester cohort exists. |
 | Checksums | Local dry-run paths can generate checksums, but no final RC artifact set exists. |
 | Root license files | Not present; ADR-0005 records decisions only. |
 
@@ -60,6 +60,10 @@ Before HYP-M6-009 can move to done:
 6. Confirm no secrets, personal data, notification contents, file contents,
    URLs, or private logs are present in artifacts, fixtures, diagnostics, or
    release notes.
+7. Complete the authorized 3-5 person evidence beta on one final candidate
+   artifact pair, reconcile every issued attempt ID and evidence-use withdrawal,
+   record the explicit exit decision, and expand to 20-50 only after `GO`;
+   neither stage alone bypasses the M6 reliability gates.
 
 ## Current Decision
 

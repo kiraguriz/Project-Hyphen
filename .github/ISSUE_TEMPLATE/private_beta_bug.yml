@@ -5,15 +5,33 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing Project Hyphen. Do not include notification text, file contents, URLs, IP addresses, passwords, tokens, private contact details, or personal device identifiers.
+        Use this form only in a maintainer-authorized private intake. If this repository or its issues are public, do not submit a participant-level record here. Do not include notification text, file contents, URLs, IP addresses, passwords, tokens, private contact details, or personal device identifiers.
 
-        If this is a security issue or privacy leak, stop here and follow SECURITY.md instead of opening a normal issue.
+        Do not put participant identity, consent records, raw session logs, or private issue links here. If this is a security issue or privacy leak, stop here and follow SECURITY.md instead of opening a normal issue.
+  - type: dropdown
+    id: cohort_stage
+    attributes:
+      label: Cohort stage
+      description: Stage B is valid only after the Stage A exit review records GO.
+      options:
+        - Stage A evidence beta (3-5 people)
+        - Stage B expanded private beta (20-50 people)
+    validations:
+      required: true
+  - type: input
+    id: session_id
+    attributes:
+      label: Pseudonymous session ID
+      description: Use the unique attempt ID, such as EB-01-S01. A restarted run gets a new ID. Never enter a participant name, email, handle, or unique device identifier.
+      placeholder: e.g. EB-01-S01
+    validations:
+      required: true
   - type: input
     id: build
     attributes:
-      label: Build or commit
-      description: Commit hash, package checksum, or local build label.
-      placeholder: e.g. 8d0c052 or Hyphen-macOS-0.0.1 SHA-256
+      label: Exact build identity
+      description: Artifact set ID, commit, artifact filename, build type, and SHA-256 checksum. Do not imply signing or release status without proof.
+      placeholder: e.g. AS-01; commit 8d0c052; Hyphen-macOS-0.0.1.zip; evidence beta/ad-hoc; SHA-256 ...
     validations:
       required: true
   - type: dropdown
@@ -60,20 +78,22 @@ body:
     id: scenario
     attributes:
       label: Scenario
+      description: Stage A must use one of the 13 exact EB-* IDs. Other is for an explicitly named Stage B scenario only.
       options:
-        - First pairing / SAS confirmation
-        - mDNS / Bonjour discovery
-        - QR or manual endpoint fallback
-        - Notification mirror / update / remove
-        - Notification dismiss
-        - Quick Reply beta
-        - Text or link send
-        - File transfer / resume / cancel
-        - Sleep/wake or network reconnect
-        - Diagnostics preview / export / delete
-        - Beta diagnostics opt-in
-        - Packaging / install / signing
-        - Other
+        - EB-INSTALL-01 - Install, launch, first-use explanation
+        - EB-PAIR-01 - QR or manual pairing and bilateral SAS
+        - EB-PAIR-02 - Safe mismatch, reject, or cancel path
+        - EB-RECOVER-01 - Controlled disconnect and explicit retry or recovery
+        - EB-NOTIFY-01 - Synthetic notification post, update, and remove
+        - EB-PRIVACY-01 - Tighten or disable notification policy
+        - EB-TEXT-01 - Fixture text or link in both directions
+        - EB-FILE-01 - Generated small and multi-file transfer
+        - EB-FILE-02 - Cancel and controlled interruption or resume
+        - EB-DIAG-01 - Diagnostics preview, export or cancel, and delete
+        - EB-DIAG-02 - Diagnostics default-off opt-in and disable
+        - EB-TRUST-01 - Forget peer or reset all
+        - EB-A11Y-01 - Available accessibility and localization checks
+        - Other - Stage B only; identify a stable scenario in observations
     validations:
       required: true
   - type: dropdown
@@ -83,8 +103,85 @@ body:
       options:
         - fail
         - blocked
+        - stopped
         - pass
         - not-run
+    validations:
+      required: true
+  - type: dropdown
+    id: attempt_disposition
+    attributes:
+      label: Attempt disposition
+      description: A restarted run uses a new session ID and does not overwrite this disposition.
+      options:
+        - preflight-blocked
+        - completed
+        - stopped
+        - incomplete
+    validations:
+      required: true
+  - type: dropdown
+    id: started_denominator
+    attributes:
+      label: Entered the started-session denominator
+      description: Yes only when preflight passed and the first required journey began. Unknown blocks Stage A GO.
+      options:
+        - "yes"
+        - "no"
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: stop_condition
+    attributes:
+      label: Stop-condition status
+      description: Do not submit security or privacy details here; stop and use SECURITY.md instead.
+      options:
+        - none
+        - participant stopped voluntarily
+        - non-security stop condition (details safely redacted)
+        - suspected security/privacy condition (do not submit; use SECURITY.md)
+    validations:
+      required: true
+  - type: dropdown
+    id: crash_or_hard_failure
+    attributes:
+      label: Crash or HYP-M6-002 hard failure
+      description: Yes includes a crash, failure-driven forced termination, unrecoverable protocol failure, or a run that cannot safely continue/close without process restart, reinstall, re-pair/reset, manual data repair, or abort for an unresolved hang/loop. Multiple events count once; unknown blocks GO.
+      options:
+        - "yes"
+        - "no"
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: any_failed_journey
+    attributes:
+      label: Any failed journey
+      description: This is independent of attempt disposition and the crash-or-hard-failure flag. Unknown blocks Stage A GO.
+      options:
+        - "yes"
+        - "no"
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: required_evidence_complete
+    attributes:
+      label: Required evidence complete
+      description: No or unknown enters missing-required-evidence accounting and blocks Stage A GO.
+      options:
+        - "yes"
+        - "no"
+        - unknown
+    validations:
+      required: true
+  - type: input
+    id: repeatability
+    attributes:
+      label: Repeatability and repeat count
+      description: Record not-retried or the observed count over total repeats within this uninterrupted attempt. A restarted run gets a new session ID.
+      placeholder: e.g. 2 of 3 repeats failed, or not-retried
     validations:
       required: true
   - type: textarea
@@ -117,13 +214,15 @@ body:
     attributes:
       label: Redacted evidence
       description: Attach or reference redacted diagnostics, screenshots, or local notes. Do not paste sensitive payloads.
-      placeholder: e.g. redacted diagnostics export attached; compatibility matrix row updated.
+      placeholder: e.g. redacted diagnostics export reviewed in the authorized private intake.
   - type: checkboxes
     id: safety
     attributes:
       label: Safety checklist
       options:
         - label: I removed notification text, file contents, URLs, IP addresses, passwords, tokens, private contact details, and personal device identifiers.
+          required: true
+        - label: I did not include participant identity, consent records, raw logs, or private issue links.
           required: true
         - label: This is not an exploitable security/privacy report; if it is, I will use SECURITY.md instead.
           required: true

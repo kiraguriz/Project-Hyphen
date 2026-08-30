@@ -231,7 +231,7 @@ gantt
 | HYP-M4-009 | `[?]` | P1 | UX | Improve onboarding copy for permissions | HYP-M4-005 | Versioned, dismissible/reopenable first-use guidance explains local-only pairing, external camera plus paste fallback, bilateral SAS, and optional notification/foreground-link access without prompting at startup; user-comprehension validation remains blocked by the device matrix and beta feedback | Unit/review + beta feedback residue |
 | HYP-M4-010 | `[?]` | P1 | UX | Add peer management screen | HYP-M2-006 | Revoke/reset peer works | Manual test |
 | HYP-M4-011 | `[x]` | P1 | Beta | Prepare private beta release notes | HYP-M4-001..010 | Draft notes list known issues, blockers, unsupported cases, and feedback fields | Manual review |
-| HYP-M4-012 | `[?]` | P1 | Beta | Recruit 20–50 technical beta users | HYP-M4-011 | Recruiting plan and bug template ready; actual cohort/channel blocked by external maintainer action | Manual |
+| HYP-M4-012 | `[?]` | P1 | Beta | Recruit 20–50 technical beta users | HYP-M4-011 | 3–5 person evidence-pilot kit and staged intake ready; authorized pilot, exit `GO`, channel, and 20–50 cohort blocked by external maintainer action | Manual |
 
 ---
 
@@ -269,24 +269,30 @@ gantt
 
 ---
 
-## 10. Compatibility matrix template
+## 10. Compatibility matrix
 
-| Date | Tester | Android device | Android version | OEM skin | Mac model | macOS version | Network | Scenario | Result | Notes/Issue |
-|---|---|---|---|---|---|---|---|---|---|---|
-| YYYY-MM-DD | TBD | Pixel | Android 16 | AOSP/Pixel | M-series Mac | 15.1+ | Home Wi‑Fi | Pairing | TBD |  |
-| YYYY-MM-DD | TBD | Samsung | Android 15/16 | One UI | M-series Mac | 15.5 | Mesh | Notification mirror | TBD |  |
-| YYYY-MM-DD | TBD | Xiaomi | Android 15/16 | HyperOS | M-series Mac | 15.5 | AP isolation | QR/manual fallback | TBD |  |
-| YYYY-MM-DD | TBD | OnePlus/Oppo | Android 15/16 | OxygenOS/ColorOS | Intel Mac | 15.1+ | Hotspot | Transfer resume | TBD |  |
+The single canonical template and its privacy rules live in
+[`docs/compatibility-matrix.md`](compatibility-matrix.md). Do not duplicate or
+populate compatibility rows in this tracker. Human beta attempt rows remain in
+maintainer-controlled private session records; only a redacted, non-linkable
+aggregate that passed singling-out review may be proposed for repository docs.
 
 ---
 
 ## 11. Manual test logs
 
+These generic templates are only for separately reviewed, non-participant
+maintainer/device-lab observations. Do not commit a human beta participant,
+pseudonymous session, private issue/evidence link, or linkable small-cohort
+combination here. Human beta attempts use the private
+[`evidence-beta-session-record.md`](release/evidence-beta-session-record.md)
+template and repository output remains aggregate-only.
+
 ### Pairing test log
 
 ```text
 Date:
-Tester:
+Non-participant operator/source category:
 Android device/version:
 macOS device/version:
 Network:
@@ -295,7 +301,7 @@ Steps:
 Observed result:
 Expected result:
 Pass/Fail:
-Issue link:
+Repository-safe evidence note:
 ```
 
 ### Notification test log
@@ -310,7 +316,7 @@ Reply:
 Privacy mode:
 Duplicate behavior:
 Pass/Fail:
-Issue link:
+Repository-safe evidence note:
 ```
 
 ### Transfer test log
@@ -324,7 +330,7 @@ Interrupted at:
 Resume behavior:
 Hash verification:
 Pass/Fail:
-Issue link:
+Repository-safe evidence note:
 ```
 
 ### Wake/reconnect test log
@@ -338,7 +344,7 @@ Sleep duration:
 Wake reconnect time:
 Fallback path used:
 Pass/Fail:
-Issue link:
+Repository-safe evidence note:
 ```
 
 ---
@@ -411,11 +417,13 @@ or hand-edited count; it must not be used as a release-readiness rollup.
 | Accessibility and localization | HYP-M4-005, HYP-M4-006, HYP-M4-009 | `[x]` | `[x]` | `[~]` | `[?]` | Bilingual parity and semantic contracts pass; Android 17 emulator bilingual/visible-region smoke exists, while TalkBack, VoiceOver, keyboard, full large-text, macOS bilingual runtime, and device matrices remain open. See [a11y/localization matrix](reports/hyp-m4-accessibility-localization-matrix.md). |
 | Compatibility and reliability matrices | HYP-M4-005, HYP-M4-006, HYP-M4-007, HYP-M4-008, HYP-M6-003 | `[~]` | `[~]` | `[?]` | `[?]` | Templates and deterministic storm/reconnect invariants exist, but the execution harness/evidence set is incomplete; five Android devices, three Mac combinations, network cases, and 20 sleep/wake cycles are not complete. See [compatibility matrix](compatibility-matrix.md). |
 | Packaging and distribution | HYP-M5-001, HYP-M5-002, HYP-M5-003, HYP-M5-004, HYP-M5-005, HYP-M5-006, HYP-M5-007, HYP-M5-008, HYP-M5-009, HYP-M5-010, HYP-M6-008 | `[~]` | `[~]` | `[?]` | `[?]` | Local packaging/docs/policy work exists; signed Android release, notarization, installed-GUI smoke, formal license files, store/channel evidence, and public beta remain blocked. See [platform/release review](reports/security-architecture-review/06-platform-ci-packaging-and-release-gates.md). |
-| Evidence beta cohort | HYP-M4-011, HYP-M4-012, HYP-M6-001, HYP-M6-002 | `[~]` | `[-]` | `[?]` | `[?]` | Release notes/intake exist, but no accepted 3–5 person pilot, real feedback corpus, failure ranking, or crash-free denominator exists yet. See [private beta packet](release/private-beta-feedback.md). |
+| Evidence beta cohort | HYP-M4-011, HYP-M4-012, HYP-M6-001, HYP-M6-002 | `[x]` | `[-]` | `[?]` | `[?]` | The local staged pilot, final-candidate, attempt/session reconciliation, exit-review, consent/withdrawal, retention, safety, and intake kit exists, but no authorized/accepted 3–5 person pilot, checksum-bound runtime corpus, exit `GO`, expanded cohort, failure ranking, or crash-free denominator exists. See [evidence beta pilot](release/evidence-beta-pilot.md). |
 | Release candidate and v1 tag | HYP-M6-009, HYP-M6-010 | `[?]` | `[?]` | `[?]` | `[?]` | RC prerequisites remain open; no RC artifact, checksums, signed/notarized build, release cohort, or v1 tag exists. See [RC readiness review](reports/hyp-m6-009-rc-readiness-review.md). |
 <!-- roadmap-evidence:end -->
 
 ### Progress log
+
+- 2026-08-30 — Phase 9 evidence-beta expansion gate — Added a local-only 3-5 person Stage A packet with exact candidate artifact/checksum identity, synthetic-data and consent rules, private per-attempt records, stable 13-scenario IDs, retry/disposition and scenario conservation, crash-or-hard-failure accounting, withdrawal/recomputation, retention/deletion, stop/recall, and an explicit `GO / HOLD / STOP` exit review. The 20-50 person Stage B and public-beta checklist now require a completed, reconciled Stage A `GO`; repository-facing human evidence is restricted to redacted, non-linkable aggregates after singling-out review. Five fresh independent GPT-5.6 Sol medium adversarial review rounds were used: rounds 1-4 rejected missing stopped/preflight/retry accounting, gameable hard-failure and person/withdrawal semantics, cross-build stitching, missing intake/conservation fields, legacy scenario IDs, repeat counts, and linkable pilot rows; round 5 found and closed a duplicate tracker privacy path, then re-audited the current filesystem to `PASS`. Focused Issue Form YAML, relative-link, diff, 44 roadmap regression-test, and live 98-task/11-journey checks are green. **Runtime/release residue `[?]`:** no pilot authorization, coordinator/channel, candidate list, consent corpus, checksum-bound final artifact pair, real participant/session, exit `GO`, Stage B cohort, failure corpus, crash-free denominator, RC, public beta, or release proof exists.
 
 - 2026-08-30 — Phase 8 layered roadmap evidence gate — Split scoped task completion from Implementation, Automated, Runtime, and Release evidence, corrected the generated milestone summary to the current 98-task inventory, and added an 11-journey release-critical ledger with exact task mappings and actionable blockers. `scripts/check_roadmap_tracker.py` is now part of the repository gate and pins the production task-table schema, task/journey inventories, summary counts, journey mappings, evidence-marker grammar and monotonicity, approved N/A scope, and M6 release closure. Twenty-four independent GPT-5.6 Sol medium adversarial reviews/lanes were run before acceptance; failed rounds closed task and journey deletion/reassignment, premature RC/tag completion, malformed or hidden GFM tables, list/lazy/raw-HTML/code-fence containers, pipe/backtick/line-boundary ambiguities, evidence-layer inversion, and visually empty Markdown/Unicode blockers. Final independent structure and semantics lanes passed; 44 adversarial regression tests, the live 98-task/11-journey checker, shell syntax, and diff checks are green. **Runtime/release residue `[?]`:** this static gate cannot manufacture device, accessibility, signed-build, distribution, or beta-cohort proof; the ledger intentionally remains Runtime `10×[?] + 1×[~]` and Release `11×[?]`.
 
@@ -509,15 +517,15 @@ or hand-edited count; it must not be used as a release-readiness rollup.
 - 2026-06-12 — HYP-M5-006 `[x]` — Added `packaging/android-play/fgs-declaration-draft.md`, a Play Console foreground-service declaration draft for `connectedDevice` and `dataSync`. The draft ties each type to user-visible local companion behavior, explicit user triggers, stop conditions, notification copy, local-first data handling, non-use of `remoteMessaging`/SMS/Call Log/Accessibility/background clipboard/cloud sync, and release evidence still required before submission. `packaging/android-play/README.md` and `play-policy-notes.md` now link to it. Manual review complete; no runtime behavior changed.
 - 2026-06-12 — HYP-M5-007 `[x]` — Added disabled F-Droid metadata draft `packaging/android-fdroid/metadata/dev.hyphen.android.yml` plus `packaging/android-fdroid/README.md`. The draft uses the current app id `dev.hyphen.android`, version `0.0.1` / code `1`, MPL-2.0 app-source license from ADR-0005, `Connectivity` category, Gradle build rooted at `apps/android`, full current commit hash, and explicit disabled notes for placeholder public URLs, release tag/signing policy, formal root license files, dependency audit, and unavailable fdroidserver lint. `metadata-notes.md` now links to the draft and records the local validation boundary. Verified: official F-Droid metadata reference re-checked; `ruby -e 'require "yaml"; ... YAML.load_file(...)'` green; `./gradlew :app:assembleRelease` green; `apps/android/app/build/outputs/apk/release/app-release-unsigned.apk` exists. `fdroid` CLI is not installed in this environment, so `fdroid lint` / `rewritemeta` remain external follow-up.
 - 2026-06-12 — HYP-M6-005 `[x]` — Added `docs/test-plans/hyp-m6-005-notification-duplicate-prevention.md` as the duplicate-prevention automated-invariant log. It records the Android storm invariant (1,000 events across 25 keys -> 25 posted, 975 updated, 10 removed, active set bounded) and the macOS coalescing invariant (1,000 updates across 25 deterministic identifiers, latest update wins, removals leave 15 delivered identifiers). `[x]` is limited to those automated duplicate-prevention invariants; G-D's 10-app/live Notification Center matrix has not passed. Verified: `./gradlew :app:testDebugUnitTest --tests dev.hyphen.android.notifications.NotificationMirrorEventSenderTest` green; `swift test --filter NotificationMirrorReceiverTests/testNotificationStormCoalescesByAndroidKeyAndRemovalsStayBounded` green.
-- 2026-06-12 — HYP-M6-002 `[?]` — **Crash-free beta-session metric blocked / not measurable.** Added `docs/test-plans/hyp-m6-002-crash-free-beta-sessions.md` defining the eventual crash-free-session denominator, numerator, allowed evidence sources, and minimum review packet. Repository search found no beta session logs, crash ledger, issue export, or user-submitted diagnostics corpus; HYP-M4-012 beta user recruitment is still unchecked; HYP-M4-011 beta release notes/feedback channel are still unchecked; and there is no crash-reporting SDK, analytics SDK, telemetry endpoint, account system, or cloud service. `adb devices -l` also lists no Android targets, so no paired-device beta session can be generated here. **Blocker**: collect real beta-session diagnostics or manual logs before claiming >=99% crash-free sessions.
+- 2026-06-12 — HYP-M6-002 `[?]` — **Crash-free beta-session metric blocked / not measurable.** Added `docs/test-plans/hyp-m6-002-crash-free-beta-sessions.md` defining the eventual crash-free-session denominator, numerator, allowed evidence sources, and minimum review packet. The Stage A pilot/session templates now define complete started-session accounting, but repository search found no beta session logs, crash ledger, issue export, user-submitted diagnostics corpus, authorized pilot, or accepted cohort; there is no crash-reporting SDK, analytics SDK, telemetry endpoint, account system, or cloud service. `adb devices -l` also lists no Android targets, so no paired-device beta session can be generated here. **Blocker**: collect and reconcile real beta sessions before claiming >=99% crash-free sessions; a 3–5 person pilot alone cannot establish that claim.
 - 2026-06-12 — HYP-M6-003 `[?]` — **Final wake/network reconnect behavior blocked.** Implementation prerequisites exist (`SleepWakeObserver`, `ReconnectStateMachine`, `SessionReconnectTests`, and HYP-M4-007's prior blocker note), but this finalization requires the same real 20-cycle Mac sleep/wake timing log and/or network-transition evidence. Autonomously sleeping the user's active Mac repeatedly is unsafe, and no scheduled manual reliability log is available in this environment. **Blocker**: human-run sleep/wake or network-transition session with observed reconnect timing is required.
 - 2026-06-12 — HYP-M6-004 `[?]` — **Final 1 GiB resume behavior blocked.** Core transfer supports streaming 1GiB-class files and a real `ProtocolSession` loopback resume path, and HYP-M3-015 provides the deterministic fixture generator/manual run log. Finalization still requires successful observed 1GiB interruption/resume runs across at least three Android/macOS/network combinations. HYP-M4-005 currently has no attached Android devices, and HYP-M4-006 lacks the required additional macOS combinations plus a paired Android session. **Blocker**: three real paired-device/network test combinations are unavailable in this environment.
 - 2026-06-12 — HYP-M6-006 `[x]` — Froze `docs/protocol/hyphen-protocol-v0.md` for the current pre-alpha v0 wire behavior and synced drift found during manual review: `hello` uses `requiresAck: false` with responder `hello` as the handshake acknowledgment, `seq` is per-sender/per-connection with `hello` consuming `seq: 1`, trace IDs are exported only behind the default-off beta diagnostics opt-in, notification identity stays `StatusBarNotification.getKey()`, transfer progress is local-only UI state, and remaining feature-bitmap/heartbeat/flow-control/persistent-checkpoint questions are explicitly post-v0. Updated schema descriptions in `protocol/schema/envelope.schema.json` and `protocol/schema/transfer-manifest.schema.json` without changing validation rules. Verification: `./scripts/test-protocol.sh` and `./scripts/check.sh`.
 - 2026-06-12 — HYP-M6-007 `[x]` — Ran final local threat-model review against the frozen protocol docs, ADR-0001/0003, diagnostics behavior, and public beta checklist. Added `docs/reports/hyp-m6-007-threat-model-review.md` and updated `docs/protocol/threat-model.md` to capture new/updated risks: local dry-run artifacts mistaken for public beta artifacts, placeholder F-Droid metadata submission/mirroring, Play/F-Droid policy drift, beta diagnostics trace-ID correlation, broader physical-access action risk, and per-source listener rate limiting as an accepted post-v0 availability residual. Verification: manual review plus `./scripts/check.sh`.
 - 2026-06-12 — HYP-M6-008 `[?]` — Ran dependency/license audit and added `docs/reports/hyp-m6-008-dependency-license-audit.md`. Evidence included Android release runtime dependency report (`kotlin-stdlib` + JetBrains annotations only), unit-test runtime report (JUnit/Hamcrest test-only), build-time plugin POM license checks, macOS SwiftPM inspection (no external packages), script/tooling manifest scan, and vendored binary scan (only `apps/android/gradle/wrapper/gradle-wrapper.jar`, SHA-256 recorded). No GPL/AGPL/proprietary runtime dependency was found. **Blocker**: public-release license readiness still needs canonical root license files for MPL-2.0/Apache-2.0/CC-BY-4.0, a top-level license map, NOTICE/SPDX/header policy, and DCO/CLA decision before HYP-M6-008 can claim no blocking license issue.
 - 2026-06-12 — HYP-M4-009 `[?]` — **Copy pass complete, user-comprehension validation blocked.** Updated Android notification-listener onboarding copy to lead with the sensitive access ("titles, actions, and content"), paired-Mac/local-TLS destination, no cloud relay/history store, hidden-body fallback, SMS/Call Log exclusion, and Android Settings disable path. Added `docs/reports/hyp-m4-009-permission-onboarding-copy-review.md` inventorying the current permission/special-access surfaces and beta tester questions. **Blocker**: the row's acceptance requires review/beta feedback that users understand each permission; HYP-M4-005 has no attached Android device matrix and no beta feedback corpus exists yet.
-- 2026-06-12 — HYP-M4-011 `[x]` — Added `docs/release/private-beta-release-notes.md` for technical private beta testers. The draft lists what to test, privacy/safety defaults, known blocked matrix and reliability areas, unsupported v1 surfaces, required feedback fields, and stop conditions. Manual review complete; no runtime behavior changed. HYP-M4-012 remains the external recruiting/channel task.
-- 2026-06-12 — HYP-M4-012 `[?]` — Added `docs/release/private-beta-feedback.md` plus `.github/ISSUE_TEMPLATE/private_beta_bug.yml`. The local packet defines target cohorts, channel setup checklist, invitation copy, bug-report fields, safety checklist, and triage rules. **Blocker**: recruiting 20-50 technical beta users and configuring the actual private feedback channel require external maintainer action; no invited tester list, accepted cohort, or beta feedback corpus exists in this repo.
+- 2026-06-12 — HYP-M4-011 `[x]` — Added `docs/release/private-beta-release-notes.md` for technical private beta testers. The draft now gates a 3–5 person Stage A evidence beta before any 20–50 person Stage B, and lists what to test, privacy/safety defaults, known blocked matrix and reliability areas, unsupported v1 surfaces, exact-build feedback fields, and stop conditions. Manual review complete; no runtime behavior changed. HYP-M4-012 remains the external recruiting/channel task.
+- 2026-06-12 — HYP-M4-012 `[?]` — Added `docs/release/evidence-beta-pilot.md`, `docs/release/evidence-beta-session-record.md`, `docs/release/evidence-beta-exit-review.md`, staged `docs/release/private-beta-feedback.md`, and `.github/ISSUE_TEMPLATE/private_beta_bug.yml`. The local kit defines a consented 3–5 person Stage A, exact artifact/checksum identity, synthetic data, attempt/session reconciliation, stop/recall/redaction/retention rules, explicit exit `GO`, and a gated 20–50 person Stage B. **Blocker**: no pilot is authorized, no private channel/candidate list/checksum-bound artifact set exists, no 3–5 person cohort has run, no exit `GO` exists, and no 20–50 cohort or beta corpus exists.
 - 2026-06-12 — HYP-M6-001 `[?]` — Added `docs/reports/hyp-m6-001-beta-failure-category-review.md` after searching for beta issue exports, crash ledgers, session logs, diagnostics corpora, and feedback reports. The repo has intake templates and known blocker buckets but no real beta failure corpus, so no top-10 categories can be ranked or fixed. Updated the HYP-M6-002 metrics note to reflect that HYP-M4-011/HYP-M4-012 local prep now exists while recruitment and feedback remain external blockers.
 - 2026-06-12 — HYP-M6-009 `[?]` — Added `docs/reports/hyp-m6-009-rc-readiness-review.md`. RC creation is blocked by HYP-M6-001/002/003/004/008 plus external release gates: no beta failure corpus, no crash-free denominator, no final wake/reconnect log, no 1GB multi-combo evidence, incomplete root license/map/notice policy, missing macOS Developer ID/notary credentials, missing Android release/upload keystore, and no Play/F-Droid/private beta channel evidence. No RC artifacts were created.
 - 2026-06-12 — HYP-M6-010 `[?]` — Added `docs/reports/hyp-m6-010-v1-tag-readiness.md`. v1.0 tagging is blocked because HYP-M6-009 has no valid RC artifact set, no final checksums, unresolved reliability/beta evidence, external signing/channel blockers, and incomplete license release readiness. No git tag, GitHub release, or release checksums were created.

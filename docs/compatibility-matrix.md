@@ -7,13 +7,25 @@ and log templates, not completed test results.
 
 - Record only observed results from the named device, OS, network, build, and
   scenario. Do not infer from a similar device family.
-- Keep raw evidence links local and redacted: screenshots, logs, diagnostics
-  exports, commit hashes, APK checksums, macOS build IDs, and test notes.
-- Use `pass`, `fail`, `blocked`, or `not-run` as the result.
+- Keep raw evidence local and redacted: screenshots, logs, diagnostics exports,
+  commit hashes, APK checksums, macOS build IDs, and test notes. Do not put a
+  private evidence link or participant-level pointer in this repository.
+- Use `pass`, `fail`, `blocked`, `stopped`, or `not-run` as the result. A
+  withdrawal that terminates an active run or another pilot stop condition is
+  `stopped`; preserve it in session/exit accounting even if retried later. A
+  post-run evidence-use withdrawal does not change the original disposition;
+  apply the pilot's deletion, eligibility, and decision-recalculation rules.
 - If a result is blocked, write the exact blocker: missing device, missing OS
   image, permission unavailable, account/signing gate, or human scheduling.
 - Keep notification text, file contents, URLs, IP addresses, and personal data
   out of this document.
+- Human beta attempt rows belong only in maintainer-controlled private session
+  records. Do not put a participant or pseudonymous session ID in this matrix.
+  After exit review, a coordinator may propose only non-linkable aggregate
+  counts or coverage classes that passed redaction and singling-out review; do
+  not publish a small-cohort combination of exact date, model, OS, network, and
+  scenario. Exact rows here are reserved for non-participant maintainer/device-
+  lab observations whose disclosure has been separately reviewed.
 
 ## Android Device Matrix
 
@@ -68,7 +80,7 @@ and log templates, not completed test results.
 
 ## Evidence Log
 
-| Date | Tester | Build / commit | Artifact | Scope | Notes |
+| Date | Non-participant source | Build / commit | Artifact | Scope | Notes |
 |---|---|---|---|---|---|
 | 2026-06-12 | Codex | 79c75a1 | `/Users/haitianzhu/Library/Android/sdk/platform-tools/adb devices -l` | HYP-M4-005 Android device matrix | blocked: no attached Android devices or emulators were listed, so the first five OS/OEM/network rows could not be observed. |
 | 2026-06-12 | Codex | 8a086cc | `sw_vers` | HYP-M4-006 macOS matrix | blocked: current host is macOS 26.5.1 build 25F80, but two additional macOS OS/device combinations and a paired Android session are unavailable. |

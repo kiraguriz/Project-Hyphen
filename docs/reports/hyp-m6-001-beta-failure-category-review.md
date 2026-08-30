@@ -21,8 +21,9 @@ Current local evidence does not contain a top-10 failure list:
   confirms that the repo repeatedly records the same blocker: no beta feedback
   corpus exists yet.
 - `.github/ISSUE_TEMPLATE/private_beta_bug.yml` and
-  `docs/release/private-beta-feedback.md` are ready for future intake, but they
-  have not produced reports.
+  `docs/release/private-beta-feedback.md` are ready for future intake, and
+  `docs/release/evidence-beta-pilot.md` plus its session template define a
+  3-5 person intake rehearsal, but none has produced a real report.
 
 ## Current Known Risk Buckets
 
@@ -47,14 +48,20 @@ arrive:
 
 Before marking HYP-M6-001 complete:
 
-1. Run a private beta cohort through HYP-M4-012.
-2. Export or summarize private beta issues using the bug template fields:
-   scenario, platform, device/OS/network, result, repeatability, and redacted
-   diagnostics availability.
-3. Group failures by cause, not by symptom text.
-4. Rank categories by severity first, then affected users/devices, then
+1. Run the authorized 3-5 person Stage A evidence beta, preserve every result,
+   and record an explicit exit decision. This validates collection but cannot
+   by itself justify a v1 "top 10" ranking.
+2. Expand to Stage B only after `GO`, then collect a corpus large and varied
+   enough to rank ten categories without padding the list from internal risks.
+3. Export or summarize private beta issues using the private bug-template
+   fields: exact scenario ID, platform, device/OS/network, result,
+   repeatability/count, and redacted diagnostics availability. Repository
+   output must be non-linkable aggregate data, never participant/session rows.
+4. Group failures by cause, not by symptom text, and define the session/report
+   denominator plus duplicate handling.
+5. Rank categories by severity first, then affected users/devices, then
    reproduction quality.
-5. For each top-10 category, either fix the concrete issue, document the
+6. For each top-10 category, either fix the concrete issue, document the
    limitation with a cut decision, or open a follow-up tracker task.
 
 ## Review Table Template

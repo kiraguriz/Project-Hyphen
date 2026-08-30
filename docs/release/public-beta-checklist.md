@@ -1,8 +1,8 @@
 # Public Beta Checklist (Draft)
 
 - **Tracker**: HYP-M5-010
-- **Status**: blocked for a real public beta until external signing, notary, and
-  release-channel gates are available.
+- **Status**: blocked for a real public beta until the staged private-beta
+  evidence gate, external signing/notary, and release-channel gates pass.
 - **Scope**: reproducible maintainer checklist for the current GitHub/F-Droid,
   Play, and macOS distribution preparation paths.
 
@@ -21,6 +21,11 @@ Do not publish a public beta if any of these are true:
 - Play Data safety / foreground-service declarations no longer match code.
 - F-Droid metadata still contains placeholder public URLs or a draft commit.
 - The beta known-issues section omits blocked matrix areas.
+- The authorized 3-5 person Stage A has not completed on one final artifact set,
+  its attempt ledger is unreconciled or missing evidence, or its exit review
+  lacks an explicit `GO` after withdrawal/deduplication checks.
+- Stage B has not been explicitly authorized after Stage A `GO`, or HYP-M4-012
+  still lacks its accepted 20-50 person private cohort evidence.
 - Secrets, private logs, notification text, file contents, URLs, or personal
   device data appear in release notes, fixtures, diagnostics, or artifacts.
 
@@ -36,6 +41,8 @@ Do not publish a public beta if any of these are true:
 | F-Droid review/submission path | F-Droid beta distribution | Metadata draft only |
 | Physical Android/OEM device coverage | Compatibility matrix | Partially blocked |
 | Scheduled sleep/wake session | Wake/reconnect evidence | Blocked until human-run test |
+| Stage A evidence beta | Authorized 3-5 distinct people on one final artifact set; zero unreconciled/missing evidence; explicit exit-review `GO` | Local templates only; no authorized/completed pilot or `GO` |
+| Stage B expanded private beta | Explicit post-`GO` authorization and accepted 20-50 person HYP-M4-012 cohort evidence | No authorization, cohort, or feedback corpus |
 
 ## Preflight
 
@@ -58,6 +65,8 @@ Also review:
 - [Install guide](../install/installation_en.md)
 - [Troubleshooting guide](../troubleshooting_en.md)
 - [Compatibility matrix](../compatibility-matrix.md)
+- [Evidence beta pilot](evidence-beta-pilot.md)
+- [Evidence beta exit review](evidence-beta-exit-review.md)
 - [Play Data safety draft](../../packaging/android-play/data-safety-draft.md)
 - [FGS declaration draft](../../packaging/android-play/fgs-declaration-draft.md)
 - [F-Droid metadata draft](../../packaging/android-fdroid/metadata/dev.hyphen.android.yml)
@@ -160,6 +169,9 @@ Release notes must include:
 - Current blocked matrix areas: Android first-five device matrix, macOS
   multi-device/OS matrix, 20-cycle wake/reconnect test, 1GB multi-combo resume
   validation, and crash-free beta-session measurement.
+- Private-beta sequence: an authorized 3-5 person evidence pilot, reconciled
+  session ledger, and explicit exit-review `GO` are required before any 20-50
+  person expansion; neither is public-beta or release evidence.
 - Unsupported v1 non-goals: SMS, Call Log, Accessibility, background clipboard,
   screen mirroring, remote control, cloud relay, and NAT relay.
 
@@ -167,11 +179,16 @@ Release notes must include:
 
 Use these outcomes:
 
-- `go`: all local checks pass, all external gates pass, checksums verify, known
-  issues are current, and no forbidden surface was introduced.
+- `go`: all local checks pass; the authorized 3-5 person Stage A completed on
+  one final candidate pair with 3-5 deduplicated eligible people, reconciled
+  attempts, zero missing evidence, and explicit exit-review `GO`; Stage B was
+  then explicitly authorized and HYP-M4-012 has accepted 20-50 person cohort
+  evidence; all other external gates pass; checksums verify; known issues are
+  current; and no forbidden surface was introduced.
 - `blocked`: local dry runs pass but any external gate is missing.
 - `no-go`: a local check fails, a policy statement is stale, a checksum fails,
   or a forbidden permission/surface appears.
 
-Current local status for HYP-M5-010: `blocked` until Developer ID/notary,
-Android release signing, and beta channel access are available.
+Current local status for HYP-M5-010: `blocked`; the repository contains no
+Stage A/Stage B cohort evidence or exit `GO`, and Developer ID/notary, Android
+release signing, and beta channel access are unavailable.

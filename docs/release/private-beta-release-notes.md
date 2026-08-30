@@ -1,8 +1,10 @@
 # Private Beta Release Notes (Draft)
 
 - **Tracker**: HYP-M4-011
-- **Status**: draft release notes for technical private beta testers.
-- **Audience**: maintainers and 20-50 invited technical testers.
+- **Status**: draft release notes for the 3-5 person evidence beta and any
+  later expanded private beta.
+- **Audience**: maintainers and authorized Stage A participants; Stage B
+  participants only after an explicit pilot `GO`.
 - **Build status**: pre-alpha local/test builds only; no signed, notarized, or
   store-ready public release is available yet.
 
@@ -16,6 +18,23 @@ Use these notes with:
 - [Troubleshooting guide](../troubleshooting_en.md)
 - [Compatibility matrix](../compatibility-matrix.md)
 - [Roadmap tracker](../project_hyphen_roadmap_tracker_v0_3.md)
+- [Evidence beta pilot](evidence-beta-pilot.md)
+- [Evidence beta session record](evidence-beta-session-record.md)
+- [Evidence beta exit review](evidence-beta-exit-review.md)
+- [Recruiting and feedback plan](private-beta-feedback.md)
+
+## Cohort Sequence
+
+Project Hyphen starts with a 3-5 person evidence beta. Every Stage A session is
+consent-based, bound to exact artifact checksums, uses synthetic data, and keeps
+raw evidence local. An expanded 20-50 person Stage B may begin only after the
+Stage A exit review reconciles all attempts and records an explicit maintainer
+`GO`. Eligible people, coverage, and journey passes must come from one final
+candidate artifact pair; earlier-build failures remain visible.
+
+These notes and local checks do not themselves authorize invitations or
+distribution. A Stage A `GO` permits expansion planning; it is not RC, release,
+compatibility, signing, notarization, or store evidence.
 
 ## What To Test
 
@@ -52,7 +71,9 @@ Hyphen should behave like this in every beta build:
 
 Do not paste notification text, file contents, URLs, IP addresses, passwords,
 tokens, private contact details, or personal device identifiers into bug reports.
-Use redacted diagnostics exports and compatibility-matrix fields instead.
+Use the maintainer-controlled private intake and redacted diagnostics exports
+instead. Participant-level or linkable small-cohort records must not enter the
+repository compatibility matrix.
 
 ## Known Issues And Blockers
 
@@ -61,6 +82,7 @@ must keep these visible instead of implying support that has not been observed.
 
 | Area | Current status | Tester expectation |
 |---|---|---|
+| Evidence beta | Local process and record templates exist; no authorized or completed 3-5 person pilot and no Stage B `GO` exist. | Do not invite, distribute, or expand without maintainer authorization and the staged gate. |
 | Android device matrix | Blocked: no first-five device/OEM matrix has been observed yet. | Treat every Android/OEM result as evidence collection, not confirmed support. |
 | macOS matrix | Blocked: three distinct OS/device combinations have not been observed. | Record exact Mac model and macOS version for every run. |
 | Sleep/wake reconnect | Blocked: the 20-cycle manual run has not been scheduled/executed. | Report reconnect timing after wake; do not assume the 30s target passes. |
@@ -90,22 +112,31 @@ These are not bugs in the private beta:
 
 ## What To Include In Feedback
 
-For each issue or pass/fail report, include:
+For each issue or pass/fail report in the maintainer-controlled private intake,
+include:
 
-- Hyphen commit or package checksum.
+- Cohort stage and pseudonymous session ID; never participant identity.
+- Artifact set ID, Hyphen commit, artifact filename, and SHA-256 checksum.
+- Attempt disposition, started-session denominator membership, stop-condition
+  status, and deduplicated crash-or-hard-failure flag.
+- Any-failed-journey and required-evidence-complete flags; `unknown` or missing
+  evidence remains explicit and blocks Stage A `GO`.
 - Android device model, Android version, OEM skin, and install track.
 - Mac model and macOS version.
 - Network case: home Wi-Fi, mesh, hotspot, AP/client isolation, VPN, restricted
   LAN mode, or permission-denied mode.
-- Scenario and result: `pass`, `fail`, `blocked`, or `not-run`.
+- Exact `EB-*` scenario ID for Stage A (or a stable named Stage B scenario) and
+  result: `pass`, `fail`, `blocked`, `stopped`, or `not-run`.
 - Redacted diagnostics export when available.
-- Steps to reproduce, expected result, observed result, and whether the issue is
-  repeatable.
+- Steps to reproduce, expected result, observed result, whether the issue is
+  repeatable, and its repeat count within the uninterrupted attempt.
 
 ## Stop Conditions
 
 Stop the private beta run and report a release blocker if:
 
+- Consent, authorization, exact artifact identity, or checksum verification is
+  missing or mismatched.
 - A forbidden permission or surface appears.
 - A local check fails before testing starts.
 - Pairing stores trust before SAS confirmation.
