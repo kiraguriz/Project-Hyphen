@@ -21,16 +21,17 @@ extension NotificationPrivacyMode {
 
 /// One app's privacy row: glyph tile + name + selected privacy mode.
 struct SettingsAppPrivacyRow: Identifiable {
-    let id = UUID()
+    var id: String { packageName }
     var name: String
     var packageName: String
     var glyph: String
     var tint: Color
     var mode: NotificationPrivacyMode
+    var isExplicit: Bool = true
 
     // Per-package rows only. The "other apps" default lives in an explicit
     // `defaultMode` (no "*" sentinel mixed into the package list).
-    static let defaults: [SettingsAppPrivacyRow] = [
+    static let previewRows: [SettingsAppPrivacyRow] = [
         SettingsAppPrivacyRow(name: "微信", packageName: "com.tencent.mm", glyph: "微", tint: .hex(0x1f9d57), mode: .full),
         SettingsAppPrivacyRow(name: "Gmail", packageName: "com.google.android.gm", glyph: "G", tint: .hex(0xd6453f), mode: .full),
         SettingsAppPrivacyRow(name: "Telegram", packageName: "org.telegram.messenger", glyph: "T", tint: .hex(0x2f6fe0), mode: .hideBody)
@@ -76,6 +77,7 @@ enum SettingsNavSection: CaseIterable, Identifiable {
 /// Full settings window: window chrome + two-column nav/content layout, opened
 /// on the 通知隐私 pane.
 struct SettingsWindowView: View {
+    @ObservedObject private var activityModel: HyphenAppModel
     @State private var selection: SettingsNavSection
     @State private var mirroringEnabled: Bool
     @State private var rows: [SettingsAppPrivacyRow]
@@ -89,6 +91,7 @@ struct SettingsWindowView: View {
     private let deviceName: String?
     private let fingerprint: String?
     private let diagnosticsPreview: String
+    private let privacySyncState: NotificationPrivacySyncState
     private let onClose: () -> Void
     private let onRevokeTrust: () -> Void
     private let onRenameDevice: () -> Void
@@ -96,18 +99,22 @@ struct SettingsWindowView: View {
     private let onDeleteDiagnostics: () -> Void
     private let onRequestTraceIds: (Bool) -> Bool
     private let onNotificationPrivacyChange: (Bool, NotificationPrivacyMode, [SettingsAppPrivacyRow]) -> Void
+    private let onCancelTransfer: (String) -> Void
+    private let onRetryTransferSave: (String) -> Void
     private let onSelectionChange: (SettingsNavSection) -> Void
 
     @Environment(\.hyphenPalette) private var p
 
     init(
+        activityModel: HyphenAppModel = HyphenAppModel(),
         selection: SettingsNavSection = .notifications,
         mirroringEnabled: Bool = true,
-        rows: [SettingsAppPrivacyRow] = SettingsAppPrivacyRow.defaults,
+        rows: [SettingsAppPrivacyRow] = SettingsAppPrivacyRow.previewRows,
         defaultMode: NotificationPrivacyMode = SettingsAppPrivacyRow.defaultModeForOtherApps,
         deviceName: String? = "Pixel 8 Pro",
         fingerprint: String? = "3A:9F:C2:7E:5D:…:A1:E2",
         diagnosticsPreview: String = L("settings.diag.previewUnavailable"),
+        privacySyncState: NotificationPrivacySyncState = .offline,
         includeTraceIds: Bool = false,
         onClose: @escaping () -> Void = {},
         onRevokeTrust: @escaping () -> Void = {},
@@ -116,8 +123,11 @@ struct SettingsWindowView: View {
         onDeleteDiagnostics: @escaping () -> Void = {},
         onRequestTraceIds: @escaping (Bool) -> Bool = { $0 },
         onNotificationPrivacyChange: @escaping (Bool, NotificationPrivacyMode, [SettingsAppPrivacyRow]) -> Void = { _, _, _ in },
+        onCancelTransfer: @escaping (String) -> Void = { _ in },
+        onRetryTransferSave: @escaping (String) -> Void = { _ in },
         onSelectionChange: @escaping (SettingsNavSection) -> Void = { _ in }
     ) {
+        self.activityModel = activityModel
         self._selection = State(initialValue: selection)
         self._mirroringEnabled = State(initialValue: mirroringEnabled)
         self._rows = State(initialValue: rows)
@@ -126,6 +136,7 @@ struct SettingsWindowView: View {
         self.deviceName = deviceName
         self.fingerprint = fingerprint
         self.diagnosticsPreview = diagnosticsPreview
+        self.privacySyncState = privacySyncState
         self.onClose = onClose
         self.onRevokeTrust = onRevokeTrust
         self.onRenameDevice = onRenameDevice
@@ -133,6 +144,8 @@ struct SettingsWindowView: View {
         self.onDeleteDiagnostics = onDeleteDiagnostics
         self.onRequestTraceIds = onRequestTraceIds
         self.onNotificationPrivacyChange = onNotificationPrivacyChange
+        self.onCancelTransfer = onCancelTransfer
+        self.onRetryTransferSave = onRetryTransferSave
         self.onSelectionChange = onSelectionChange
     }
 
@@ -190,7 +203,17 @@ struct SettingsWindowView: View {
                     onRequestTraceIds: onRequestTraceIds
                 )
             }
-        case .general, .transfer:
+        case .transfer:
+            cardPane {
+                TransferPanelView(
+                    peerName: activityModel.connection.peerName ?? deviceName,
+                    rows: TransferRow.rows(from: activityModel.feed),
+                    isConnected: activityModel.connection.state == .connected,
+                    onCancel: onCancelTransfer,
+                    onRetrySave: onRetryTransferSave
+                )
+            }
+        case .general:
             placeholderPane(selection)
         }
     }
@@ -298,6 +321,9 @@ struct SettingsWindowView: View {
                     Text(L("settings.notif.subtitle"))
                         .font(.hyphenBody(12))
                         .foregroundColor(p.dim)
+                    Text(privacySyncLabel)
+                        .font(.hyphenMono(10, weight: .semibold))
+                        .foregroundColor(privacySyncColor)
                 }
                 Spacer(minLength: 0)
                 Toggle("", isOn: $mirroringEnabled)
@@ -317,8 +343,16 @@ struct SettingsWindowView: View {
                 .foregroundColor(p.faint)
 
             VStack(spacing: 10) {
-                ForEach($rows) { $row in
-                    appRow($row)
+                if rows.isEmpty {
+                    Text(L("settings.notif.emptyApps"))
+                        .font(.hyphenBody(11))
+                        .foregroundColor(p.dim)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                } else {
+                    ForEach($rows) { $row in
+                        appRow($row)
+                    }
                 }
             }
 
@@ -337,7 +371,14 @@ struct SettingsWindowView: View {
                 }
                 Spacer(minLength: 0)
                 SettingsPrivacySegmentedControl(mode: $defaultMode) { mode in
-                    onNotificationPrivacyChange(mirroringEnabled, mode, rows)
+                    let updatedRows = rows.map { row -> SettingsAppPrivacyRow in
+                        guard !row.isExplicit else { return row }
+                        var inherited = row
+                        inherited.mode = mode
+                        return inherited
+                    }
+                    rows = updatedRows
+                    onNotificationPrivacyChange(mirroringEnabled, mode, updatedRows)
                 }
             }
         }
@@ -348,17 +389,44 @@ struct SettingsWindowView: View {
     private func appRow(_ row: Binding<SettingsAppPrivacyRow>) -> some View {
         HStack(spacing: 12) {
             AppGlyph(label: row.wrappedValue.glyph, tint: row.wrappedValue.tint, size: 32, corner: 9)
-            Text(row.wrappedValue.name)
-                .font(.hyphenBody(13, weight: .semibold))
-                .foregroundColor(p.text)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.wrappedValue.name)
+                    .font(.hyphenBody(13, weight: .semibold))
+                    .foregroundColor(p.text)
+                Text(row.wrappedValue.packageName)
+                    .font(.hyphenMono(9))
+                    .foregroundColor(p.faint)
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
             SettingsPrivacySegmentedControl(mode: row.mode) { mode in
                 var updatedRows = rows
                 if let index = updatedRows.firstIndex(where: { $0.id == row.wrappedValue.id }) {
                     updatedRows[index].mode = mode
+                    updatedRows[index].isExplicit = mode != defaultMode
                 }
+                rows = updatedRows
                 onNotificationPrivacyChange(mirroringEnabled, defaultMode, updatedRows)
             }
+        }
+    }
+
+    private var privacySyncLabel: String {
+        switch privacySyncState {
+        case .offline: return L("settings.notif.sync.offline")
+        case .unsupported: return L("settings.notif.sync.unsupported")
+        case .queued: return L("settings.notif.sync.queued")
+        case .pending: return L("settings.notif.sync.pending")
+        case .applied(let localFloor):
+            return L("settings.notif.sync.applied", localFloor.settingsLabel)
+        }
+    }
+
+    private var privacySyncColor: Color {
+        switch privacySyncState {
+        case .applied: return p.accent
+        case .queued, .pending: return p.amber
+        case .offline, .unsupported: return p.faint
         }
     }
 }

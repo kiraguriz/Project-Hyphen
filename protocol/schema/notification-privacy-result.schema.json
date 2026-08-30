@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/notification-privacy-result.schema.json",
+  "title": "Hyphen protocol v0 notification.privacy.result payload",
+  "description": "Content-free Android acknowledgement that names the exact applied privacy policy and reports the phone-owner privacy floor.",
+  "type": "object",
+  "required": ["regarding", "applied", "localFloor"],
+  "additionalProperties": false,
+  "properties": {
+    "regarding": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "applied": {
+      "const": true
+    },
+    "localFloor": {
+      "enum": ["full", "hideBody", "existsOnly"]
+    }
+  }
+}

@@ -394,6 +394,17 @@ data class TransferProgress(
     }
 }
 
+/** Outcome reported when a session retires before an outbound transfer finishes. */
+data class OutboundTransferRetirement(
+    val fileId: String,
+    val filename: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+    val sha256: String,
+    val chunkSizeBytes: Int,
+    val requiresSourceReselection: Boolean,
+)
+
 interface TransferOutbox {
     fun send(
         type: String,
@@ -427,8 +438,11 @@ class TransferSender(
     private val outstandingWindow: Int = 8,
     private val limits: TransferResourceLimits = TransferResourceLimits(),
     private val checkpointStore: TransferCheckpointStore? = null,
+    onRestored: ((TransferProgress) -> Unit)? = null,
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
+    private val onRestored = onRestored ?: onProgress
+
     init {
         require(outstandingWindow > 0) { "outstandingWindow must be positive" }
     }
@@ -521,6 +535,49 @@ class TransferSender(
             ?.let { minOf(chunkSizeBytes, it) }
             ?: chunkSizeBytes
         val manifest = TransferManifest.fromSource(filename, mimeType, source, effectiveChunkSize, fileId)
+        return registerAndStart(manifest, source)
+    }
+
+    /**
+     * Rebinds a user-reselected stream to its original file id only after the
+     * complete manifest matches. A wrong selection fails before any manifest or
+     * chunk reaches the peer, preserving the receiver's partial checkpoint.
+     */
+    @Synchronized
+    fun sendReselectedSource(
+        retirement: OutboundTransferRetirement,
+        source: TransferByteSource,
+    ): TransferManifest {
+        require(retirement.requiresSourceReselection) { "source reselection is not required" }
+        require(!frozen) { "plugin/transfer-cancelled" }
+        require(negotiatedCapabilities?.contains(TransferProtocol.CAPABILITY) != false) {
+            "plugin/unsupported-capability"
+        }
+        negotiatedCapabilities?.transferMaxChunkBytes()?.let { negotiatedMax ->
+            require(retirement.chunkSizeBytes <= negotiatedMax) {
+                "original chunk size exceeds the negotiated transfer limit"
+            }
+        }
+        val manifest = TransferManifest.fromSource(
+            filename = retirement.filename,
+            mimeType = retirement.mimeType,
+            source = source,
+            chunkSizeBytes = retirement.chunkSizeBytes,
+            fileId = retirement.fileId,
+        )
+        require(manifest.sizeBytes == retirement.sizeBytes && manifest.sha256 == retirement.sha256) {
+            "selected source does not match the interrupted transfer"
+        }
+        return registerAndStart(manifest, source)
+    }
+
+    private fun registerAndStart(
+        manifest: TransferManifest,
+        source: TransferByteSource,
+    ): TransferManifest {
+        if (registered.size >= limits.maxSenderRegistrySize && manifest.fileId !in registered) {
+            throw IllegalArgumentException("plugin/transfer-quota-exceeded")
+        }
         tombstones.remove(manifest.fileId)
         registered[manifest.fileId] = RegisteredTransfer(manifest, source)
         persistOutboundCheckpoint(manifest, source, fromChunkIndex = 0)
@@ -617,13 +674,9 @@ class TransferSender(
             val fileId = activeSends.entries
                 .firstOrNull {
                     it.value.manifestMessageId == messageId || it.value.outstanding.containsKey(messageId)
-                }?.key
+            }?.key
             if (fileId != null) {
-                val active = activeSends.remove(fileId)
-                active?.closeStream()
-                registered.remove(fileId)
-                checkpointStore?.delete(fileId)
-                recordTombstone(fileId, TerminalOutcome.CANCELLED)
+                cleanLocalTransfer(fileId)
             }
         }
         pumpControl()
@@ -637,6 +690,42 @@ class TransferSender(
             .onFailure { discardPendingControl(TransferProtocol.TYPE_CANCEL, fileId) }
             .getOrNull()
     }
+
+    /** Cancel only when this sender actually registered the outbound source. */
+    @Synchronized
+    fun cancelRegistered(fileId: String, discard: Boolean = false): String? {
+        if (fileId !in registered && fileId !in activeSends) return null
+        return cancel(fileId, discard)
+    }
+
+    /**
+     * Detach one registered source without sending a remote cancel. Used when
+     * transparent foreground ownership is revoked: the peer's partial file is
+     * still resumable after the user reselects the same bytes.
+     */
+    @Synchronized
+    fun retireRegisteredForSourceReselection(fileId: String): OutboundTransferRetirement? {
+        val transfer = registered[fileId] ?: return null
+        val retirement = transfer.retirement(checkpointStore)
+        discardPendingControlsForFile(fileId)
+        val active = activeSends.remove(fileId)
+        registered.remove(fileId)
+        runCatching { active?.closeStream() }
+        if (retirement.requiresSourceReselection) checkpointStore?.delete(fileId)
+        return retirement
+    }
+
+    /** Apply a peer-originated cancel locally without echoing another control. */
+    @Synchronized
+    fun handleRemoteCancel(cancel: TransferCancel): Boolean {
+        if (cancel.fileId !in registered && cancel.fileId !in activeSends) return false
+        cleanLocalTransfer(cancel.fileId)
+        return true
+    }
+
+    @Synchronized
+    fun containsTransfer(fileId: String): Boolean =
+        fileId in registered || fileId in activeSends
 
     /** Stops every outbound stream while keeping the negotiated session usable. */
     @Synchronized
@@ -664,15 +753,41 @@ class TransferSender(
             active.outstanding.isNotEmpty()
     }
 
-    /** Clears in-flight outbound state when the transport session ends. */
+    /**
+     * Clears in-flight outbound state when the transport session ends. A
+     * file-backed checkpoint remains restorable; stream/content-URI sources
+     * are explicitly reported so the process owner can request reselection.
+     */
     @Synchronized
-    fun recycleSession() {
+    fun recycleSession(): List<OutboundTransferRetirement> {
+        val retirements = registered.values.map { transfer ->
+            transfer.retirement(checkpointStore).also { retirement ->
+                if (retirement.requiresSourceReselection) checkpointStore?.delete(retirement.fileId)
+            }
+        }
         frozen = true
         activeSends.values.forEach { active -> runCatching { active.closeStream() } }
         activeSends.clear()
         registered.clear()
         pendingControls.clear()
         outstandingControls.clear()
+        return retirements
+    }
+
+    private fun RegisteredTransfer.retirement(
+        store: TransferCheckpointStore?,
+    ): OutboundTransferRetirement {
+        val checkpoint = store?.load(manifest.fileId)
+        val durable = source is FileTransferByteSource && checkpoint?.outboundSourcePath != null
+        return OutboundTransferRetirement(
+            fileId = manifest.fileId,
+            filename = manifest.filename,
+            sizeBytes = manifest.sizeBytes,
+            mimeType = manifest.mimeType,
+            sha256 = manifest.sha256,
+            chunkSizeBytes = manifest.chunkSizeBytes,
+            requiresSourceReselection = !durable,
+        )
     }
 
     private fun pumpChunks(fileId: String) {
@@ -761,9 +876,8 @@ class TransferSender(
 
     private fun restoreOutboundCheckpoints(peerFingerprint: ByteArray) {
         val store = checkpointStore ?: return
-        val binding = sessionBinding ?: return
+        sessionBinding ?: return
         for (record in store.loadActiveForPeer(peerFingerprint, TransferCheckpointStore.Record.Direction.OUTBOUND)) {
-            if (record.sessionId != binding.sessionId) continue
             val path = record.outboundSourcePath
             if (path == null || !File(path).isFile) {
                 store.delete(record.fileId)
@@ -775,6 +889,16 @@ class TransferSender(
                 continue
             }
             registered[record.fileId] = RegisteredTransfer(record.manifest, source)
+            onRestored(
+                TransferProgress.from(
+                    record.manifest,
+                    completedChunks = record.nextChunkIndex,
+                    sentChunks = record.nextChunkIndex,
+                ),
+            )
+            // The sender owns resume initiation: ask the receiver for its
+            // durable checkpoint, including the crash-before-manifest case.
+            requestResume(record.fileId)
         }
     }
 
@@ -806,6 +930,7 @@ class TransferSender(
     }
 
     private fun cleanLocalTransfer(fileId: String) {
+        discardPendingControlsForFile(fileId)
         val active = activeSends.remove(fileId)
         registered.remove(fileId)
         runCatching { active?.closeStream() }
@@ -816,6 +941,12 @@ class TransferSender(
     private fun discardPendingControl(type: String, fileId: String) {
         val key = "$type:$fileId"
         pendingControls.removeAll { it.key == key }
+    }
+
+    private fun discardPendingControlsForFile(fileId: String) {
+        val suffix = ":$fileId"
+        pendingControls.removeAll { it.key.endsWith(suffix) }
+        outstandingControls.entries.removeAll { it.value.key.endsWith(suffix) }
     }
 
     @Synchronized
@@ -909,8 +1040,11 @@ class TransferReceiver(
     private val limits: TransferResourceLimits = TransferResourceLimits(),
     private val checkpointStore: TransferCheckpointStore? = null,
     private val onInboundPayloadSynced: (String) -> Unit = {},
+    onRestored: ((TransferProgress) -> Unit)? = null,
     private val onProgress: (TransferProgress) -> Unit = {},
 ) {
+    private val onRestored = onRestored ?: onProgress
+
     private val states = mutableMapOf<String, TransferState>()
     private val pendingDeliveries = linkedMapOf<String, PendingDelivery>()
     private val tombstones = linkedMapOf<String, ReceiverTombstone>()
@@ -1005,6 +1139,19 @@ class TransferReceiver(
         }
     }
 
+    /** Verified content retained after a publication failure, if still retryable. */
+    @Synchronized
+    fun pendingDelivery(fileId: String): TransferCompleted? =
+        pendingDeliveries[fileId]?.completed
+
+    /**
+     * Cancel one inbound item locally. The controller separately sends the
+     * cancel control to the remote sender; this method never writes the wire.
+     */
+    @Synchronized
+    fun cancelLocal(fileId: String, discard: Boolean = true): Boolean =
+        cancelReceive(TransferCancel(fileId, discard))
+
     /** Drops active partial receives when the transport session ends. */
     @Synchronized
     fun recycleSession() {
@@ -1067,19 +1214,7 @@ class TransferReceiver(
             }
             TransferProtocol.TYPE_CANCEL -> {
                 val cancel = TransferCancel.fromJson(envelope.payload)
-                val state = states.remove(cancel.fileId)
-                val pending = if (cancel.discard) pendingDeliveries.remove(cancel.fileId) else null
-                state?.close()
-                if (cancel.discard) {
-                    storage.discard(cancel.fileId)
-                    checkpointStore?.delete(cancel.fileId)
-                }
-                (state?.manifest ?: pending?.completed?.manifest)?.let { manifest ->
-                    recordTombstone(
-                        cancel.fileId,
-                        ReceiverTombstone(manifest, TerminalOutcome.CANCELLED),
-                    )
-                }
+                cancelReceive(cancel)
                 TransferEvent.Cancelled(cancel)
             }
             else -> TransferEvent.Ignored
@@ -1115,6 +1250,23 @@ class TransferReceiver(
     /** Keeps the verified source/checkpoint reachable for duplicate or restart retry. */
     @Synchronized
     fun markDeliveryFailed(fileId: String): Boolean = fileId in pendingDeliveries
+
+    private fun cancelReceive(cancel: TransferCancel): Boolean {
+        val checkpointManifest = checkpointStore?.load(cancel.fileId)?.manifest
+        val state = states.remove(cancel.fileId)
+        val pending = if (cancel.discard) pendingDeliveries.remove(cancel.fileId) else null
+        state?.close()
+        if (cancel.discard) {
+            storage.discard(cancel.fileId)
+            checkpointStore?.delete(cancel.fileId)
+        }
+        val manifest = state?.manifest ?: pending?.completed?.manifest ?: checkpointManifest ?: return false
+        recordTombstone(
+            cancel.fileId,
+            ReceiverTombstone(manifest, TerminalOutcome.CANCELLED),
+        )
+        return true
+    }
 
     private fun reconcilePendingDeliveriesWithCheckpoints() {
         val store = checkpointStore ?: return
@@ -1179,7 +1331,7 @@ class TransferReceiver(
             runCatching {
                 val state = TransferState.restore(record.manifest, partFile, record.receivedRanges)
                 states[record.fileId] = state
-                onProgress(state.progress())
+                onRestored(state.progress())
             }.onFailure {
                 store.delete(record.fileId)
                 storage.discard(record.fileId)

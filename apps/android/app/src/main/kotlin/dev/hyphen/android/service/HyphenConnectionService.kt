@@ -44,13 +44,18 @@ class HyphenConnectionService : Service(), ConnectionSupervisor.Listener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_DISCONNECT) {
-            TransferForegroundOwnershipRuntime.coordinator.clear()
-            supervisor.cancelOutboundTransfersForForegroundStop()
-            CompanionConnectionPreferences.setKeepConnected(this, false)
-            CompanionConnectionPreferences.setTransferRetryRequired(this, false)
-            CompanionConnectionPreferences.setTransferActive(this, false)
-            supervisor.pauseConnection()
-            stopService(Intent(this, HyphenTransferService::class.java))
+            TransferForegroundOwnershipRuntime.lifecycle.transaction {
+                TransferForegroundOwnershipRuntime.coordinator.clear()
+                supervisor.cancelOutboundTransfersForForegroundStop()
+                CompanionConnectionPreferences.setKeepConnected(this, false)
+                CompanionConnectionPreferences.setTransferState(
+                    this,
+                    retryRequired = false,
+                    active = false,
+                )
+                supervisor.pauseConnection()
+                stopService(Intent(this, HyphenTransferService::class.java))
+            }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf(startId)
             return START_NOT_STICKY
@@ -116,15 +121,20 @@ class HyphenConnectionService : Service(), ConnectionSupervisor.Listener {
     }
 
     private fun stopForInvisibleNotification() {
-        TransferForegroundOwnershipRuntime.coordinator.clear()
-        supervisor.cancelOutboundTransfersForForegroundStop()
-        CompanionConnectionPreferences.setKeepConnected(this, false)
-        if (CompanionConnectionPreferences.transferActive(this)) {
-            CompanionConnectionPreferences.setTransferActive(this, false)
-            CompanionConnectionPreferences.setTransferRetryRequired(this, true)
-            stopService(Intent(this, HyphenTransferService::class.java))
+        TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.clear()
+            supervisor.cancelOutboundTransfersForForegroundStop()
+            CompanionConnectionPreferences.setKeepConnected(this, false)
+            if (CompanionConnectionPreferences.transferActive(this)) {
+                CompanionConnectionPreferences.setTransferState(
+                    this,
+                    retryRequired = true,
+                    active = false,
+                )
+                stopService(Intent(this, HyphenTransferService::class.java))
+            }
+            supervisor.pauseConnection()
         }
-        supervisor.pauseConnection()
         if (promoted) stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

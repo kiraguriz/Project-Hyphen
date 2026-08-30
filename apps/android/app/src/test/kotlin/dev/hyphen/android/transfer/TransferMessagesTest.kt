@@ -943,6 +943,62 @@ class TransferMessagesTest {
     }
 
     @Test
+    fun `remote cancel terminates outbound sender without echoing another cancel`() {
+        val outbox = RecordingTransferOutbox()
+        val sender = TransferSender(outbox, outstandingWindow = 2)
+        val manifest = sender.sendSource(
+            filename = "remote.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(4096) { it.toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_remote_cancel_sender",
+        )
+        val before = outbox.envelopes.size
+
+        assertTrue(sender.handleRemoteCancel(TransferCancel(manifest.fileId, discard = true)))
+        sender.handleAck("sent-0")
+
+        assertEquals(before, outbox.envelopes.size)
+        assertFalse(sender.hasInFlightOutboundTransfers())
+    }
+
+    @Test
+    fun `outbound file checkpoint restores across a new session id for the same peer`() {
+        val peer = ByteArray(32) { 7 }
+        val store = TransferCheckpointStore(temp.newFolder("outbound-restart"))
+        val original = TransferSender(RecordingTransferOutbox(), checkpointStore = store)
+        original.bindSession(peer, "s_before_restart")
+        val manifest = original.sendSource(
+            filename = "restart.bin",
+            mimeType = "application/octet-stream",
+            source = source(ByteArray(2048) { it.toByte() }),
+            chunkSizeBytes = 1024,
+            fileId = "f_restart_outbound01",
+        )
+        val restored = mutableListOf<TransferProgress>()
+        val restoredOutbox = RecordingTransferOutbox()
+        val recreated = TransferSender(
+            restoredOutbox,
+            checkpointStore = store,
+            onRestored = restored::add,
+        )
+
+        recreated.bindSession(peer, "s_after_restart")
+
+        assertTrue(recreated.containsTransfer(manifest.fileId))
+        assertEquals(listOf(manifest.fileId), restored.map { it.fileId })
+        val request = restoredOutbox.envelopes.single()
+        assertEquals(TransferProtocol.TYPE_RESUME_REQUEST, request.type)
+        assertEquals(Json.Str(manifest.fileId), request.payload["fileId"])
+
+        val freshReceiver = receiver()
+        val resume = freshReceiver.handle(toEnvelope(request, 0)) as TransferEvent.ResumeRequested
+        assertTrue(resume.info.needsManifest)
+        recreated.handleResumeInfo(resume.info)
+        assertEquals(TransferProtocol.TYPE_MANIFEST, restoredOutbox.envelopes.last().type)
+    }
+
+    @Test
     fun `stale worker cancel cannot remove a newer transfer`() {
         val outbox = RecordingTransferOutbox()
         val sender = TransferSender(outbox, outstandingWindow = 2)
@@ -1112,6 +1168,91 @@ class TransferMessagesTest {
         assertRejected("completed sendRemaining") {
             sender.sendRemaining(manifest.fileId, manifest.chunkCount)
         }
+    }
+
+    @Test
+    fun `session retirement marks stream source for reselection and removes unusable checkpoint`() {
+        val store = TransferCheckpointStore(temp.newFolder("stream-retire-checkpoints"))
+        val sender = TransferSender(RecordingTransferOutbox(), checkpointStore = store)
+        sender.bindSession(ByteArray(32) { 7 }, "s_stream_retire")
+        val bytes = ByteArray(2048) { it.toByte() }
+        val manifest = sender.sendSource(
+            filename = "picker.bin",
+            mimeType = "application/octet-stream",
+            source = StreamTransferByteSource(bytes.size.toLong()) {
+                java.io.ByteArrayInputStream(bytes)
+            },
+            chunkSizeBytes = 1024,
+            fileId = "f_stream_retire",
+        )
+
+        val retirement = sender.recycleSession().single()
+
+        assertEquals(manifest.fileId, retirement.fileId)
+        assertTrue(retirement.requiresSourceReselection)
+        assertEquals(null, store.load(manifest.fileId))
+    }
+
+    @Test
+    fun `reselected stream must match interrupted manifest before any wire send`() {
+        val original = ByteArray(2048) { (it % 251).toByte() }
+        val first = TransferSender(RecordingTransferOutbox())
+        first.sendSource(
+            filename = "picker.bin",
+            mimeType = "application/octet-stream",
+            source = StreamTransferByteSource(original.size.toLong()) {
+                java.io.ByteArrayInputStream(original)
+            },
+            chunkSizeBytes = 1024,
+            fileId = "f_reselected_stream",
+        )
+        val retirement = first.recycleSession().single()
+        val reboundOutbox = RecordingTransferOutbox()
+        val rebound = TransferSender(reboundOutbox)
+
+        val wrong = original.copyOf().also { it[0] = (it[0] + 1).toByte() }
+        assertRejected("wrong reselected source") {
+            rebound.sendReselectedSource(
+                retirement,
+                StreamTransferByteSource(wrong.size.toLong()) {
+                    java.io.ByteArrayInputStream(wrong)
+                },
+            )
+        }
+        assertEquals(null, rebound.cancelRegistered(retirement.fileId, discard = true))
+        assertTrue(reboundOutbox.envelopes.isEmpty())
+
+        val resumed = rebound.sendReselectedSource(
+            retirement,
+            StreamTransferByteSource(original.size.toLong()) {
+                java.io.ByteArrayInputStream(original)
+            },
+        )
+        assertEquals(retirement.fileId, resumed.fileId)
+        assertEquals(retirement.sha256, resumed.sha256)
+        assertEquals(TransferProtocol.TYPE_MANIFEST, reboundOutbox.envelopes.single().type)
+    }
+
+    @Test
+    fun `session retirement preserves durable file backed checkpoint for automatic restore`() {
+        val store = TransferCheckpointStore(temp.newFolder("file-retire-checkpoints"))
+        val sourceFile = temp.newFile("durable-source.bin").apply {
+            writeBytes(ByteArray(2048) { (it % 251).toByte() })
+        }
+        val sender = TransferSender(RecordingTransferOutbox(), checkpointStore = store)
+        sender.bindSession(ByteArray(32) { 8 }, "s_file_retire")
+        val manifest = sender.sendSource(
+            filename = "durable-source.bin",
+            mimeType = "application/octet-stream",
+            source = FileTransferByteSource(sourceFile),
+            chunkSizeBytes = 1024,
+            fileId = "f_file_retire",
+        )
+
+        val retirement = sender.recycleSession().single()
+
+        assertFalse(retirement.requiresSourceReselection)
+        assertEquals(sourceFile.absolutePath, store.load(manifest.fileId)?.outboundSourcePath)
     }
 
     @Test
@@ -1405,6 +1546,25 @@ class TransferMessagesTest {
         receiver.handle(toEnvelope(cancel, index = 2))
 
         assertEquals(null, receiver.checkpoint(manifest.fileId))
+    }
+
+    @Test
+    fun `receiver can cancel one inbound transfer locally before notifying its sender`() {
+        val bytes = ByteArray(2500) { (it % 251).toByte() }
+        val outbox = RecordingTransferOutbox()
+        val manifest = TransferSender(outbox).sendSource(
+            filename = "incoming.bin",
+            mimeType = "application/octet-stream",
+            source = source(bytes),
+            chunkSizeBytes = 1024,
+            fileId = "f_local_receiver_cancel",
+        )
+        val receiver = receiver()
+        receiver.handle(toEnvelope(outbox.envelopes.first(), index = 0))
+
+        assertTrue(receiver.cancelLocal(manifest.fileId, discard = true))
+        assertEquals(null, receiver.checkpoint(manifest.fileId))
+        assertFalse(receiver.cancelLocal(manifest.fileId, discard = true))
     }
 
     @Test

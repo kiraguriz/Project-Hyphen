@@ -74,4 +74,17 @@ class TransferForegroundOwnershipCoordinator {
 
 object TransferForegroundOwnershipRuntime {
     val coordinator = TransferForegroundOwnershipCoordinator()
+    val lifecycle = TransferForegroundLifecycleCoordinator()
+}
+
+/**
+ * Serializes reservation creation with terminal transfer side effects. The
+ * narrower reservation lock cannot cover sender cancellation or transport
+ * pause callbacks, while this re-entrant process lock can safely encompass the
+ * full lifecycle transaction.
+ */
+class TransferForegroundLifecycleCoordinator {
+    private val lock = Any()
+
+    fun <T> transaction(block: () -> T): T = synchronized(lock, block)
 }

@@ -64,44 +64,64 @@ object CompanionConnectionServiceController {
 
     fun disconnect(context: Context) {
         val supervisor = ConnectionSupervisor.getInstance(context.applicationContext)
-        TransferForegroundOwnershipRuntime.coordinator.clear()
-        supervisor.cancelOutboundTransfersForForegroundStop()
-        CompanionConnectionPreferences.setKeepConnected(context, false)
-        CompanionConnectionPreferences.setTransferRetryRequired(context, false)
-        CompanionConnectionPreferences.setTransferActive(context, false)
-        supervisor.pauseConnection()
-        context.stopService(Intent(context, HyphenConnectionService::class.java))
-        context.stopService(Intent(context, HyphenTransferService::class.java))
+        TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.clear()
+            supervisor.cancelOutboundTransfersForForegroundStop()
+            CompanionConnectionPreferences.setKeepConnected(context, false)
+            CompanionConnectionPreferences.setTransferState(
+                context,
+                retryRequired = false,
+                active = false,
+            )
+            supervisor.pauseConnection()
+            context.stopService(Intent(context, HyphenConnectionService::class.java))
+            context.stopService(Intent(context, HyphenTransferService::class.java))
+        }
     }
 
     fun stopServicesAfterTrustChange(context: Context) {
         val supervisor = ConnectionSupervisor.getInstance(context.applicationContext)
-        TransferForegroundOwnershipRuntime.coordinator.clear()
-        supervisor.cancelOutboundTransfersForForegroundStop()
-        supervisor.pauseConnection()
-        CompanionConnectionPreferences.setKeepConnected(context, false)
-        CompanionConnectionPreferences.setTransferRetryRequired(context, false)
-        CompanionConnectionPreferences.setTransferActive(context, false)
-        context.stopService(Intent(context, HyphenConnectionService::class.java))
-        context.stopService(Intent(context, HyphenTransferService::class.java))
+        TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.clear()
+            supervisor.cancelOutboundTransfersForForegroundStop()
+            supervisor.pauseConnection()
+            CompanionConnectionPreferences.setKeepConnected(context, false)
+            CompanionConnectionPreferences.setTransferState(
+                context,
+                retryRequired = false,
+                active = false,
+            )
+            context.stopService(Intent(context, HyphenConnectionService::class.java))
+            context.stopService(Intent(context, HyphenTransferService::class.java))
+        }
     }
 
     fun beginUserTransfer(context: Context): CompanionTransferStartResult {
         val visibility = notificationVisibilityResult(context)
         if (visibility != null) return CompanionTransferStartResult(visibility)
-        val reservation = TransferForegroundOwnershipRuntime.coordinator.reserve()
-        CompanionConnectionPreferences.setTransferRetryRequired(context, false)
-        CompanionConnectionPreferences.setTransferActive(context, true)
+        val reservation = TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.reserve().also {
+                CompanionConnectionPreferences.setTransferState(
+                    context,
+                    retryRequired = false,
+                    active = true,
+                )
+            }
+        }
         val result = startForeground(
             context,
             Intent(context, HyphenTransferService::class.java)
                 .setAction(HyphenTransferService.ACTION_BEGIN),
         )
         if (result != CompanionServiceStartResult.STARTED) {
-            TransferForegroundOwnershipRuntime.coordinator.release(reservation)
             val supervisor = ConnectionSupervisor.getInstance(context.applicationContext)
-            if (!hasForegroundTransferWork(supervisor)) {
-                CompanionConnectionPreferences.setTransferActive(context, false)
+            TransferForegroundOwnershipRuntime.lifecycle.transaction {
+                if (
+                    TransferForegroundOwnershipRuntime.coordinator.release(reservation) &&
+                    !hasForegroundTransferWork(supervisor)
+                ) {
+                    CompanionConnectionPreferences.setTransferActive(context, false)
+                }
             }
             return CompanionTransferStartResult(result)
         }
@@ -109,39 +129,88 @@ object CompanionConnectionServiceController {
     }
 
     fun completeUserTransferRegistration(reservation: TransferForegroundReservation): Boolean =
-        TransferForegroundOwnershipRuntime.coordinator.release(reservation)
+        TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.release(reservation)
+        }
 
     fun endUserTransfer(
         context: Context,
         reservation: TransferForegroundReservation? = null,
     ) {
-        if (reservation != null &&
-            !TransferForegroundOwnershipRuntime.coordinator.release(reservation)
-        ) {
-            return
+        val expectedToken = TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            if (
+                reservation != null &&
+                !TransferForegroundOwnershipRuntime.coordinator.release(reservation)
+            ) {
+                null
+            } else {
+                CompanionConnectionPreferences.transferStateSnapshot(context).controlToken()
+            }
         }
-        signalTransferService(context, HyphenTransferService.ACTION_END)
+        expectedToken ?: return
+        signalTransferService(context, HyphenTransferService.ACTION_END, expectedToken)
     }
 
     fun abortUserTransfers(context: Context) {
-        TransferForegroundOwnershipRuntime.coordinator.clear()
-        signalTransferService(context, HyphenTransferService.ACTION_ABORT)
+        val expectedToken = TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            TransferForegroundOwnershipRuntime.coordinator.clear()
+            CompanionConnectionPreferences.transferStateSnapshot(context).controlToken()
+        }
+        signalTransferService(context, HyphenTransferService.ACTION_ABORT, expectedToken)
     }
 
-    private fun signalTransferService(context: Context, action: String) {
+    /**
+     * Retires foreground ownership after a non-durable content source is lost.
+     * This bypasses the normal drained path, which would clear the retry marker.
+     */
+    fun requireTransferSourceReselection(context: Context) {
+        retireTransferForegroundOwnership(
+            ownership = TransferForegroundOwnershipRuntime.coordinator,
+            lifecycle = TransferForegroundOwnershipRuntime.lifecycle,
+            publishRetryRequired = {
+                CompanionConnectionPreferences.setTransferState(
+                    context,
+                    retryRequired = true,
+                    active = false,
+                )
+            },
+            stopTransferService = {
+                context.stopService(Intent(context, HyphenTransferService::class.java))
+            },
+        )
+    }
+
+    private fun signalTransferService(
+        context: Context,
+        action: String,
+        expectedToken: TransferStateControlToken,
+    ) {
         try {
             context.startService(
-                Intent(context, HyphenTransferService::class.java).setAction(action),
+                Intent(context, HyphenTransferService::class.java)
+                    .setAction(action)
+                    .putExtra(HyphenTransferService.EXTRA_STATE_REVISION, expectedToken.revision)
+                    .putExtra(
+                        HyphenTransferService.EXTRA_STATE_PROCESS_EPOCH,
+                        expectedToken.processEpoch,
+                    ),
             )
         } catch (_: SecurityException) {
-            finishTransferWithoutService(context, action)
+            finishTransferWithoutService(context, action, expectedToken)
         } catch (_: RuntimeException) {
-            finishTransferWithoutService(context, action)
+            finishTransferWithoutService(context, action, expectedToken)
         }
     }
 
     /** Equivalent fail-safe when Android refuses delivery to the running FGS. */
-    private fun finishTransferWithoutService(context: Context, action: String) {
+    private fun finishTransferWithoutService(
+        context: Context,
+        action: String,
+        expectedToken: TransferStateControlToken,
+    ) {
+        if (!expectedToken.matches(CompanionConnectionPreferences.transferStateSnapshot(context))) {
+            return
+        }
         val supervisor = ConnectionSupervisor.getInstance(context.applicationContext)
         val reason = if (action == HyphenTransferService.ACTION_END) {
             TransferForegroundStopReason.DRAINED
@@ -154,14 +223,26 @@ object CompanionConnectionServiceController {
             keepConnected = CompanionConnectionPreferences.keepConnected(context),
         )
         if (!plan.stopService) return
-        if (plan.cancelOutstanding) {
-            TransferForegroundOwnershipRuntime.coordinator.clear()
-            supervisor.cancelOutboundTransfersForForegroundStop()
+        val applied = TransferForegroundOwnershipRuntime.lifecycle.transaction {
+            if (!CompanionConnectionPreferences.applyTransferStopIfCurrent(
+                    context,
+                    expectedRevision = expectedToken.revision,
+                    retryRequired = plan.retryRequired,
+                    terminalEffects = {
+                        if (plan.cancelOutstanding) {
+                            TransferForegroundOwnershipRuntime.coordinator.clear()
+                            supervisor.cancelOutboundTransfersForForegroundStop()
+                        }
+                        if (plan.pauseTransport) supervisor.pauseConnection()
+                    },
+                )
+            ) {
+                return@transaction false
+            }
+            context.stopService(Intent(context, HyphenTransferService::class.java))
+            true
         }
-        if (plan.pauseTransport) supervisor.pauseConnection()
-        CompanionConnectionPreferences.setTransferRetryRequired(context, plan.retryRequired)
-        CompanionConnectionPreferences.setTransferActive(context, false)
-        context.stopService(Intent(context, HyphenTransferService::class.java))
+        if (!applied) return
     }
 
     private fun hasForegroundTransferWork(supervisor: ConnectionSupervisor): Boolean =
@@ -197,4 +278,67 @@ object CompanionConnectionServiceController {
             ) CompanionServiceStartResult.START_NOT_ALLOWED
             else CompanionServiceStartResult.FAILED
         }
+}
+
+internal enum class TransferWorkerSenderCleanup {
+    RETIRE_FOR_RESELECTION,
+    CANCEL_REGISTERED,
+}
+
+internal enum class TransferWorkerForegroundCleanup {
+    REQUIRE_RESELECTION,
+    RELEASE_RESERVATION_AND_REQUIRE_RESELECTION,
+    END_REGISTERED_TRANSFER,
+    END_RESERVED_TRANSFER,
+}
+
+internal data class TransferWorkerFailurePlan(
+    val senderCleanup: TransferWorkerSenderCleanup,
+    val foregroundCleanup: TransferWorkerForegroundCleanup,
+)
+
+/** Pure decision seam guarding retry-marker ordering in the async send worker. */
+internal fun planTransferWorkerFailure(
+    registrationTransferred: Boolean,
+    sourceRetryPending: Boolean,
+): TransferWorkerFailurePlan = when {
+    sourceRetryPending && registrationTransferred -> TransferWorkerFailurePlan(
+        TransferWorkerSenderCleanup.RETIRE_FOR_RESELECTION,
+        TransferWorkerForegroundCleanup.REQUIRE_RESELECTION,
+    )
+    sourceRetryPending -> TransferWorkerFailurePlan(
+        TransferWorkerSenderCleanup.RETIRE_FOR_RESELECTION,
+        TransferWorkerForegroundCleanup.RELEASE_RESERVATION_AND_REQUIRE_RESELECTION,
+    )
+    registrationTransferred -> TransferWorkerFailurePlan(
+        TransferWorkerSenderCleanup.CANCEL_REGISTERED,
+        TransferWorkerForegroundCleanup.END_REGISTERED_TRANSFER,
+    )
+    else -> TransferWorkerFailurePlan(
+        TransferWorkerSenderCleanup.CANCEL_REGISTERED,
+        TransferWorkerForegroundCleanup.END_RESERVED_TRANSFER,
+    )
+}
+
+internal fun retireTransferForegroundOwnership(
+    ownership: TransferForegroundOwnershipCoordinator,
+    lifecycle: TransferForegroundLifecycleCoordinator,
+    publishRetryRequired: () -> Unit,
+    stopTransferService: () -> Unit,
+) {
+    lifecycle.transaction {
+        ownership.clear()
+        publishRetryRequired()
+        stopTransferService()
+    }
+}
+
+/** Prevent sender-monitor callbacks from acquiring foreground lifecycle state. */
+internal fun dispatchCompletedOutboundTransfer(
+    outgoing: Boolean,
+    complete: Boolean,
+    enqueue: (() -> Unit) -> Unit,
+    completion: () -> Unit,
+) {
+    if (outgoing && complete) enqueue(completion)
 }

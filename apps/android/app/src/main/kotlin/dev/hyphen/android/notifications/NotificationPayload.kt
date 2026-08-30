@@ -15,6 +15,7 @@ object NotificationProtocol {
     const val TYPE_REPLY_REQUEST = "notification.reply.request"
     const val TYPE_REPLY_RESULT = "notification.reply.result"
     const val TYPE_PRIVACY_POLICY = "notification.privacy.policy"
+    const val TYPE_PRIVACY_RESULT = "notification.privacy.result"
 }
 
 data class NotificationReplyAction(

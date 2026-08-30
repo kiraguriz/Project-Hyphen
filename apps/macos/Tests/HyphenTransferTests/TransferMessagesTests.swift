@@ -142,6 +142,52 @@ private final class EarlyManifestAckOutbox: TransferOutbox {
     }
 }
 
+private final class BlockingFirstControlOutbox: TransferOutbox {
+    private let lock = NSLock()
+    private let firstSendEntered = DispatchSemaphore(value: 0)
+    private let releaseFirstSend = DispatchSemaphore(value: 0)
+    private var recordedEnvelopes: [SentTransferEnvelope] = []
+
+    var envelopes: [SentTransferEnvelope] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedEnvelopes
+    }
+
+    func waitUntilFirstSendIsOutsideSenderLock() -> Bool {
+        firstSendEntered.wait(timeout: .now() + 1) == .success
+    }
+
+    func unblockFirstSend() {
+        releaseFirstSend.signal()
+    }
+
+    func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String? {
+        lock.lock()
+        let index = recordedEnvelopes.count
+        recordedEnvelopes.append(
+            SentTransferEnvelope(
+                type: type,
+                capability: capability,
+                requiresAck: requiresAck,
+                payload: payload
+            )
+        )
+        lock.unlock()
+
+        if index == 0 {
+            firstSendEntered.signal()
+            _ = releaseFirstSend.wait(timeout: .now() + 1)
+        }
+        return "sent-\(index)"
+    }
+}
+
 final class TransferMessagesTests: XCTestCase {
     private var tempRoot: URL!
     private var sessions: [ProtocolSession] = []
@@ -664,6 +710,52 @@ final class TransferMessagesTests: XCTestCase {
         XCTAssertTrue(outbox.envelopes.allSatisfy { $0.type == TransferProtocol.typeCancel })
     }
 
+    func testCancelQueuedWhileControlSendIsOutsideLockIsNotRemovedByStaleBookkeeping() throws {
+        let outbox = BlockingFirstControlOutbox()
+        let sender = TransferSender(outbox: outbox)
+        let initialSendFinished = expectation(description: "initial control send finished")
+
+        DispatchQueue(label: "transfer-blocked-control-send").async {
+            _ = sender.sendResumeInfo(
+                try! TransferResumeInfo(fileId: "f_control_cancel_race", nextChunkIndex: 1)
+            )
+            initialSendFinished.fulfill()
+        }
+
+        XCTAssertTrue(outbox.waitUntilFirstSendIsOutsideSenderLock())
+        XCTAssertNil(try sender.cancel(fileId: "f_control_cancel_race", discard: true))
+        outbox.unblockFirstSend()
+        wait(for: [initialSendFinished], timeout: 1)
+
+        XCTAssertEqual(
+            outbox.envelopes.map(\.type),
+            [TransferProtocol.typeResumeInfo, TransferProtocol.typeCancel]
+        )
+        sender.handleAckTimeout("sent-0")
+        XCTAssertEqual(outbox.envelopes.count, 2, "superseded control must not remain outstanding")
+    }
+
+    func testRecycleWhileControlSendIsOutsideLockDoesNotBookkeepTheClearedQueue() throws {
+        let outbox = BlockingFirstControlOutbox()
+        let sender = TransferSender(outbox: outbox)
+        let initialSendFinished = expectation(description: "recycled control send finished")
+
+        DispatchQueue(label: "transfer-recycled-control-send").async {
+            _ = sender.sendResumeInfo(
+                try! TransferResumeInfo(fileId: "f_control_recycle_race", nextChunkIndex: 1)
+            )
+            initialSendFinished.fulfill()
+        }
+
+        XCTAssertTrue(outbox.waitUntilFirstSendIsOutsideSenderLock())
+        sender.recycleSession()
+        outbox.unblockFirstSend()
+        wait(for: [initialSendFinished], timeout: 1)
+
+        sender.handleAckTimeout("sent-0")
+        XCTAssertEqual(outbox.envelopes.count, 1, "recycled control must not remain outstanding")
+    }
+
     func testFlowControlledTransferControlQueueStaysBounded() throws {
         let outbox = GatedFlowControlledTransferOutbox()
         let sender = TransferSender(outbox: outbox)
@@ -882,7 +974,7 @@ final class TransferMessagesTests: XCTestCase {
         let bytes = Data((0..<2500).map { UInt8($0 % 251) })
         let outbox = RecordingTransferOutbox()
         var sendProgress: [TransferProgress] = []
-        let sender = TransferSender(outbox: outbox) { sendProgress.append($0) }
+        let sender = TransferSender(outbox: outbox, onProgress: { sendProgress.append($0) })
         let manifest = try sender.sendSource(
             filename: "sample.bin",
             mimeType: "application/octet-stream",
@@ -1228,6 +1320,64 @@ final class TransferMessagesTests: XCTestCase {
         XCTAssertThrowsError(try sender.sendRemaining(fileId: manifest.fileId, fromChunkIndex: 0))
     }
 
+    func testRemoteCancelTerminatesOutboundSenderWithoutEchoingAnotherCancel() throws {
+        let outbox = RecordingTransferOutbox()
+        let sender = TransferSender(outbox: outbox, outstandingWindow: 2)
+        let manifest = try sender.sendSource(
+            filename: "remote.bin",
+            mimeType: "application/octet-stream",
+            source: source(Data((0..<4096).map { UInt8($0 % 251) })),
+            chunkSizeBytes: 1024,
+            fileId: "f_remote_cancel_sender"
+        )
+        let before = outbox.envelopes.count
+
+        XCTAssertTrue(sender.handleRemoteCancel(try TransferCancel(fileId: manifest.fileId, discard: true)))
+        try sender.handleAck("sent-0")
+
+        XCTAssertEqual(outbox.envelopes.count, before)
+        XCTAssertFalse(sender.hasInFlightOutboundTransfers())
+    }
+
+    func testOutboundFileCheckpointRestoresAcrossANewSessionIDForTheSamePeer() throws {
+        let peer = Data(repeating: 7, count: 32)
+        let store = TransferCheckpointStore(
+            root: tempRoot.appendingPathComponent("outbound-restart", isDirectory: true)
+        )
+        let original = TransferSender(outbox: RecordingTransferOutbox(), checkpointStore: store)
+        original.bindSession(peerFingerprint: peer, sessionId: "s_before_restart")
+        let manifest = try original.sendSource(
+            filename: "restart.bin",
+            mimeType: "application/octet-stream",
+            source: source(Data((0..<2048).map { UInt8($0 % 251) })),
+            chunkSizeBytes: 1024,
+            fileId: "f_restart_outbound01"
+        )
+        var restored: [TransferProgress] = []
+        let restoredOutbox = RecordingTransferOutbox()
+        let recreated = TransferSender(
+            outbox: restoredOutbox,
+            checkpointStore: store,
+            onRestored: { restored.append($0) }
+        )
+
+        recreated.bindSession(peerFingerprint: peer, sessionId: "s_after_restart")
+
+        XCTAssertTrue(recreated.containsTransfer(fileId: manifest.fileId))
+        XCTAssertEqual(restored.map(\.fileId), [manifest.fileId])
+        let request = try XCTUnwrap(restoredOutbox.envelopes.single)
+        XCTAssertEqual(request.type, TransferProtocol.typeResumeRequest)
+        XCTAssertEqual(request.payload["fileId"] as? String, manifest.fileId)
+
+        let freshReceiver = try receiver()
+        guard case .resumeRequested(let info) = try freshReceiver.handle(toEnvelope(request, index: 0)) else {
+            return XCTFail("expected a receiver checkpoint response")
+        }
+        XCTAssertTrue(info.needsManifest)
+        try recreated.handleResumeInfo(info)
+        XCTAssertEqual(restoredOutbox.envelopes.last?.type, TransferProtocol.typeManifest)
+    }
+
     func testSenderRecyclesRegistryAfterAllChunksAreAcked() throws {
         let bytes = Data((0..<5_000).map { UInt8($0 % 251) })
         let outbox = RecordingTransferOutbox()
@@ -1548,6 +1698,24 @@ final class TransferMessagesTests: XCTestCase {
         _ = try receiver.handle(toEnvelope(cancel, index: 2))
 
         XCTAssertNil(receiver.checkpoint(fileId: manifest.fileId))
+    }
+
+    func testReceiverCanCancelOneInboundTransferLocallyBeforeNotifyingItsSender() throws {
+        let bytes = Data((0..<2500).map { UInt8($0 % 251) })
+        let outbox = RecordingTransferOutbox()
+        let manifest = try TransferSender(outbox: outbox).sendSource(
+            filename: "incoming.bin",
+            mimeType: "application/octet-stream",
+            source: source(bytes),
+            chunkSizeBytes: 1024,
+            fileId: "f_local_receiver_cancel"
+        )
+        let receiver = try receiver()
+        _ = try receiver.handle(toEnvelope(outbox.envelopes[0], index: 0))
+
+        XCTAssertTrue(receiver.cancelLocal(fileId: manifest.fileId, discard: true))
+        XCTAssertNil(receiver.checkpoint(fileId: manifest.fileId))
+        XCTAssertFalse(receiver.cancelLocal(fileId: manifest.fileId, discard: true))
     }
 
     func testReceiverRejectsChunkSizesThatDoNotMatchTheManifest() throws {

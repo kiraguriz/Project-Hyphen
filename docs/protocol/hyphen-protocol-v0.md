@@ -138,7 +138,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 - The responder replies with the subset (possibly with reduced options) it accepts; that intersection is the session contract. Messages outside it → `plugin/unsupported-capability`.
 - Unknown capabilities MUST be ignored, not rejected (forward compatibility).
 - Effective transfer chunk size = min of both sides' `maxChunkBytes`. The capability schema caps `maxChunkBytes` at 2 MiB (and floors it at 1 KiB) so a base64-inflated chunk plus envelope overhead always fits the 4 MiB frame limit (§2.1).
-- `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. Until Android applies the first policy envelope, Android MUST fail closed with `existsOnly` scrubbing on outbound notification payloads. The intersection ANDs both sides, so a peer that omits it disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
+- `notifications.v1.privacyPolicy` is an additive negotiated option (ADR-0006): when both peers advertise `true`, the Mac MAY send `notification.privacy.policy` and Android applies per-app privacy at the source, before a payload crosses the LAN. Until Android applies the first policy envelope, Android MUST fail closed with `existsOnly` scrubbing on outbound notification payloads. Android's phone-owner privacy floor is composed with the Mac policy by choosing the more restrictive mode. Android confirms the exact policy message with a content-free `notification.privacy.result`; the Mac MUST NOT report source-side application for a stale or absent result. The intersection ANDs both sides, so a peer that omits the option disables the feature; the macOS receiver's local scrubber remains the only enforcement against unsynced/older peers (§7.1.1).
 - `text.v1.direction` is advertised from the **advertiser's own perspective** (`bidirectional` = the advertiser both sends and receives text; `send-only` = it only sends; `receive-only` = it only receives). The responder computes the negotiated direction from both advertised values and the two device kinds, expressed canonically **from the android endpoint's frame** (v0 assumes exactly one `android` + one `macos` peer); the initiator adopts the responder's value verbatim. A flow is enabled only when one side will send AND the other will receive; when no flow is mutually supported the `text.v1` capability is dropped entirely (it is NOT negotiated to `bidirectional`). v0 status: the negotiated direction is computed and reported, but the built-in clients both advertise `bidirectional`; **per-direction enforcement in the text send/receive paths is a tracked residual** (review dim 05-02) — today only capability presence gates text.
 - Schema-backed payloads reject unknown fields at runtime to match their `additionalProperties:false` schema-of-record: the `transfer.manifest` decoder rejects any field outside its known key set (e.g. a smuggled `destinationPath`) rather than silently ignoring it (review dim 05-03). `transfer.chunk`/`resume`/`cancel` payloads have no schema-of-record in v0 and read only known fields.
 
@@ -156,6 +156,7 @@ SAS            = uint64_be(transcriptHash[0..7]) mod 10^6, zero-padded to 6 digi
 | `notification.dismiss.request` / `.result` | M→A / A→M | yes | Mac asks Android to cancel a key; result carries success or error code |
 | `notification.reply.request` / `.result` | M→A / A→M | yes | RemoteInput reply, only where capability advertises it (beta) |
 | `notification.privacy.policy` | M→A | yes | Per-app privacy policy; Android filters notification content source-side. Only when both peers negotiated `notifications.v1.privacyPolicy` |
+| `notification.privacy.result` | A→M | yes | Content-free acknowledgement naming the exact applied policy and Android's local privacy floor. Only when both peers negotiated `notifications.v1.privacyPolicy` |
 | `text.send` | both | yes | Text/link with `kind: "text"\|"url"`; receiver confirms before open (J4) |
 | `transfer.manifest` | both | yes | `fileId`, name, size, mime, sha256, chunk size/count (HYP-M3-010) |
 | `transfer.chunk` | both | yes | `fileId`, `chunkIndex`, base64 data, `chunkSha256` |
@@ -167,6 +168,15 @@ Detailed payload schemas are normative in `protocol/schema/` where present (JSON
 ### 7.1 Notification payloads
 
 `notification.posted` and `notification.updated` carry the same normalized Android notification payload. `notification.removed` carries only `sbnKey`. The `sbnKey` field is exactly `StatusBarNotification.getKey()` and is the only v0 notification identity. Android `postTime` MUST NOT appear in the payload or be used to decide whether a Mac notification is new or updated.
+
+Android retains each `notification.removed` tombstone until the peer ACKs that
+exact message. A timeout requeues it, with at most three wire attempts per
+session; loss of the session preserves it for the next session with the same
+trusted peer. Trust replacement or revocation clears the peer-scoped state so
+notification identifiers never cross a trust generation. The implementation
+bounds peer-visible keys and their pending/in-flight tombstones to 128; when the
+budget is full, it suppresses new notification keys at the source instead of
+allocating unbounded cleanup state or silently evicting a required tombstone.
 
 ```json
 {
@@ -208,8 +218,15 @@ negotiated — filtering follows the mode table below; hidden content then never
 crosses the LAN under the active mode. macOS MUST NOT send the policy envelope when
 the option is not negotiated.
 
+If a local ACK window is full, macOS MUST retain the newest unsent privacy
+policy in a bounded session-owned slot and retry it when an ACK or timeout frees
+capacity. A newer edit replaces an older unsent edit. The UI distinguishes this
+local queued state from an on-wire policy awaiting Android's correlated result;
+session retirement discards the queued policy and marks source-side sync offline.
+
 ```json
 {
+  "mirroringEnabled": true,
   "defaultMode": "existsOnly",
   "perPackageModes": [
     { "packageName": "com.google.android.gm", "mode": "full" },
@@ -221,6 +238,7 @@ the option is not negotiated.
 
 | Field | Type | Required | Rule |
 |---|---|---:|---|
+| `mirroringEnabled` | boolean | no | Defaults to `true` for older senders. When `false`, Android removes its currently mirrored keys and suppresses new posted/updated/snapshot payloads at the source |
 | `defaultMode` | string | yes | Mode applied to packages without an explicit entry. One of `full`, `hideBody`, `existsOnly` |
 | `perPackageModes` | array | no | Per-package overrides; each item is `{ "packageName": string, "mode": <mode> }`. Omitted/empty means default-only |
 
@@ -235,7 +253,31 @@ Mode semantics, applied by the sender (Android) before serializing
   `clearable`, `ongoing`) needed for update/remove correlation; omit `title`,
   `text`, `category`, and `replyActions`.
 
-Android MUST reject a malformed policy (unknown mode, non-object per-package
+Android also has a persistent phone-owner privacy floor. The effective mode for
+every package is the more restrictive of that local floor and the Mac-selected
+mode; a remote Mac can therefore tighten disclosure but cannot loosen the phone
+owner's choice. The local floor is configuration only and does not persist
+notification content or notification history.
+
+After applying a valid policy, Android sends:
+
+```json
+{
+  "regarding": "01JZ0000000000000000000009",
+  "applied": true,
+  "localFloor": "hideBody"
+}
+```
+
+`regarding` MUST equal the `messageId` of the policy that was applied,
+`applied` MUST be `true`, and `localFloor` is one of the three modes above. The
+result carries no package names or notification content. macOS changes its UI
+state to “applied” only when `regarding` matches its currently pending policy;
+stale results are ignored. A peer that implemented the earlier additive policy
+option but does not emit this result remains usable with the macOS local
+scrubber, but its source-side state remains visibly unconfirmed.
+
+Android MUST reject a malformed policy (unknown field/mode, non-object per-package
 entry, blank `packageName`) with `protocol/invalid-envelope`. The macOS receiver
 applies the same per-app rules locally as defense-in-depth for older/unsynced
 peers; receiver-side `existsOnly` additionally neutralizes the displayed source.
@@ -368,7 +410,7 @@ Receivers MUST reject chunks for unknown `fileId`, out-of-range `chunkIndex`, in
 
 If the receiver has no active or completed checkpoint for `fileId`, it MUST report `nextChunkIndex: 0` with `needsManifest: true`, or return `plugin/transfer-cancelled` if the partial transfer was explicitly discarded. The sender MUST retransmit the original `transfer.manifest` before chunk 0 when `needsManifest` is true; it MUST NOT send bare chunks for an unknown receiver state. If the receiver already completed the transfer, it SHOULD report `nextChunkIndex == chunkCount` and `needsManifest` omitted/false so the sender sends no more chunks. Chunk bytes live in receiver-owned temporary files. The implementations additionally persist peer-bound partial and fully verified-but-not-yet-published checkpoints with a bounded TTL; binding a session purges expired records and their matching in-memory pending source before offering retry. This local durability behavior does not change the v0 wire payload.
 
-The implemented wire path is: receiver handles `transfer.resume.request`, returns `transfer.resume.info(fileId,nextChunkIndex,needsManifest?)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. Resume and cancel control messages participate in the same bounded `requiresAck` flow control as transfer data: a locally rejected control remains queued until capacity returns, while an on-wire ACK timeout retries up to three total wire attempts before the control is dropped. This prevents both healthy-session closure on local pressure and unbounded retry traffic from an unacknowledging peer. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data. When the receiver reports `nextChunkIndex == chunkCount`, the sender MUST release the matching registry entry and durable outbound checkpoint after recording terminal completion.
+The implemented wire path is: after binding a new session, a sender with a restored outbound checkpoint initiates `transfer.resume.request`; the receiver returns `transfer.resume.info(fileId,nextChunkIndex,needsManifest?)` from its current checkpoint, and the sender resumes from an outbound registry keyed by `fileId` that holds the original manifest plus streaming byte source. This sender-owned initiation also closes the crash-before-manifest case: an unknown receiver reports `nextChunkIndex: 0, needsManifest: true`, so the sender retransmits the manifest before chunk 0. A restored inbound receiver waits for that sender request rather than issuing a directionally inverted request of its own. Resume and cancel control messages participate in the same bounded `requiresAck` flow control as transfer data: a locally rejected control remains queued until capacity returns, while an on-wire ACK timeout retries up to three total wire attempts before the control is dropped. This prevents both healthy-session closure on local pressure and unbounded retry traffic from an unacknowledging peer. A sender that has no registered source for `fileId` MUST reject the resume rather than fabricating data. When the receiver reports `nextChunkIndex == chunkCount`, the sender MUST release the matching registry entry and durable outbound checkpoint after recording terminal completion.
 
 ### 7.6 `transfer.cancel` payload and local progress
 

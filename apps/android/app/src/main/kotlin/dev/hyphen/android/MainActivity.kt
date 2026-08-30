@@ -10,6 +10,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
@@ -36,14 +37,9 @@ import dev.hyphen.android.discovery.DiscoveredService
 import dev.hyphen.android.discovery.HandlerScheduler
 import dev.hyphen.android.discovery.ScopedMulticastLock
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
-import dev.hyphen.android.notifications.NotificationCapabilityGate
 import dev.hyphen.android.notifications.NotificationAccessController
-import dev.hyphen.android.notifications.NotificationDismissRequestHandler
 import dev.hyphen.android.notifications.NotificationPrivacyMode
-import dev.hyphen.android.notifications.NotificationPrivacyPolicyHandler
-import dev.hyphen.android.notifications.NotificationProtocol
-import dev.hyphen.android.notifications.NotificationReplyRequestHandler
-import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
+import dev.hyphen.android.notifications.NotificationPrivacyPreferences
 import dev.hyphen.android.pairing.EndpointParser
 import dev.hyphen.android.pairing.PairingAttemptRuntime
 import dev.hyphen.android.pairing.PairingAttemptToken
@@ -57,31 +53,24 @@ import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.pairing.SasConfirmationGate
 import dev.hyphen.android.service.CompanionConnectionPreferences
 import dev.hyphen.android.service.CompanionConnectionServiceController
+import dev.hyphen.android.service.dispatchCompletedOutboundTransfer
 import dev.hyphen.android.service.CompanionServiceStartResult
+import dev.hyphen.android.service.TransferWorkerForegroundCleanup
+import dev.hyphen.android.service.TransferWorkerSenderCleanup
+import dev.hyphen.android.service.planTransferWorkerFailure
 import dev.hyphen.android.session.ConnectionSupervisor
 import dev.hyphen.android.text.ProtocolSessionTextLinkOutbox
 import dev.hyphen.android.text.TextLinkConfirmationRequest
+import dev.hyphen.android.text.TextConfirmationQueue
 import dev.hyphen.android.text.TextLinkKind
 import dev.hyphen.android.text.TextLinkMessage
-import dev.hyphen.android.text.TextLinkReceiver
 import dev.hyphen.android.text.TextLinkSender
 import dev.hyphen.android.transfer.ProtocolSessionTransferOutbox
-import dev.hyphen.android.transfer.TransferCancel
-import dev.hyphen.android.transfer.TransferCompleted
-import dev.hyphen.android.transfer.TransferEvent
-import dev.hyphen.android.transfer.FileTransferStorage
-import dev.hyphen.android.transfer.TransferCheckpointStore
-import dev.hyphen.android.transfer.ReceivedFileDelivery
 import dev.hyphen.android.transfer.StreamTransferByteSource
 import dev.hyphen.android.transfer.TransferProgress
 import dev.hyphen.android.transfer.TransferProtocol
-import dev.hyphen.android.transfer.TransferReceiver
-import dev.hyphen.android.transfer.TransferResumeInfo
 import dev.hyphen.android.transfer.TransferSender
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
-import dev.hyphen.android.transport.Envelope
-import dev.hyphen.android.transport.HeartbeatMonitor
-import dev.hyphen.android.transport.Json
 import dev.hyphen.android.transport.ProtocolSession
 import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.TlsClient
@@ -89,7 +78,6 @@ import dev.hyphen.android.transport.Ulid
 import dev.hyphen.android.trust.AndroidTrustStores
 import dev.hyphen.android.trust.TrustedPeer
 import dev.hyphen.android.ui.ActivityEvent
-import dev.hyphen.android.ui.ConnectionState
 import dev.hyphen.android.ui.HyphenActions
 import dev.hyphen.android.ui.HyphenHome
 import dev.hyphen.android.ui.HyphenUiModel
@@ -97,7 +85,6 @@ import dev.hyphen.android.ui.TextDirection
 import dev.hyphen.android.ui.TextKind
 import dev.hyphen.android.ui.TransferDirection
 import dev.hyphen.android.ui.theme.HyphenTheme
-import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLSocket
@@ -120,7 +107,6 @@ class MainActivity : ComponentActivity() {
     private var consumedPairingIntentToken: String? = null
     private var pendingNotificationAction: PendingNotificationAction? = null
     private val supervisor by lazy { ConnectionSupervisor.getInstance(this) }
-    private val textReceiver = TextLinkReceiver()
     private val diagnosticLogs = DiagnosticsRuntime.forActivityActions()
     private val associationController by lazy {
         AssociationController(CdmAssociationBackend(applicationContext), ::renderCdm)
@@ -137,25 +123,11 @@ class MainActivity : ComponentActivity() {
     private val logBuffer = BoundedLineBuffer(MAX_LOG_LINES)
     private val workerLock = Any()
     private val activeWorkers = mutableSetOf<Thread>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile
     private var activityDestroyed = false
     private val model = HyphenUiModel()
-    private val checkpointStore by lazy {
-        TransferCheckpointStore(TransferCheckpointStore.defaultRoot(applicationContext))
-    }
-    private val transferReceiver by lazy {
-        TransferReceiver(
-            FileTransferStorage(
-                File(cacheDir, "transfers"),
-                isCheckpointActive = { fileId -> checkpointStore.load(fileId) != null },
-            ),
-            checkpointStore = checkpointStore,
-        ) { progress ->
-            updateLastTransferProgress(progress)
-            append(transferProgressLine(progress))
-            emit(transferProgressEvent(progress, TransferDirection.INCOMING))
-        }
-    }
+    private val textConfirmationQueue = TextConfirmationQueue()
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             val action = pendingNotificationAction
@@ -175,13 +147,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         consumedPairingIntentToken = savedInstanceState?.getString(STATE_CONSUMED_PAIRING_TOKEN)
-        supervisor.configureTransferCheckpoints(checkpointStore)
+        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(
+            NotificationPrivacyPreferences.localFloor(applicationContext),
+        )
         supervisor.addListener(sessionListener)
         supervisor.replayStateTo(sessionListener)
-        bindTransferPersistenceIfConnected()
         refreshPairingState()
         model.setBetaDiagnostics(betaDiagnosticsEnabled())
-        model.updateNotificationPrivacyLabel(notificationPrivacyStatus(HyphenNotificationListenerRuntime.notificationPrivacyMode()))
+        model.updateNotificationPrivacyLabel(notificationPrivacyStatus())
         model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
         model.setCompanionConnection(CompanionConnectionServiceController.keepConnected(this))
         model.setLog(logBuffer.snapshot())
@@ -191,7 +164,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         reconcilePersistentConnection()
-        if (CompanionConnectionPreferences.transferRetryRequired(this)) {
+        val transferRetryRequired = CompanionConnectionPreferences.transferRetryRequired(this)
+        model.updateTransferSourceRetryRequired(transferRetryRequired)
+        if (transferRetryRequired) {
             append("transfer stopped: reselect the file to retry; no restorable content source is retained")
         }
         consumePairingIntent(intent)
@@ -211,10 +186,15 @@ class MainActivity : ComponentActivity() {
                 model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
             },
             onOpenNotificationMirror = { showNotificationAccessOnboarding() },
-            onCycleNotificationPrivacy = { cycleNotificationPrivacy() },
+            onChooseNotificationPrivacy = { showNotificationPrivacyPicker() },
             onSendText = { sendTextLink(it) },
-            onSendFile = { pickFileToSend() },
-            onCancelTransfer = { cancelActiveTransfer() },
+            onSendFile = {
+                supervisor.clearOutboundSourceReselectionSelection()
+                pickFileToSend()
+            },
+            onCancelTransfer = { fileId -> cancelTransfer(fileId) },
+            onRetryTransfer = { fileId -> retryTransfer(fileId) },
+            onReselectTransferSource = { beginOutboundSourceReselection() },
             onToggleBetaDiagnostics = { toggleBetaDiagnostics() },
             onPreviewDiagnostics = { previewDiagnostics() },
             onExportDiagnostics = { exportDiagnostics() },
@@ -235,28 +215,48 @@ class MainActivity : ComponentActivity() {
 
         override fun onActivityEvent(event: ActivityEvent) {
             if (event is ActivityEvent.ConnectionChanged) {
-                when (event.state) {
-                    // Re-bind on every (re)connect, including supervisor-internal
-                    // reconnects, so the singleton receiver is re-armed and its
-                    // persisted checkpoints are restored.
-                    ConnectionState.CONNECTED -> bindTransferPersistenceIfConnected()
-                    ConnectionState.SUSPENDED -> transferReceiver.recycleSession()
-                    else -> Unit
-                }
+                postToUi { model.updateNotificationPrivacyLabel(notificationPrivacyStatus()) }
             }
             emit(event)
-        }
-
-        override fun onEnvelope(envelope: Envelope, state: ConnectionSupervisor.ActiveState) {
-            handleSessionEnvelope(envelope, state)
         }
 
         override fun onTransferProgress(progress: TransferProgress, outgoing: Boolean) {
             append(transferProgressLine(progress))
             emit(transferProgressEvent(progress, if (outgoing) TransferDirection.OUTGOING else TransferDirection.INCOMING))
-            if (outgoing && progress.isComplete) {
-                CompanionConnectionServiceController.endUserTransfer(applicationContext)
+            dispatchCompletedOutboundTransfer(
+                outgoing = outgoing,
+                complete = progress.isComplete,
+                enqueue = { callback -> mainHandler.post(callback) },
+            ) {
+                if (!activityDestroyed) {
+                    CompanionConnectionServiceController.endUserTransfer(applicationContext)
+                }
             }
+        }
+
+        override fun onTransferRestored(progress: TransferProgress, outgoing: Boolean) {
+            append("transfer resume restored: ${progress.fileId}")
+            emit(
+                transferResumingEvent(
+                    progress,
+                    if (outgoing) TransferDirection.OUTGOING else TransferDirection.INCOMING,
+                ),
+            )
+        }
+
+        override fun onTextConfirmation(request: TextLinkConfirmationRequest) {
+            postToUi {
+                textConfirmationQueue.enqueue(request)
+                presentNextTextLinkConfirmation()
+            }
+        }
+
+        override fun onPrivacyPolicyApplied() {
+            postToUi { model.updateNotificationPrivacyLabel(notificationPrivacyStatus()) }
+        }
+
+        override fun onOutboundReselectRequiredChanged(required: Boolean) {
+            postToUi { model.updateTransferSourceRetryRequired(required) }
         }
     }
 
@@ -275,10 +275,6 @@ class MainActivity : ComponentActivity() {
             transferSender = state.transferSender,
             lastTransferProgress = state.lastTransferProgress,
         )
-    }
-
-    private fun updateLastTransferProgress(progress: TransferProgress?) {
-        supervisor.updateLastTransferProgress(progress)
     }
 
     private fun launchWorker(name: String, work: () -> Unit): Boolean {
@@ -335,6 +331,8 @@ class MainActivity : ComponentActivity() {
         AssociationAttemptRuntime.coordinator.attachApprovalListener(associationApprovalListener)
         append(notificationAccessLine())
         model.setNotificationAccess(NotificationAccessController.forContext(this).status().enabled)
+        model.updateTransferSourceRetryRequired(CompanionConnectionPreferences.transferRetryRequired(this))
+        model.updateNotificationPrivacyLabel(notificationPrivacyStatus())
         reconcileAssociationBindings()
         reconcilePersistentConnection(silent = true)
     }
@@ -688,7 +686,7 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.dlg_forget_msg, fingerprintPrefix(peer.spkiFingerprint)))
             .setPositiveButton(R.string.dlg_forget_confirm) { _, _ ->
                 try {
-                    supervisor.invalidateTransferCheckpoints(peer.spkiFingerprint, transferReceiver)
+                    supervisor.invalidateTransferCheckpoints(peer.spkiFingerprint)
                     associationBindings.removePeer(peer.spkiFingerprint)?.let { associationId ->
                         associationController.removeUnboundAssociation(associationId)
                     }
@@ -710,7 +708,7 @@ class MainActivity : ComponentActivity() {
             .setMessage(getString(R.string.dlg_reset_msg, count))
             .setPositiveButton(R.string.dlg_reset_confirm) { _, _ ->
                 try {
-                    supervisor.invalidateAllTransferCheckpoints(transferReceiver)
+                    supervisor.invalidateAllTransferCheckpoints()
                     associationBindings.clear().forEach { associationId ->
                         associationController.removeUnboundAssociation(associationId)
                     }
@@ -732,33 +730,27 @@ class MainActivity : ComponentActivity() {
         model.setCompanionConnection(false)
     }
 
-    private fun bindTransferPersistenceIfConnected() {
-        if (supervisor.activeState().session == null) return
-        supervisor.bindTransferPersistence(transferReceiver).forEach(::handleCompletedIncomingTransfer)
+    private fun retryIncomingDelivery(fileId: String) {
+        if (!supervisor.retryIncomingDelivery(fileId)) {
+            append("transfer save retry unavailable: $fileId")
+        }
     }
 
-    private fun handleCompletedIncomingTransfer(completed: TransferCompleted) {
-        updateLastTransferProgress(null)
-        try {
-            val delivered = deliverIncomingFile(completed)
-            transferReceiver.markDeliverySucceeded(completed.manifest.fileId)
-            val line = transferCompletedLine(completed, delivered)
-            val manifest = completed.manifest
-            append(line)
-            emit(ActivityEvent.TransferCompleted(
-                fileId = manifest.fileId,
-                filename = manifest.filename,
-                sizeBytes = manifest.sizeBytes,
-                direction = TransferDirection.INCOMING,
-                verified = true,
-                atMillis = System.currentTimeMillis(),
-            ))
-        } catch (e: Exception) {
-            runCatching { transferReceiver.markDeliveryFailed(completed.manifest.fileId) }
-            append(
-                "transfer received but save failed; verified source queued for retry: ${e.message}",
-            )
+    private fun retryTransfer(fileId: String) {
+        if (supervisor.isOutboundSourceReselectionRequired(fileId)) {
+            beginOutboundSourceReselection(fileId)
+        } else {
+            retryIncomingDelivery(fileId)
         }
+    }
+
+    private fun beginOutboundSourceReselection(fileId: String? = null) {
+        if (!supervisor.selectOutboundSourceReselection(fileId)) {
+            // A process restart retains only the safe global retry marker, not
+            // a URI or file identifier. A fresh selection is still actionable.
+            supervisor.clearOutboundSourceReselectionSelection()
+        }
+        pickFileToSend()
     }
 
     private fun peerLabel(peer: TrustedPeer): String =
@@ -1005,7 +997,6 @@ class MainActivity : ComponentActivity() {
                 check(PairingAttemptRuntime.coordinator.releaseSocket(attempt, socket)) {
                     "pairing attempt lost socket ownership before session activation"
                 }
-                bindTransferPersistenceIfConnected()
                 postToUi {
                     emit(ActivityEvent.PairingNote(getString(R.string.pairing_note_connected, peerName), System.currentTimeMillis()))
                     if (!CompanionConnectionServiceController.keepConnected(this)) {
@@ -1032,199 +1023,6 @@ class MainActivity : ComponentActivity() {
     private fun completePairingAttempt(attempt: PairingAttemptToken) {
         PairingAttemptRuntime.coordinator.complete(attempt)
         pairingAttemptToken.compareAndSet(attempt, null)
-    }
-
-    private fun handleSessionEnvelope(
-        envelope: Envelope,
-        state: ConnectionSupervisor.ActiveState = supervisor.activeState(),
-    ) {
-        val session = state.session
-        try {
-            if (envelope.type == Envelope.TYPE_ERROR) {
-                append(peerErrorLine(envelope))
-                return
-            }
-            val expectedCapability = expectedCapability(envelope.type)
-            if (session != null && expectedCapability != null && envelope.capability != expectedCapability) {
-                val id = sendProtocolError(
-                    session = session,
-                    regarding = envelope,
-                    code = "plugin/unsupported-capability",
-                    message = "Message type was sent under the wrong capability.",
-                )
-                append("unsupported capability reported: $id (${envelope.capability})")
-                return
-            }
-            if (session != null && !isNegotiatedCapability(state.capabilities, envelope.capability)) {
-                val id = sendProtocolError(
-                    session = session,
-                    regarding = envelope,
-                    code = "plugin/unsupported-capability",
-                    message = "Capability is not negotiated for this session.",
-                )
-                append("unsupported capability reported: $id (${envelope.capability})")
-                return
-            }
-            if (session != null && !isNegotiatedNotificationOption(state.capabilities, envelope.type)) {
-                val id = sendProtocolError(
-                    session = session,
-                    regarding = envelope,
-                    code = "plugin/unsupported-capability",
-                    message = "Notification action is not negotiated for this session.",
-                )
-                append("unsupported notification option reported: $id (${envelope.type})")
-                return
-            }
-            if (session != null) {
-                val dismissResultId = NotificationDismissRequestHandler(
-                    canceller = HyphenNotificationListenerRuntime.notificationCanceller(),
-                    isActiveNotification = HyphenNotificationListenerRuntime::isNotificationActive,
-                    outbox = ProtocolSessionNotificationOutbox(session),
-                ).handle(envelope)
-                if (dismissResultId != null) {
-                    append("notification dismiss result sent: $dismissResultId")
-                    emit(ActivityEvent.NotificationActionPerformed(getString(R.string.notif_action_name), getString(R.string.notif_action_cleared), System.currentTimeMillis()))
-                    return
-                }
-                val replyResultId = NotificationReplyRequestHandler(
-                    replier = HyphenNotificationListenerRuntime.notificationReplier(),
-                    outbox = ProtocolSessionNotificationOutbox(session),
-                ).handle(envelope)
-                if (replyResultId != null) {
-                    append("notification reply result sent: $replyResultId")
-                    emit(ActivityEvent.NotificationActionPerformed(getString(R.string.notif_action_name), getString(R.string.notif_action_replied), System.currentTimeMillis()))
-                    return
-                }
-                if (envelope.type == NotificationProtocol.TYPE_PRIVACY_POLICY) {
-                    val policy = NotificationPrivacyPolicyHandler.parse(envelope.payload)
-                    HyphenNotificationListenerRuntime.setNotificationPrivacyPolicy(policy)
-                    append(
-                        "notification privacy policy applied: default=${policy.defaultMode.wire}, " +
-                            "${policy.perPackageModes.size} app overrides",
-                    )
-                    return
-                }
-            }
-            if (envelope.capability == TransferProtocol.CAPABILITY) {
-                if (envelope.type == TransferProtocol.TYPE_RESUME_INFO) {
-                    val info = TransferResumeInfo.fromJson(envelope.payload)
-                    try {
-                        state.transferSender?.handleResumeInfo(info)
-                        append("transfer resume continued: ${info.fileId}")
-                    } catch (e: Exception) {
-                        append("transfer resume info ignored: ${e.message}")
-                    }
-                    return
-                }
-                when (val event = transferReceiver.handle(envelope)) {
-                    is TransferEvent.Completed -> {
-                        handleCompletedIncomingTransfer(event.completed)
-                    }
-                    is TransferEvent.ResumeRequested -> {
-                        val sender = state.transferSender
-                        if (session != null && sender != null) {
-                            val id = sender.sendResumeInfo(event.info)
-                            append(
-                                if (id != null) {
-                                    "transfer resume info sent: $id (${event.info.fileId})"
-                                } else {
-                                    "transfer resume info queued: ${event.info.fileId}"
-                                },
-                            )
-                        } else {
-                            append("transfer resume requested without active session")
-                        }
-                    }
-                    is TransferEvent.Cancelled -> {
-                        updateLastTransferProgress(null)
-                        append("transfer cancelled: ${event.cancel.fileId}")
-                        emit(ActivityEvent.TransferCancelled(event.cancel.fileId, System.currentTimeMillis()))
-                    }
-                    TransferEvent.Ignored -> Unit
-                }
-                return
-            }
-            val request = textReceiver.handle(envelope)
-            if (request != null) {
-                postToUi { presentTextLinkConfirmation(request) }
-                return
-            }
-        } catch (e: IllegalArgumentException) {
-            session?.let {
-                sendProtocolError(
-                    session = it,
-                    regarding = envelope,
-                    code = "protocol/invalid-envelope",
-                    message = "Envelope payload is invalid for its type.",
-                )
-            }
-            append("session envelope rejected: ${e.message}")
-            return
-        }
-        if (isPluginEnvelope(envelope)) {
-            session?.let {
-                val id = sendProtocolError(
-                    session = it,
-                    regarding = envelope,
-                    code = "protocol/unknown-type",
-                    message = "No handler is registered for this message type.",
-                )
-                append("unknown type reported: $id (${envelope.type})")
-            }
-        }
-    }
-
-    private fun isNegotiatedCapability(
-        capabilities: SessionHandshake.NegotiatedCapabilities?,
-        capability: String?,
-    ): Boolean =
-        capability == null || capabilities?.contains(capability) != false
-
-    private fun isNegotiatedNotificationOption(
-        capabilities: SessionHandshake.NegotiatedCapabilities?,
-        type: String,
-    ): Boolean =
-        NotificationCapabilityGate.allowsInboundRequest(type, capabilities)
-
-    private fun isPluginEnvelope(envelope: Envelope): Boolean =
-        envelope.type !in setOf(Envelope.TYPE_ACK, Envelope.TYPE_HEARTBEAT, Envelope.TYPE_HELLO, Envelope.TYPE_ERROR)
-
-    private fun expectedCapability(type: String): String? =
-        when (type) {
-            NotificationProtocol.TYPE_DISMISS_REQUEST,
-            NotificationProtocol.TYPE_REPLY_REQUEST,
-            NotificationProtocol.TYPE_PRIVACY_POLICY -> NotificationProtocol.CAPABILITY
-            TransferProtocol.TYPE_MANIFEST,
-            TransferProtocol.TYPE_CHUNK,
-            TransferProtocol.TYPE_RESUME_REQUEST,
-            TransferProtocol.TYPE_RESUME_INFO,
-            TransferProtocol.TYPE_CANCEL -> TransferProtocol.CAPABILITY
-            TextLinkMessage.TYPE_SEND -> TextLinkMessage.CAPABILITY
-            else -> null
-        }
-
-    private fun sendProtocolError(
-        session: ProtocolSession,
-        regarding: Envelope,
-        code: String,
-        message: String,
-        retryable: Boolean = false,
-    ): String =
-        session.send(
-            type = Envelope.TYPE_ERROR,
-            payload = Json.obj(
-                "code" to Json.Str(code),
-                "message" to Json.Str(message.take(256)),
-                "regarding" to Json.Str(regarding.messageId),
-                "retryable" to Json.Bool(retryable),
-            ),
-            requiresAck = false,
-        )
-
-    private fun peerErrorLine(envelope: Envelope): String {
-        val code = (envelope.payload["code"] as? Json.Str)?.value ?: "unknown"
-        val regarding = (envelope.payload["regarding"] as? Json.Str)?.value ?: "none"
-        return "peer error: $code regarding $regarding"
     }
 
     private fun pickFileToSend() {
@@ -1272,6 +1070,7 @@ class MainActivity : ComponentActivity() {
         if (requestCode != REQUEST_PICK_FILE) return
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) {
+            supervisor.clearOutboundSourceReselectionSelection()
             append("transfer/send cancelled")
             return
         }
@@ -1299,8 +1098,10 @@ class MainActivity : ComponentActivity() {
             append("transfer/send: could not read selected file size")
             return
         }
+        val appContext = applicationContext
+        val resolver = appContext.contentResolver
         val source = StreamTransferByteSource(meta.sizeBytes) {
-            contentResolver.openInputStream(uri) ?: throw java.io.IOException("could not open $uri")
+            resolver.openInputStream(uri) ?: throw java.io.IOException("selected content unavailable")
         }
         val foregroundStart = CompanionConnectionServiceController.beginUserTransfer(this)
         val foregroundResult = foregroundStart.serviceResult
@@ -1314,53 +1115,75 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        val fileId = "f_${Ulid.generate()}"
-        val launched = launchWorker("hyphen-send-file") {
+        val sourceReselection = supervisor.selectedOutboundSourceReselectionFileId()
+            ?.let(supervisor::outboundSourceReselection)
+        val fileId = sourceReselection?.fileId ?: "f_${Ulid.generate()}"
+        val processSupervisor = supervisor
+        val launched = processSupervisor.launchProcessWorker("hyphen-send-file") {
             var registrationTransferred = false
             try {
-                val manifest = sender.sendSource(
-                    filename = meta.filename,
-                    mimeType = meta.mimeType,
-                    source = source,
-                    chunkSizeBytes = DEFAULT_TRANSFER_CHUNK_BYTES,
-                    fileId = fileId,
-                )
+                val manifest = if (sourceReselection == null) {
+                    sender.sendSource(
+                        filename = meta.filename,
+                        mimeType = meta.mimeType,
+                        source = source,
+                        chunkSizeBytes = DEFAULT_TRANSFER_CHUNK_BYTES,
+                        fileId = fileId,
+                    )
+                } else {
+                    sender.sendReselectedSource(sourceReselection, source)
+                }
                 if (!CompanionConnectionServiceController.completeUserTransferRegistration(
                         foregroundReservation,
                     )
                 ) {
-                    sender.cancel(manifest.fileId, discard = true)
-                    throw IllegalStateException("foreground transfer ownership was revoked")
+                    processSupervisor.handleForegroundRegistrationLoss(manifest.fileId, sender)
+                    return@launchProcessWorker
                 }
                 registrationTransferred = true
-                append("transfer/send started: ${manifest.filename} (${manifest.sizeBytes} bytes)")
-                // Surface the outgoing row immediately; chunk-ack progress follows.
-                emit(ActivityEvent.TransferProgressed(
-                    fileId = manifest.fileId,
-                    filename = manifest.filename,
-                    direction = TransferDirection.OUTGOING,
-                    completedBytes = 0,
-                    totalBytes = manifest.sizeBytes,
-                    completedChunks = 0,
-                    totalChunks = manifest.chunkCount,
-                    complete = false,
-                    atMillis = System.currentTimeMillis(),
-                ))
-            } catch (e: Exception) {
-                sender.cancel(fileId, discard = true)
-                if (registrationTransferred) {
-                    CompanionConnectionServiceController.endUserTransfer(applicationContext)
-                } else {
-                    CompanionConnectionServiceController.endUserTransfer(
-                        applicationContext,
-                        foregroundReservation,
-                    )
+                check(processSupervisor.completeOutboundSourceReselection(fileId, sender)) {
+                    "session retired before source registration completed"
                 }
-                append("transfer/send failed: ${e.message}")
+            } catch (e: Exception) {
+                // A mismatched reselected file is rejected before registration.
+                // Do not emit a remote cancel in that case: the receiver's
+                // partial checkpoint must remain available for a correct retry.
+                val sourceRetryPending = processSupervisor.isOutboundSourceReselectionRequired(fileId)
+                val failurePlan = planTransferWorkerFailure(
+                    registrationTransferred = registrationTransferred,
+                    sourceRetryPending = sourceRetryPending,
+                )
+                when (failurePlan.senderCleanup) {
+                    TransferWorkerSenderCleanup.RETIRE_FOR_RESELECTION ->
+                        sender.retireRegisteredForSourceReselection(fileId)
+                    TransferWorkerSenderCleanup.CANCEL_REGISTERED ->
+                        sender.cancelRegistered(fileId, discard = true)
+                }
+                when (failurePlan.foregroundCleanup) {
+                    TransferWorkerForegroundCleanup.REQUIRE_RESELECTION ->
+                        CompanionConnectionServiceController.requireTransferSourceReselection(appContext)
+                    TransferWorkerForegroundCleanup.RELEASE_RESERVATION_AND_REQUIRE_RESELECTION -> {
+                        // Queueing ACTION_END here could race after the retry
+                        // marker and clear it as a normal drained transfer.
+                        CompanionConnectionServiceController.completeUserTransferRegistration(
+                            foregroundReservation,
+                        )
+                        CompanionConnectionServiceController.requireTransferSourceReselection(appContext)
+                    }
+                    TransferWorkerForegroundCleanup.END_REGISTERED_TRANSFER ->
+                        CompanionConnectionServiceController.endUserTransfer(appContext)
+                    TransferWorkerForegroundCleanup.END_RESERVED_TRANSFER ->
+                        CompanionConnectionServiceController.endUserTransfer(
+                            appContext,
+                            foregroundReservation,
+                        )
+                }
+                processSupervisor.reportProcessTransferFailure(fileId)
             }
         }
         if (!launched) {
             CompanionConnectionServiceController.endUserTransfer(this, foregroundReservation)
+            append("transfer/send: worker unavailable")
         }
     }
 
@@ -1386,27 +1209,15 @@ class MainActivity : ComponentActivity() {
         return ContentMetadata(name, mime, size)
     }
 
-    private fun cancelActiveTransfer() {
-        val state = activeStateSnapshot()
-        val progress = state.lastTransferProgress
-        if (progress == null || progress.isComplete) {
-            CompanionConnectionServiceController.endUserTransfer(this)
-            append("transfer cancel: no active transfer")
+    private fun cancelTransfer(fileId: String) {
+        if (!supervisor.cancelTransfer(fileId)) {
+            append("transfer cancel: unknown file $fileId")
             return
         }
-        val sender = state.transferSender
-        if (sender == null) {
-            CompanionConnectionServiceController.endUserTransfer(this)
-            append("transfer cancel: no active session")
-            return
-        }
-        val id = sender.cancel(progress.fileId, discard = true)
-        updateLastTransferProgress(null)
-        if (!sender.hasInFlightOutboundTransfers()) {
+        if (!supervisor.hasInFlightOutboundTransfers()) {
             CompanionConnectionServiceController.endUserTransfer(this)
         }
-        append("transfer cancel sent: $id (${progress.filename})")
-        emit(ActivityEvent.TransferCancelled(progress.fileId, System.currentTimeMillis()))
+        append("transfer cancel recorded: $fileId")
     }
 
     private fun transferProgressEvent(progress: TransferProgress, direction: TransferDirection): ActivityEvent =
@@ -1422,33 +1233,30 @@ class MainActivity : ComponentActivity() {
             atMillis = System.currentTimeMillis(),
         )
 
+    private fun transferResumingEvent(progress: TransferProgress, direction: TransferDirection): ActivityEvent =
+        ActivityEvent.TransferResuming(
+            fileId = progress.fileId,
+            filename = progress.filename,
+            direction = direction,
+            completedBytes = progress.completedBytes,
+            totalBytes = progress.totalBytes,
+            completedChunks = progress.completedChunks,
+            totalChunks = progress.totalChunks,
+            atMillis = System.currentTimeMillis(),
+        )
+
     private fun transferProgressLine(progress: TransferProgress): String =
         "transfer ${progress.filename}: ${progress.completedBytes}/${progress.totalBytes} bytes " +
             "(${progress.completedChunks}/${progress.totalChunks})"
 
-    private fun deliverIncomingFile(completed: TransferCompleted): File {
-        // External app-private storage can live on a filesystem without hard
-        // links. Prefer it, but retry atomically in internal storage when the
-        // volume cannot satisfy ReceivedFileDelivery's no-partial/no-clobber
-        // publication contract.
-        val destinations = listOfNotNull(getExternalFilesDir(null), filesDir)
-            .distinctBy { it.absolutePath }
-            .map { File(it, "received") }
-        return ReceivedFileDelivery(destinations) {
-            append("transfer cleanup: verified source retained for age-based cleanup")
-        }.deliver(completed)
-    }
-
-    private fun transferCompletedLine(completed: TransferCompleted, delivered: File): String =
-        "transfer received: ${completed.manifest.filename} (${completed.manifest.sizeBytes} bytes) -> ${delivered.name}"
-
-    private fun presentTextLinkConfirmation(request: TextLinkConfirmationRequest) {
+    private fun presentNextTextLinkConfirmation() {
+        val request = textConfirmationQueue.activateNext() ?: return
         val isUrl = request.message.kind == TextLinkKind.URL
         AlertDialog.Builder(this)
             .setTitle(if (isUrl) R.string.dlg_link_title else R.string.dlg_text_title)
             .setMessage(request.message.value)
             .setPositiveButton(if (isUrl) R.string.dlg_link_open else R.string.dlg_text_copy) { _, _ ->
-                textReceiver.resolve(request.messageId)
+                supervisor.resolveTextConfirmation(request.messageId)
                 if (isUrl) {
                     openConfirmedLink(request.message.value)
                 } else {
@@ -1456,8 +1264,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
             .setNegativeButton(R.string.dlg_cancel) { _, _ ->
-                textReceiver.resolve(request.messageId)
+                supervisor.resolveTextConfirmation(request.messageId)
                 append("text/link declined")
+            }
+            .setOnCancelListener {
+                supervisor.resolveTextConfirmation(request.messageId)
+                append("text/link declined")
+            }
+            .setOnDismissListener {
+                textConfirmationQueue.finishActive(request.messageId)
+                if (!activityDestroyed) presentNextTextLinkConfirmation()
             }
             .show()
     }
@@ -1545,23 +1361,42 @@ class MainActivity : ComponentActivity() {
             "component=${status.componentName}"
     }
 
-    private fun cycleNotificationPrivacy() {
-        val next = when (HyphenNotificationListenerRuntime.notificationPrivacyMode()) {
-            NotificationPrivacyMode.SHOW_FULL -> NotificationPrivacyMode.HIDE_BODY
-            NotificationPrivacyMode.HIDE_BODY -> NotificationPrivacyMode.EXISTS_ONLY
-            NotificationPrivacyMode.EXISTS_ONLY -> NotificationPrivacyMode.SHOW_FULL
-        }
-        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(next)
-        model.updateNotificationPrivacyLabel(notificationPrivacyStatus(next))
-        append("notification privacy: ${notificationPrivacyStatus(next)}")
+    private fun showNotificationPrivacyPicker() {
+        val modes = NotificationPrivacyMode.entries
+        val labels = modes.map(::notificationPrivacyModeLabel).toTypedArray()
+        var selected = modes.indexOf(HyphenNotificationListenerRuntime.notificationPrivacyMode())
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dlg_privacy_floor_title)
+            .setMessage(R.string.dlg_privacy_floor_msg)
+            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
+            .setPositiveButton(R.string.dlg_privacy_apply) { _, _ ->
+                val mode = modes[selected.coerceIn(modes.indices)]
+                NotificationPrivacyPreferences.setLocalFloor(applicationContext, mode)
+                HyphenNotificationListenerRuntime.setNotificationPrivacyMode(mode)
+                model.updateNotificationPrivacyLabel(notificationPrivacyStatus())
+                append("notification privacy floor: ${notificationPrivacyModeLabel(mode)}")
+            }
+            .setNegativeButton(R.string.dlg_cancel, null)
+            .show()
     }
 
-    private fun notificationPrivacyStatus(mode: NotificationPrivacyMode): String =
+    private fun notificationPrivacyModeLabel(mode: NotificationPrivacyMode): String =
         when (mode) {
             NotificationPrivacyMode.SHOW_FULL -> getString(R.string.privacy_full)
             NotificationPrivacyMode.HIDE_BODY -> getString(R.string.privacy_hide_body)
             NotificationPrivacyMode.EXISTS_ONLY -> getString(R.string.privacy_exists_only)
         }
+
+    private fun notificationPrivacyStatus(): String {
+        val state = HyphenNotificationListenerRuntime.privacyState()
+        val mode = notificationPrivacyModeLabel(state.localFloor)
+        val sync = when {
+            state.awaitingRemotePolicy -> getString(R.string.privacy_sync_pending)
+            state.remotePolicyApplied -> getString(R.string.privacy_sync_applied)
+            else -> getString(R.string.privacy_sync_local_floor)
+        }
+        return getString(R.string.privacy_status_format, mode, sync)
+    }
 
     private fun toggleBetaDiagnostics() {
         if (betaDiagnosticsEnabled()) {

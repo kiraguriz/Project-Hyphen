@@ -1,0 +1,7 @@
+{
+  "mirroringEnabled": false,
+  "defaultMode": "existsOnly",
+  "perPackageModes": [
+    { "packageName": "com.google.android.gm", "mode": "hideBody" }
+  ]
+}

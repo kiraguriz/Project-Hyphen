@@ -10,15 +10,18 @@ final class ActivityFeedNotificationPresenter: NotificationPresenter {
     private let wrapped: NotificationPresenter
     private let onShow: (NotificationPresentationRequest) -> Void
     private let onRemove: (String) -> Void
+    private let onRemoveAll: () -> Void
 
     init(
         wrapped: NotificationPresenter,
         onShow: @escaping (NotificationPresentationRequest) -> Void,
-        onRemove: @escaping (String) -> Void
+        onRemove: @escaping (String) -> Void,
+        onRemoveAll: @escaping () -> Void
     ) {
         self.wrapped = wrapped
         self.onShow = onShow
         self.onRemove = onRemove
+        self.onRemoveAll = onRemoveAll
     }
 
     func show(_ request: NotificationPresentationRequest) {
@@ -29,5 +32,10 @@ final class ActivityFeedNotificationPresenter: NotificationPresenter {
     func remove(identifier: String) {
         onRemove(identifier)
         wrapped.remove(identifier: identifier)
+    }
+
+    func removeAllMirroredNotifications() {
+        onRemoveAll()
+        wrapped.removeAllMirroredNotifications()
     }
 }

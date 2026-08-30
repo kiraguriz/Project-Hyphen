@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ANNOTATIONS = {"$schema", "$id", "title", "description", "examples", "default"}
 SUPPORTED = {"type", "required", "properties", "additionalProperties", "pattern",
-             "minimum", "maximum", "maxLength", "const", "enum", "propertyNames"}
+             "minimum", "maximum", "maxLength", "const", "enum", "propertyNames", "items"}
 
 TYPE_CHECKS = {
     "object": lambda v: isinstance(v, dict),
@@ -85,6 +85,10 @@ def validate(instance, schema, path="$"):
             if key in instance:
                 validate(instance[key], sub, f"{path}.{key}")
 
+    if isinstance(instance, list) and "items" in schema:
+        for index, item in enumerate(instance):
+            validate(item, schema["items"], f"{path}[{index}]")
+
 
 def check_schema_keywords(schema, path="$"):
     unsupported = set(schema) - ANNOTATIONS - SUPPORTED
@@ -95,6 +99,8 @@ def check_schema_keywords(schema, path="$"):
         check_schema_keywords(sub, f"{path}.properties.{key}")
     if "propertyNames" in schema:
         check_schema_keywords(schema["propertyNames"], f"{path}.propertyNames")
+    if "items" in schema:
+        check_schema_keywords(schema["items"], f"{path}.items")
 
 
 def main():

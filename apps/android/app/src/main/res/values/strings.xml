@@ -51,6 +51,14 @@
     <string name="transfer_received">%1$s · 已接收</string>
     <string name="transfer_sent">%1$s · 已发送</string>
     <string name="transfer_cancelled">已取消</string>
+    <string name="transfer_resuming">正在恢复 · %1$s / %2$s</string>
+    <string name="transfer_save_retry_required">文件已校验；保存失败，可安全重试</string>
+    <string name="transfer_source_reselection_required">源文件访问已结束；请重新选择同一文件</string>
+    <string name="transfer_cancel_item">取消此文件</string>
+    <string name="transfer_retry_save_action">重试保存</string>
+    <string name="transfer_retry_source_title">上次发送被系统中止</string>
+    <string name="transfer_retry_source_detail">Hyphen 不会在后台保留你选取文件的访问权。请重新选择文件以重试。</string>
+    <string name="transfer_retry_source_action">重新选择文件</string>
 
     <!-- Text / link rows -->
     <string name="text_link_sent">链接已发送到 Mac</string>
@@ -101,6 +109,10 @@
     <string name="notif_btn_off">开启通知镜像</string>
     <string name="notif_btn_check">检查通知使用权</string>
     <string name="notif_btn_privacy">通知隐私：%1$s</string>
+    <string name="privacy_status_format">%1$s · %2$s</string>
+    <string name="privacy_sync_pending">等待 Mac 策略</string>
+    <string name="privacy_sync_applied">Mac 策略已应用</string>
+    <string name="privacy_sync_local_floor">本机隐私下限</string>
     <string name="privacy_full">完整</string>
     <string name="privacy_hide_body">隐藏内容</string>
     <string name="privacy_exists_only">仅提示</string>
@@ -217,4 +229,7 @@
     <string name="dlg_transfer_notification_title">允许显示传输状态？</string>
     <string name="dlg_transfer_notification_msg">选择文件会暂时离开 Hyphen。为避免隐藏的后台连接，Hyphen 会先开启可见的伴侣连接通知，并在发送期间显示 dataSync 通知。伴侣连接会保持开启，直到你从通知或本页面断开。</string>
     <string name="dlg_transfer_notification_continue">允许并选择文件</string>
+    <string name="dlg_privacy_floor_title">手机端隐私下限</string>
+    <string name="dlg_privacy_floor_msg">Mac 可以为单个 app 选择更严格的模式，但不能放宽这里的选择。此设置不保存通知历史。</string>
+    <string name="dlg_privacy_apply">应用</string>
 </resources>

@@ -7,7 +7,8 @@ public enum NotificationCapabilityGate {
              NotificationMirrorProtocol.typeUpdated,
              NotificationMirrorProtocol.typeRemoved,
              NotificationMirrorProtocol.typeDismissResult,
-             NotificationMirrorProtocol.typeReplyResult:
+             NotificationMirrorProtocol.typeReplyResult,
+             NotificationMirrorProtocol.typePrivacyResult:
             return true
         default:
             return false
@@ -46,6 +47,8 @@ public enum NotificationCapabilityGate {
             return capabilities?.notificationDismissEnabled == true
         case NotificationMirrorProtocol.typeReplyResult:
             return capabilities?.notificationReplyEnabled == true
+        case NotificationMirrorProtocol.typePrivacyResult:
+            return capabilities?.notificationPrivacyPolicyEnabled == true
         default:
             return true
         }

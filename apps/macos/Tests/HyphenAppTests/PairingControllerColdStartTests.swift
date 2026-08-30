@@ -127,14 +127,34 @@ private final class LockedTokenIssuer {
 }
 
 private final class NoopInteractiveNotificationPresenter: InteractiveNotificationPresenter {
+    private(set) var removeAllMirroredNotificationsCallCount = 0
+
     func setDismissHandler(_ handler: ((String) -> Void)?) {}
     func setReplyHandler(_ handler: ((String, Int, String?, String) -> Void)?) {}
     func show(_ request: HyphenNotifications.NotificationPresentationRequest) {}
     func remove(identifier: String) {}
+    func removeAllMirroredNotifications() {
+        removeAllMirroredNotificationsCallCount += 1
+    }
 }
 
 final class PairingControllerColdStartTests: XCTestCase {
     private let fingerprint = Data(repeating: 0x31, count: 32)
+
+    func testDisabledPrivacyPolicyPurgesLocalNotificationsWithoutAnActiveSession() {
+        let presenter = NoopInteractiveNotificationPresenter()
+        let controller = PairingController(
+            notificationPresenter: presenter,
+            notificationPrivacyPolicy: {
+                NotificationPrivacyPolicy(isMirroringEnabled: false)
+            },
+            onStatus: { _ in }
+        )
+
+        controller.applyLocalNotificationPrivacyPolicy()
+
+        XCTAssertEqual(presenter.removeAllMirroredNotificationsCallCount, 1)
+    }
 
     func testRestorePublishesTrustedPeerAndReconnectStateWithoutStartingNetwork() {
         let lifecycle = FakePeerLinkLifecycle()

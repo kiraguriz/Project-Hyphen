@@ -1,103 +1,172 @@
 import SwiftUI
 
-// STAGED DESIGN SURFACE — defined and preview-tested, but not yet wired into a
-// runtime surface (no call site outside this file). It lands when the live
-// transfer-activity UI is hooked up; until then it is intentional scaffolding,
-// not forgotten/dead code. The real send/receive paths stream via TransferSender.
-//
-// macOS file-transfer activity panel (design handoff "Hyphen Apps.dc.html",
-// Section D · macOS 通知镜像与传输, lines 455-489). In-app representation of the
-// transfer activity list: in-progress outgoing, resumed incoming, and a
-// verified completed row. Transfer production paths stream; this is the UI
-// surface only.
+// Live macOS transfer activity surface. Rows are derived from the in-memory
+// ActivityFeed, so the panel never invents files or persists transfer history.
 
-// MARK: - Row model
-
-/// One transfer activity row.
 struct TransferRow: Identifiable {
-    enum Direction {
-        /// Outgoing send (↑, accent).
+    enum Direction: Equatable {
         case outgoing
-        /// Incoming receive (↓, amber when resumed).
         case incoming
-        /// Verified / completed (✓, accent-soft).
         case completed
     }
 
-    let id = UUID()
-    var direction: Direction
-    /// File name (primary line).
-    var name: String
-    /// Mono detail line (size/speed, resume note, or completion note).
-    var detail: String
-    /// Trailing percent text (nil for completed).
-    var percentText: String?
-    /// Progress fraction 0...1 (nil hides the progress bar).
-    var progress: Double?
-    /// Whether the row uses the amber accent (resumed incoming).
-    var amber: Bool
-    /// Footer left label (e.g. 发送到手机). nil hides the footer row.
-    var footerLeft: String?
-    /// Footer right action label (e.g. 取消 / 在访达中显示).
-    var footerRight: String?
+    enum Action: Equatable {
+        case cancel
+        case retrySave
+    }
 
-    /// Outgoing in-progress sample (设计稿.pdf · 64%).
+    let id: String
+    let fileId: String
+    var direction: Direction
+    var name: String
+    var detail: String
+    var percentText: String?
+    var progress: Double?
+    var amber: Bool
+    var footerLeft: String?
+    var footerRight: String?
+    var action: Action?
+
+    static func rows(from feed: ActivityFeed) -> [TransferRow] {
+        feed.items.compactMap { activity in
+            guard case .transfer(let transfer) = activity.kind else { return nil }
+            return row(from: transfer)
+        }
+    }
+
+    private static func row(from transfer: TransferFeedItem) -> TransferRow {
+        let total = byteFormatter.string(fromByteCount: transfer.totalBytes)
+        let done = byteFormatter.string(fromByteCount: transfer.completedBytes)
+        let baseDirection: Direction = transfer.direction == .incoming ? .incoming : .outgoing
+        let directionLabel = transfer.direction == .incoming
+            ? L("transfer.direction.fromPhone")
+            : L("transfer.direction.toPhone")
+
+        switch transfer.status {
+        case .active:
+            return TransferRow(
+                id: transfer.fileId,
+                fileId: transfer.fileId,
+                direction: baseDirection,
+                name: transfer.filename,
+                detail: transfer.totalBytes > 0 ? "\(done) / \(total)" : directionLabel,
+                percentText: percent(transfer.fraction),
+                progress: transfer.fraction,
+                amber: false,
+                footerLeft: directionLabel,
+                footerRight: L("transfer.action.cancel"),
+                action: .cancel
+            )
+        case .resuming:
+            return TransferRow(
+                id: transfer.fileId,
+                fileId: transfer.fileId,
+                direction: baseDirection,
+                name: transfer.filename,
+                detail: L("transfer.resuming.detail", done, total),
+                percentText: percent(transfer.fraction),
+                progress: transfer.fraction,
+                amber: true,
+                footerLeft: directionLabel,
+                footerRight: L("transfer.action.cancel"),
+                action: .cancel
+            )
+        case .completed:
+            let detail = transfer.verified
+                ? L("transfer.received.verified", total)
+                : (transfer.direction == .incoming ? L("transfer.received", total) : L("transfer.sent", total))
+            return TransferRow(
+                id: transfer.fileId,
+                fileId: transfer.fileId,
+                direction: .completed,
+                name: transfer.filename,
+                detail: detail,
+                percentText: nil,
+                progress: nil,
+                amber: false,
+                footerLeft: nil,
+                footerRight: nil,
+                action: nil
+            )
+        case .cancelled:
+            return TransferRow(
+                id: transfer.fileId,
+                fileId: transfer.fileId,
+                direction: baseDirection,
+                name: transfer.filename,
+                detail: L("transfer.cancelled"),
+                percentText: nil,
+                progress: nil,
+                amber: false,
+                footerLeft: nil,
+                footerRight: nil,
+                action: nil
+            )
+        case .retryRequired:
+            return TransferRow(
+                id: transfer.fileId,
+                fileId: transfer.fileId,
+                direction: .incoming,
+                name: transfer.filename,
+                detail: L("transfer.saveRetryRequired"),
+                percentText: nil,
+                progress: nil,
+                amber: true,
+                footerLeft: L("transfer.verifiedStaged"),
+                footerRight: L("transfer.action.retrySave"),
+                action: .retrySave
+            )
+        }
+    }
+
+    private static func percent(_ fraction: Double?) -> String? {
+        fraction.map { "\(Int(($0 * 100).rounded(.down)))%" }
+    }
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
     static let sampleOutgoing = TransferRow(
+        id: "preview-out",
+        fileId: "preview-out",
         direction: .outgoing,
         name: "设计稿.pdf",
-        detail: "5.2 / 8.2 MB · 2.1 MB/s",
+        detail: "5.2 / 8.2 MB",
         percentText: "64%",
         progress: 0.64,
         amber: false,
         footerLeft: "发送到手机",
-        footerRight: "取消"
+        footerRight: "取消",
+        action: .cancel
     )
 
-    /// Incoming resumed sample (IMG_4821.heic · 81%).
     static let sampleIncoming = TransferRow(
+        id: "preview-in",
+        fileId: "preview-in",
         direction: .incoming,
         name: "IMG_4821.heic",
-        detail: "已从 48% 断点续传",
+        detail: "已恢复 · 48 / 60 MB",
         percentText: "81%",
         progress: 0.81,
         amber: true,
-        footerLeft: nil,
-        footerRight: nil
-    )
-
-    /// Completed + verified sample (会议纪要.md).
-    static let sampleCompleted = TransferRow(
-        direction: .completed,
-        name: "会议纪要.md",
-        detail: "完成 · SHA‑256 校验通过",
-        percentText: nil,
-        progress: nil,
-        amber: false,
-        footerLeft: nil,
-        footerRight: "在访达中显示"
+        footerLeft: "来自手机",
+        footerRight: "取消",
+        action: .cancel
     )
 }
 
-// MARK: - Progress bar
-
-/// Reusable rounded progress bar: height 6, surface-3 track, tinted fill.
 struct TransferProgressBar: View {
-    /// 0...1 fraction.
     var value: Double
-    /// Fill color.
     var tint: Color
     @Environment(\.hyphenPalette) private var p
-
-    init(value: Double, tint: Color) {
-        self.value = value
-        self.tint = tint
-    }
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(p.surface3)
+                RoundedRectangle(cornerRadius: 3).fill(p.surface3)
                 RoundedRectangle(cornerRadius: 3)
                     .fill(tint)
                     .frame(width: max(0, min(1, value)) * geo.size.width)
@@ -107,11 +176,10 @@ struct TransferProgressBar: View {
     }
 }
 
-// MARK: - Row view
-
-/// A single transfer activity row.
 struct TransferRowView: View {
     var row: TransferRow
+    var actionEnabled: Bool
+    var onAction: (TransferRow.Action, String) -> Void
     @Environment(\.hyphenPalette) private var p
 
     private var accentColor: Color { row.amber ? p.amber : p.accent }
@@ -120,23 +188,21 @@ struct TransferRowView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 11) {
                 glyph
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(row.name)
                         .font(.hyphenBody(13, weight: .semibold))
                         .foregroundColor(p.text)
+                        .lineLimit(1)
                     Text(row.detail)
                         .font(.hyphenMono(11))
                         .foregroundColor(row.amber ? p.amber : p.dim)
+                        .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if let pct = row.percentText {
-                    Text(pct)
+                if let percentText = row.percentText {
+                    Text(percentText)
                         .font(.hyphenMono(12, weight: .semibold))
                         .foregroundColor(accentColor)
-                } else if row.direction == .completed, let right = row.footerRight {
-                    Text(right)
-                        .font(.hyphenBody(11, weight: .semibold))
-                        .foregroundColor(p.dim)
                 }
             }
 
@@ -144,18 +210,20 @@ struct TransferRowView: View {
                 TransferProgressBar(value: progress, tint: accentColor)
             }
 
-            if row.direction != .completed, (row.footerLeft != nil || row.footerRight != nil) {
+            if row.footerLeft != nil || row.footerRight != nil {
                 HStack {
-                    if let left = row.footerLeft {
-                        Text(left)
+                    if let footerLeft = row.footerLeft {
+                        Text(footerLeft)
                             .font(.hyphenBody(11))
                             .foregroundColor(p.faint)
                     }
                     Spacer(minLength: 8)
-                    if let right = row.footerRight {
-                        Text(right)
+                    if let footerRight = row.footerRight, let action = row.action {
+                        Button(footerRight) { onAction(action, row.fileId) }
+                            .buttonStyle(.plain)
                             .font(.hyphenBody(11, weight: .semibold))
-                            .foregroundColor(p.dim)
+                            .foregroundColor(actionEnabled ? p.accent : p.faint)
+                            .disabled(!actionEnabled)
                     }
                 }
             }
@@ -186,53 +254,66 @@ struct TransferRowView: View {
     }
 }
 
-// MARK: - Transfer panel
-
-/// Transfer activity panel (width 360): header + peer chip + transfer rows.
 struct TransferPanelView: View {
-    var peerName: String
+    var peerName: String?
     var rows: [TransferRow]
+    var isConnected: Bool
+    var onCancel: (String) -> Void
+    var onRetrySave: (String) -> Void
     @Environment(\.hyphenPalette) private var p
 
     init(
-        peerName: String = "Pixel 8 Pro",
-        rows: [TransferRow] = [.sampleOutgoing, .sampleIncoming, .sampleCompleted]
+        peerName: String? = nil,
+        rows: [TransferRow] = [],
+        isConnected: Bool = false,
+        onCancel: @escaping (String) -> Void = { _ in },
+        onRetrySave: @escaping (String) -> Void = { _ in }
     ) {
         self.peerName = peerName
         self.rows = rows
+        self.isConnected = isConnected
+        self.onCancel = onCancel
+        self.onRetrySave = onRetrySave
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Hairline()
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                TransferRowView(row: row)
-                if index < rows.count - 1 {
-                    Hairline()
+            if rows.isEmpty {
+                Text(L("transfer.panel.empty"))
+                    .font(.hyphenBody(12))
+                    .foregroundColor(p.dim)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 28)
+                    .padding(.horizontal, 16)
+            } else {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    TransferRowView(
+                        row: row,
+                        actionEnabled: true,
+                        onAction: handleAction
+                    )
+                    if index < rows.count - 1 { Hairline() }
                 }
             }
         }
         .frame(width: 360)
         .background(p.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(p.hair, lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(p.hair, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 16)
         .hyphenThemed()
     }
 
     private var header: some View {
         HStack {
-            Text("传输")
+            Text(L("transfer.panel.title"))
                 .font(.hyphenBody(13, weight: .semibold))
                 .foregroundColor(p.text)
             Spacer()
             HStack(spacing: 6) {
-                Circle().fill(p.accent).frame(width: 7, height: 7)
-                Text(peerName)
+                Circle().fill(isConnected ? p.accent : p.faint).frame(width: 7, height: 7)
+                Text(peerName ?? L("conn.notPaired"))
                     .font(.hyphenBody(11))
                     .foregroundColor(p.dim)
             }
@@ -240,14 +321,23 @@ struct TransferPanelView: View {
         .padding(.vertical, 13)
         .padding(.horizontal, 16)
     }
-}
 
-// MARK: - Preview
+    private func handleAction(_ action: TransferRow.Action, fileId: String) {
+        switch action {
+        case .cancel: onCancel(fileId)
+        case .retrySave: onRetrySave(fileId)
+        }
+    }
+}
 
 #if DEBUG
 #Preview("Transfer panel") {
-    TransferPanelView()
-        .padding(28)
-        .background(HyphenPalette.dark.canvas)
+    TransferPanelView(
+        peerName: "Pixel 8 Pro",
+        rows: [.sampleOutgoing, .sampleIncoming],
+        isConnected: true
+    )
+    .padding(28)
+    .background(HyphenPalette.dark.canvas)
 }
 #endif

@@ -7,6 +7,9 @@ class HyphenNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        HyphenNotificationListenerRuntime.setNotificationPrivacyMode(
+            NotificationPrivacyPreferences.localFloor(applicationContext),
+        )
         HyphenNotificationListenerRuntime.onConnected(
             notificationCanceller = AndroidNotificationCanceller(this),
             notificationReplier = AndroidNotificationReplier(this),

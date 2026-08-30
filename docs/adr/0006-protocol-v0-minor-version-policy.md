@@ -25,6 +25,12 @@ minor. It must use one of these paths:
   compatible,
 - or a new protocol major if the envelope/session contract changes.
 
+Within a negotiated additive option, a sender may add an optional payload field
+with a conservative default and a new correlated result type. For example,
+`notifications.v1.privacyPolicy` added optional `mirroringEnabled` (omission is
+`true`) plus `notification.privacy.result`. Older peers remain usable, but the
+UI must distinguish an absent result from confirmed source-side application.
+
 SAS transcripts continue to bind the exact emitted protocol identifier, so a
 pairing transcript using `hyphen/0.4` remains distinguishable from one using
 `hyphen/0.3`.

@@ -39,8 +39,10 @@ enum TransferDirection: Equatable {
 
 enum TransferFeedStatus: Equatable {
     case active
+    case resuming
     case completed
     case cancelled
+    case retryRequired
 }
 
 enum TextFeedKind: Equatable {
@@ -174,6 +176,17 @@ struct ActivityFeed: Equatable {
         }
     }
 
+    /// Remove every in-memory mirrored-notification row while preserving text
+    /// and transfer activity. Global mirror disable is a local privacy action,
+    /// so stale scrubbed content must disappear from both Notification Center
+    /// and Hyphen's non-persistent activity surface.
+    mutating func removeAllNotifications() {
+        items.removeAll { item in
+            if case .notification = item.kind { return true }
+            return false
+        }
+    }
+
     mutating func clear() {
         items.removeAll()
     }
@@ -235,8 +248,12 @@ enum ActivityEvent {
     case notificationPosted(NotificationPresentationRequest, at: Date)
     /// Android cleared a mirrored notification; remove it from the feed.
     case notificationRemoved(identifier: String, at: Date)
+    /// The user disabled mirroring locally; clear every mirrored feed row.
+    case notificationsCleared(at: Date)
     /// Transfer progress (start or chunk advance), in either direction.
     case transferProgress(TransferProgress, direction: TransferDirection, at: Date)
+    /// A durable checkpoint was restored and is waiting to resume on this session.
+    case transferResuming(TransferProgress, direction: TransferDirection, at: Date)
     /// A transfer finished; `verified` reflects the SHA-256 check on receive.
     case transferCompleted(
         fileId: String,
@@ -248,6 +265,8 @@ enum ActivityEvent {
     )
     /// A transfer was cancelled (either side).
     case transferCancelled(fileId: String, at: Date)
+    /// SHA-verified content remains staged after publication failed; retry is safe.
+    case transferDeliveryFailed(fileId: String, filename: String, sizeBytes: Int64, at: Date)
     /// A text/link crossed the session.
     case text(kind: TextFeedKind, direction: TextFeedDirection, value: String, at: Date)
     /// A pairing / session lifecycle note for the audit timeline.

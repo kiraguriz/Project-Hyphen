@@ -28,6 +28,8 @@ class HyphenUiModel {
         private set
     var companionConnectionEnabled by mutableStateOf(false)
         private set
+    var transferSourceRetryRequired by mutableStateOf(false)
+        private set
 
     private var idCounter = 0L
 
@@ -47,4 +49,6 @@ class HyphenUiModel {
     fun setNotificationAccess(enabled: Boolean) { notificationAccessEnabled = enabled }
 
     fun setCompanionConnection(enabled: Boolean) { companionConnectionEnabled = enabled }
+
+    fun updateTransferSourceRetryRequired(required: Boolean) { transferSourceRetryRequired = required }
 }

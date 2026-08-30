@@ -7,6 +7,7 @@ import dev.hyphen.android.diagnostics.DiagnosticsRuntime
 import dev.hyphen.android.diagnostics.LocalStructuredLogStore
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationCapabilityGate
+import dev.hyphen.android.notifications.NotificationPrivacyPreferences
 import dev.hyphen.android.notifications.ProtocolSessionNotificationOutbox
 import dev.hyphen.android.pairing.ParsedEndpoint
 import dev.hyphen.android.transport.AndroidKeystoreTlsIdentity
@@ -19,11 +20,14 @@ import dev.hyphen.android.transport.TlsClient
 import dev.hyphen.android.transfer.ProtocolSessionTransferOutbox
 import dev.hyphen.android.transfer.TransferCheckpointStore
 import dev.hyphen.android.transfer.TransferProgress
-import dev.hyphen.android.transfer.TransferReceiver
 import dev.hyphen.android.transfer.TransferSender
+import dev.hyphen.android.transfer.OutboundTransferRetirement
+import dev.hyphen.android.text.TextLinkConfirmationRequest
 import dev.hyphen.android.trust.TrustedPeer
 import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.ConnectionState
+import dev.hyphen.android.service.CompanionConnectionPreferences
+import dev.hyphen.android.service.CompanionConnectionServiceController
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.net.ssl.SSLSocket
 
@@ -81,6 +85,8 @@ class ConnectionSupervisor internal constructor(
     private val beforeReconnectSessionActivation: () -> Unit = {},
     private val beforePairedSessionActivation: () -> Unit = {},
     private val beforeTransferSenderInspection: () -> Unit = {},
+    private val onOutboundReselectStateChanged: (Boolean) -> Unit = {},
+    protocolOwnerFactory: (ProtocolOwnerEvents) -> ProtocolEnvelopeOwner = { NoOpProtocolEnvelopeOwner },
 ) {
     data class ActiveState(
         val session: ProtocolSession?,
@@ -92,13 +98,21 @@ class ConnectionSupervisor internal constructor(
     private data class RetiredActiveState(
         val session: ProtocolSession?,
         val transferSender: TransferSender?,
+        val epoch: ProtocolSessionEpoch,
+        val peerGeneration: Long?,
+        val peerFingerprint: ByteArray?,
     )
 
     interface Listener {
         fun onLog(line: String) {}
         fun onActivityEvent(event: ActivityEvent) {}
-        fun onEnvelope(envelope: Envelope, state: ActiveState) {}
         fun onTransferProgress(progress: TransferProgress, outgoing: Boolean) {}
+        fun onTransferRestored(progress: TransferProgress, outgoing: Boolean) {
+            onTransferProgress(progress, outgoing)
+        }
+        fun onTextConfirmation(request: TextLinkConfirmationRequest) {}
+        fun onPrivacyPolicyApplied() {}
+        fun onOutboundReselectRequiredChanged(required: Boolean) {}
     }
 
     private val stateLock = Any()
@@ -108,6 +122,9 @@ class ConnectionSupervisor internal constructor(
     private var activeSession: ProtocolSession? = null
     private var activeCapabilities: SessionHandshake.NegotiatedCapabilities? = null
     private var activeTransferSender: TransferSender? = null
+    private var activeProtocolEpoch: ProtocolSessionEpoch? = null
+    private var activePeerGeneration: Long? = null
+    private var protocolEpochCounter = 0L
     private var lastTransferProgress: TransferProgress? = null
     private var resumeToken: String? = null
     private var lastSessionId: String? = null
@@ -121,6 +138,22 @@ class ConnectionSupervisor internal constructor(
     private var stoppedForTrustChange = false
     private var pausedByUser = false
     private var transferCheckpointStore: TransferCheckpointStore? = null
+    private val recentTransferEvents = linkedMapOf<String, ActivityEvent>()
+    private var recentTransferEventsGeneration: Long? = null
+    private val pendingOutboundReselect = linkedMapOf<String, OutboundTransferRetirement>()
+    private var selectedOutboundReselectFileId: String? = null
+    private val protocolOwner: ProtocolEnvelopeOwner = protocolOwnerFactory(
+        object : ProtocolOwnerEvents {
+            override fun log(line: String) = this@ConnectionSupervisor.log(line)
+            override fun activity(event: ActivityEvent) = emit(event)
+            override fun textConfirmation(request: TextLinkConfirmationRequest) {
+                listeners.forEach { it.onTextConfirmation(request) }
+            }
+            override fun privacyPolicyApplied() {
+                listeners.forEach { it.onPrivacyPolicyApplied() }
+            }
+        },
+    )
 
     fun addListener(listener: Listener) {
         listeners.add(listener)
@@ -132,18 +165,33 @@ class ConnectionSupervisor internal constructor(
      */
     fun replayStateTo(listener: Listener) {
         val peerName: String?
-        val state: ConnectionState
+        val state: ConnectionState?
+        val transferEvents: List<ActivityEvent>
+        val reselectRequired: Boolean
         synchronized(stateLock) {
             state = when {
                 activeSession != null -> ConnectionState.CONNECTED
                 reconnector != null && rememberedEndpoint != null -> ConnectionState.RECONNECTING
                 pausedByUser && rememberedEndpoint != null -> ConnectionState.SUSPENDED
-                else -> return
+                else -> null
             }
             peerName = lastPeerName
+            transferEvents = if (
+                trustedPeerFingerprint != null && recentTransferEventsGeneration == peerLinkGeneration
+            ) {
+                recentTransferEvents.values.toList()
+            } else {
+                emptyList()
+            }
+            reselectRequired = pendingOutboundReselect.isNotEmpty()
         }
-        listener.onActivityEvent(ActivityEvent.PeerChanged(isPaired = true, peerName = peerName ?: "Mac"))
-        listener.onActivityEvent(ActivityEvent.ConnectionChanged(state, null))
+        if (state != null) {
+            listener.onActivityEvent(ActivityEvent.PeerChanged(isPaired = true, peerName = peerName ?: "Mac"))
+            listener.onActivityEvent(ActivityEvent.ConnectionChanged(state, null))
+        }
+        transferEvents.forEach(listener::onActivityEvent)
+        listener.onOutboundReselectRequiredChanged(reselectRequired)
+        protocolOwner.pendingTextConfirmations().forEach(listener::onTextConfirmation)
     }
 
     fun removeListener(listener: Listener) {
@@ -169,25 +217,8 @@ class ConnectionSupervisor internal constructor(
         synchronized(stateLock) { transferCheckpointStore = store }
     }
 
-    fun bindTransferPersistence(receiver: TransferReceiver): List<dev.hyphen.android.transfer.TransferCompleted> {
-        val peerFingerprint: ByteArray
-        val sessionId: String
-        val sender: TransferSender?
-        synchronized(stateLock) {
-            peerFingerprint = trustedPeerFingerprint ?: return emptyList()
-            sessionId = lastSessionId ?: return emptyList()
-            sender = activeTransferSender
-        }
-        val pendingDeliveries = receiver.bindSession(peerFingerprint, sessionId)
-        sender?.bindSession(peerFingerprint, sessionId)
-        return pendingDeliveries
-    }
-
-    fun invalidateTransferCheckpoints(
-        peerFingerprint: ByteArray,
-        receiver: TransferReceiver,
-    ) {
-        receiver.invalidatePeerCheckpoints(peerFingerprint)
+    fun invalidateTransferCheckpoints(peerFingerprint: ByteArray) {
+        protocolOwner.invalidatePeerCheckpoints(peerFingerprint)
         val (sender, store) = synchronized(stateLock) {
             activeTransferSender to transferCheckpointStore
         }
@@ -195,10 +226,132 @@ class ConnectionSupervisor internal constructor(
         store?.invalidatePeer(peerFingerprint)
     }
 
-    fun invalidateAllTransferCheckpoints(receiver: TransferReceiver) {
-        receiver.invalidateAllCheckpoints()
+    fun invalidateAllTransferCheckpoints() {
+        protocolOwner.invalidateAllCheckpoints()
         val store = synchronized(stateLock) { transferCheckpointStore }
         store?.invalidateAll()
+    }
+
+    fun resolveTextConfirmation(messageId: String): Boolean =
+        protocolOwner.resolveTextConfirmation(messageId)
+
+    fun retryIncomingDelivery(fileId: String): Boolean =
+        protocolOwner.retryIncomingDelivery(fileId)
+
+    fun cancelTransfer(fileId: String): Boolean = protocolOwner.cancelTransfer(fileId)
+
+    fun selectOutboundSourceReselection(fileId: String? = null): Boolean = synchronized(stateLock) {
+        val selected = fileId ?: pendingOutboundReselect.keys.firstOrNull() ?: return false
+        if (selected !in pendingOutboundReselect) return false
+        selectedOutboundReselectFileId = selected
+        true
+    }
+
+    fun selectedOutboundSourceReselectionFileId(): String? = synchronized(stateLock) {
+        selectedOutboundReselectFileId?.takeIf { it in pendingOutboundReselect }
+    }
+
+    fun clearOutboundSourceReselectionSelection() {
+        synchronized(stateLock) { selectedOutboundReselectFileId = null }
+    }
+
+    fun isOutboundSourceReselectionRequired(fileId: String): Boolean =
+        synchronized(stateLock) { fileId in pendingOutboundReselect }
+
+    fun outboundSourceReselection(fileId: String): OutboundTransferRetirement? =
+        synchronized(stateLock) { pendingOutboundReselect[fileId] }
+
+    fun completeOutboundSourceReselection(fileId: String, sender: TransferSender): Boolean {
+        if (synchronized(stateLock) { activeTransferSender !== sender }) return false
+        if (!sender.containsTransfer(fileId)) return false
+        val required = synchronized(stateLock) {
+            if (activeTransferSender !== sender) return false
+            pendingOutboundReselect.remove(fileId)
+            if (selectedOutboundReselectFileId == fileId) selectedOutboundReselectFileId = null
+            if (recentTransferEvents[fileId] is ActivityEvent.TransferSourceReselectionRequired) {
+                recentTransferEvents.remove(fileId)
+            }
+            pendingOutboundReselect.isNotEmpty()
+        }
+        onOutboundReselectStateChanged(required)
+        listeners.forEach { it.onOutboundReselectRequiredChanged(required) }
+        return true
+    }
+
+    internal fun dispatchProtocolEnvelopeForTest(epoch: ProtocolSessionEpoch, envelope: Envelope) {
+        protocolOwner.handleEnvelope(epoch, envelope)
+    }
+
+    internal fun currentPeerGenerationForTest(): Long = synchronized(stateLock) { peerLinkGeneration }
+
+    internal fun acceptOutboundRetirementsForTest(
+        retirements: List<OutboundTransferRetirement>,
+        peerGeneration: Long,
+        peerFingerprint: ByteArray,
+    ) {
+        acceptOutboundRetirements(retirements, peerGeneration, peerFingerprint)
+    }
+
+    /** Process-owned work is not interrupted by Activity recreation. */
+    fun launchProcessWorker(name: String, work: () -> Unit): Boolean = runCatching {
+        Thread(work, name).apply { isDaemon = true }.start()
+        true
+    }.getOrDefault(false)
+
+    /** Records a process-owned send failure without retaining an Activity or its selected URI. */
+    fun reportProcessTransferFailure(fileId: String) {
+        val retry = synchronized(stateLock) { pendingOutboundReselect[fileId] }
+        if (retry == null) {
+            emit(ActivityEvent.TransferCancelled(fileId, System.currentTimeMillis()))
+        } else {
+            emit(
+                ActivityEvent.TransferSourceReselectionRequired(
+                    retry.fileId,
+                    retry.filename,
+                    retry.sizeBytes,
+                    System.currentTimeMillis(),
+                ),
+            )
+            onOutboundReselectStateChanged(true)
+            listeners.forEach { it.onOutboundReselectRequiredChanged(true) }
+        }
+        log("transfer/send failed")
+    }
+
+    /**
+     * Resolve the begin-to-FGS-registration race without lying about resume.
+     * If this sender still owns the current peer, detach the source without a
+     * wire cancel and publish per-file reselection. If an FGS abort already
+     * cancelled it, publish only a fresh-selection marker. Trust replacement
+     * publishes neither into the new generation.
+     */
+    fun handleForegroundRegistrationLoss(fileId: String, sender: TransferSender) {
+        val owner = synchronized(stateLock) {
+            if (activeTransferSender !== sender) null else {
+                Pair(activePeerGeneration, trustedPeerFingerprint?.copyOf())
+            }
+        }
+        val retirement = sender.retireRegisteredForSourceReselection(fileId)
+        if (retirement != null && owner != null) {
+            acceptOutboundRetirements(listOf(retirement), owner.first, owner.second)
+        }
+        val outcome = synchronized(stateLock) {
+            when {
+                fileId in pendingOutboundReselect -> 1
+                activeTransferSender === sender && trustedPeerFingerprint != null -> 2
+                else -> 0
+            }
+        }
+        when (outcome) {
+            1 -> Unit // acceptOutboundRetirements already published the marker.
+            2 -> {
+                emit(ActivityEvent.TransferCancelled(fileId, System.currentTimeMillis()))
+                onOutboundReselectStateChanged(true)
+                listeners.forEach { it.onOutboundReselectRequiredChanged(true) }
+            }
+            else -> Unit // A trust/session generation replacement owns the outcome.
+        }
+        log("transfer/send foreground registration lost")
     }
 
     fun updateLastTransferProgress(progress: TransferProgress?) {
@@ -218,6 +371,17 @@ class ConnectionSupervisor internal constructor(
             }
         val now = System.currentTimeMillis()
         cancelled.forEach { emit(ActivityEvent.TransferCancelled(it, now)) }
+        val reselectRequired = synchronized(stateLock) {
+            cancelled.forEach { fileId ->
+                pendingOutboundReselect.remove(fileId)
+                if (selectedOutboundReselectFileId == fileId) selectedOutboundReselectFileId = null
+            }
+            pendingOutboundReselect.isNotEmpty()
+        }
+        if (cancelled.isNotEmpty()) {
+            onOutboundReselectStateChanged(reselectRequired)
+            listeners.forEach { it.onOutboundReselectRequiredChanged(reselectRequired) }
+        }
         return cancelled
     }
 
@@ -256,11 +420,17 @@ class ConnectionSupervisor internal constructor(
             val generation: Long,
             val previousReconnector: TrustedPeerReconnectOwner?,
             val previous: RetiredActiveState,
+            val clearedReselectState: Boolean,
         )
         var persistenceFailure: Throwable? = null
         val switched = synchronized(ownershipTransitionLock) {
             val transition = synchronized(stateLock) {
                 peerLinkGeneration += 1
+                recentTransferEvents.clear()
+                recentTransferEventsGeneration = null
+                val clearedReselectState = pendingOutboundReselect.isNotEmpty()
+                pendingOutboundReselect.clear()
+                selectedOutboundReselectFileId = null
                 val previousReconnector = reconnector
                 reconnector = null
                 reconnectOwnerToken = null
@@ -275,9 +445,9 @@ class ConnectionSupervisor internal constructor(
                 trustedPeerFingerprint = null
                 stoppedForTrustChange = true
                 pausedByUser = false
-                PeerSwitch(peerLinkGeneration, previousReconnector, previous)
+                PeerSwitch(peerLinkGeneration, previousReconnector, previous, clearedReselectState)
             }
-            HyphenNotificationListenerRuntime.clearNotificationOutbox()
+            HyphenNotificationListenerRuntime.clearNotificationStateAfterTrustChange()
             synchronized(peerLinkStorageLock) {
                 persistenceFailure = runCatching(persist).exceptionOrNull()
                 if (persistenceFailure != null) runCatching { peerLinkLifecycle.invalidate() }
@@ -300,8 +470,12 @@ class ConnectionSupervisor internal constructor(
         // teardown. Stop potentially blocking owners outside the transition
         // monitor, just as the trust-revocation path does.
         switched.previousReconnector?.stop()
-        recycleTransferSender(switched.previous.transferSender)
+        recycleRetiredState(switched.previous)
         switched.previous.session?.stop()
+        if (switched.clearedReselectState) {
+            onOutboundReselectStateChanged(false)
+            listeners.forEach { it.onOutboundReselectRequiredChanged(false) }
+        }
         if (persistenceFailure != null) {
             recordPeerLinkFailure("trust/peer-link-persist-failed", "remember-link")
             log("trusted peer link could not be saved for cold-start recovery")
@@ -407,17 +581,21 @@ class ConnectionSupervisor internal constructor(
             return false
         }
         ownership.oldReconnector?.stop()
-        recycleTransferSender(ownership.previous.transferSender)
+        recycleRetiredState(ownership.previous)
         ownership.previous.session?.stop()
         val session = buildSession(socket, handshake.sessionId, ownership.generation)
         val activated = runCatching {
             beforePairedSessionActivation()
             bindPairedSession(session, handshake, peerName, ownership.generation)
         }.getOrDefault(false)
-        if (!activated) {
+        val ownerActivated = activated && activateProtocolOwner(session, ownership.generation)
+        if (ownerActivated) {
+            session.start()
+        }
+        if (!ownerActivated) {
             session.stop()
         }
-        return activated
+        return ownerActivated
     }
 
     fun stopAfterTrustChange() {
@@ -426,10 +604,16 @@ class ConnectionSupervisor internal constructor(
             val previous: RetiredActiveState,
             val peerFingerprint: ByteArray?,
             val checkpointStore: TransferCheckpointStore?,
+            val clearedReselectState: Boolean,
         )
         val stop = synchronized(ownershipTransitionLock) {
             val captured = synchronized(stateLock) {
                 peerLinkGeneration += 1
+                recentTransferEvents.clear()
+                recentTransferEventsGeneration = null
+                val clearedReselectState = pendingOutboundReselect.isNotEmpty()
+                pendingOutboundReselect.clear()
+                selectedOutboundReselectFileId = null
                 stoppedForTrustChange = true
                 pausedByUser = false
                 val peerFingerprint = trustedPeerFingerprint?.copyOf()
@@ -442,7 +626,13 @@ class ConnectionSupervisor internal constructor(
                 reconnector = null
                 reconnectOwnerToken = null
                 val previous = retireActiveStateLocked()
-                TrustStop(oldReconnector, previous, peerFingerprint, transferCheckpointStore)
+                TrustStop(
+                    oldReconnector,
+                    previous,
+                    peerFingerprint,
+                    transferCheckpointStore,
+                    clearedReselectState,
+                )
             }
             try {
                 synchronized(peerLinkStorageLock) {
@@ -455,7 +645,7 @@ class ConnectionSupervisor internal constructor(
                 recordPeerLinkFailure("trust/peer-link-invalidate-failed", "invalidate-link")
                 log("trusted peer link could not be removed from local recovery storage")
             }
-            HyphenNotificationListenerRuntime.clearNotificationOutbox()
+            HyphenNotificationListenerRuntime.clearNotificationStateAfterTrustChange()
             emit(ActivityEvent.ConnectionChanged(ConnectionState.SUSPENDED, null))
             log("session stopped after trust change")
             captured.peerFingerprint?.let { captured.checkpointStore?.invalidatePeer(it) }
@@ -465,8 +655,12 @@ class ConnectionSupervisor internal constructor(
         // generation change. Their callbacks re-enter through the ownership
         // gate and are rejected, while no transport monitor is held here.
         stop.reconnector?.stop()
-        recycleTransferSender(stop.previous.transferSender)
+        recycleRetiredState(stop.previous)
         stop.previous.session?.stop()
+        if (stop.clearedReselectState) {
+            onOutboundReselectStateChanged(false)
+            listeners.forEach { it.onOutboundReselectRequiredChanged(false) }
+        }
     }
 
     /**
@@ -482,6 +676,9 @@ class ConnectionSupervisor internal constructor(
         val paused = synchronized(ownershipTransitionLock) {
             val captured = synchronized(stateLock) {
                 peerLinkGeneration += 1
+                if (recentTransferEvents.isNotEmpty()) {
+                    recentTransferEventsGeneration = peerLinkGeneration
+                }
                 pausedByUser = true
                 val oldReconnector = reconnector
                 reconnector = null
@@ -495,7 +692,7 @@ class ConnectionSupervisor internal constructor(
             captured
         }
         paused.reconnector?.stop()
-        recycleTransferSender(paused.previous.transferSender)
+        recycleRetiredState(paused.previous)
         paused.previous.session?.stop()
     }
 
@@ -541,16 +738,17 @@ class ConnectionSupervisor internal constructor(
                 resumeToken = handshake.resumeToken
                 lastSessionId = handshake.sessionId
                 activeSession = session
+                protocolEpochCounter += 1
+                activeProtocolEpoch = ProtocolSessionEpoch.of(protocolEpochCounter)
+                activePeerGeneration = generation
                 activeSessionReconnectToken = ownerToken
                 activeCapabilities = handshake.negotiatedCapabilities
                 activeTransferSender = TransferSender(
                     ProtocolSessionTransferOutbox(session),
                     handshake.negotiatedCapabilities,
                     checkpointStore = transferCheckpointStore,
-                    onProgress = { progress ->
-                        updateLastTransferProgress(progress)
-                        listeners.forEach { it.onTransferProgress(progress, outgoing = true) }
-                    },
+                    onProgress = { progress -> handleOutgoingTransferProgress(progress, restored = false) },
+                    onRestored = { progress -> handleOutgoingTransferProgress(progress, restored = true) },
                 )
                 lastTransferProgress = null
                 lastPeerName = peerName
@@ -601,15 +799,16 @@ class ConnectionSupervisor internal constructor(
                 false
             } else {
                 activeSession = session
+                protocolEpochCounter += 1
+                activeProtocolEpoch = ProtocolSessionEpoch.of(protocolEpochCounter)
+                activePeerGeneration = generation
                 activeCapabilities = handshake.negotiatedCapabilities
                 activeTransferSender = TransferSender(
                     ProtocolSessionTransferOutbox(session),
                     handshake.negotiatedCapabilities,
                     checkpointStore = transferCheckpointStore,
-                    onProgress = { progress ->
-                        updateLastTransferProgress(progress)
-                        listeners.forEach { it.onTransferProgress(progress, outgoing = true) }
-                    },
+                    onProgress = { progress -> handleOutgoingTransferProgress(progress, restored = false) },
+                    onRestored = { progress -> handleOutgoingTransferProgress(progress, restored = true) },
                 )
                 resumeToken = handshake.resumeToken
                 lastSessionId = handshake.sessionId
@@ -621,7 +820,6 @@ class ConnectionSupervisor internal constructor(
         if (!installed) {
             false
         } else {
-            session.start()
             bindNotificationOutbox(handshake.negotiatedCapabilities, session)
             val ownsAfterBinding = synchronized(stateLock) {
                 !stoppedForTrustChange &&
@@ -663,21 +861,24 @@ class ConnectionSupervisor internal constructor(
         lateinit var session: ProtocolSession
         val listener = object : ProtocolSession.Listener {
             override fun onEnvelope(envelope: Envelope) {
-                withPairedSessionOwnership(session, generation) {
-                    dispatchEnvelope(envelope)
-                }
+                val ownerSession = pairedProtocolOwnerSession(session, generation) ?: return
+                protocolOwner.handleEnvelope(ownerSession.epoch, envelope)
             }
 
             override fun onAck(messageId: String) {
-                withPairedSessionOwnership(session, generation) {
-                    runCatching { activeTransferSender?.handleAck(messageId) }
-                }
+                val ownerSession = pairedProtocolOwnerSession(session, generation) ?: return
+                runCatching { ownerSession.transferSender?.handleAck(messageId) }
+                protocolOwner.handleAck(ownerSession.epoch, messageId)
+                HyphenNotificationListenerRuntime.onTransportAcknowledged(messageId)
+                HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
             }
 
             override fun onAckTimeout(messageId: String) {
-                withPairedSessionOwnership(session, generation) {
-                    runCatching { activeTransferSender?.handleAckTimeout(messageId) }
-                }
+                val ownerSession = pairedProtocolOwnerSession(session, generation) ?: return
+                runCatching { ownerSession.transferSender?.handleAckTimeout(messageId) }
+                protocolOwner.handleAckTimeout(ownerSession.epoch, messageId)
+                HyphenNotificationListenerRuntime.onTransportAckTimeout(messageId)
+                HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
             }
 
             override fun onLiveness(state: HeartbeatMonitor.State) {
@@ -723,7 +924,7 @@ class ConnectionSupervisor internal constructor(
                 closeAccepted
             }
         }
-        recycleTransferSender(closed?.first?.transferSender)
+        closed?.first?.let(::recycleRetiredState)
         if (closed?.second == true) {
             startReconnector()
         }
@@ -762,27 +963,31 @@ class ConnectionSupervisor internal constructor(
                             val peerName = handshake.peerDevice?.deviceName ?: "Mac"
                             bindReconnectedSession(session, handshake, peerName, generation, ownerToken)
                         }.getOrDefault(false)
-                        if (!activated) {
+                        val ownerActivated = activated && activateProtocolOwner(session, generation)
+                        if (!ownerActivated) {
                             session.stop()
                         }
                     }
 
                     override fun onEnvelope(envelope: Envelope) {
-                        withReconnectOwnership(generation, ownerToken) {
-                            dispatchEnvelope(envelope)
-                        }
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                        protocolOwner.handleEnvelope(ownerSession.epoch, envelope)
                     }
 
                     override fun onAck(messageId: String) {
-                        withReconnectOwnership(generation, ownerToken) {
-                            runCatching { activeTransferSender?.handleAck(messageId) }
-                        }
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                        runCatching { ownerSession.transferSender?.handleAck(messageId) }
+                        protocolOwner.handleAck(ownerSession.epoch, messageId)
+                        HyphenNotificationListenerRuntime.onTransportAcknowledged(messageId)
+                        HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
                     }
 
                     override fun onAckTimeout(messageId: String) {
-                        withReconnectOwnership(generation, ownerToken) {
-                            runCatching { activeTransferSender?.handleAckTimeout(messageId) }
-                        }
+                        val ownerSession = reconnectProtocolOwnerSession(generation, ownerToken) ?: return
+                        runCatching { ownerSession.transferSender?.handleAckTimeout(messageId) }
+                        protocolOwner.handleAckTimeout(ownerSession.epoch, messageId)
+                        HyphenNotificationListenerRuntime.onTransportAckTimeout(messageId)
+                        HyphenNotificationListenerRuntime.onTransportCapacityAvailable()
                     }
 
                     override fun onLiveness(state: HeartbeatMonitor.State) {
@@ -910,6 +1115,59 @@ class ConnectionSupervisor internal constructor(
         }
     }
 
+    private fun pairedProtocolOwnerSession(
+        session: ProtocolSession,
+        generation: Long,
+    ): ProtocolOwnerSession? = protocolOwnerSessionSnapshot {
+        !stoppedForTrustChange &&
+            !pausedByUser &&
+            generation == peerLinkGeneration &&
+            activeSession === session &&
+            activeSessionReconnectToken == null
+    }
+
+    private fun reconnectProtocolOwnerSession(
+        generation: Long,
+        ownerToken: Any,
+    ): ProtocolOwnerSession? = protocolOwnerSessionSnapshot {
+        ownsReconnectLocked(generation, ownerToken) && activeSessionReconnectToken === ownerToken
+    }
+
+    private fun protocolOwnerSessionSnapshot(owns: () -> Boolean): ProtocolOwnerSession? =
+        synchronized(ownershipTransitionLock) {
+            synchronized(stateLock) {
+                if (!owns()) return@synchronized null
+                val session = activeSession ?: return@synchronized null
+                val epoch = activeProtocolEpoch ?: return@synchronized null
+                val fingerprint = trustedPeerFingerprint?.copyOf() ?: return@synchronized null
+                val sessionId = lastSessionId ?: return@synchronized null
+                ProtocolOwnerSession(
+                    epoch = epoch,
+                    capabilities = activeCapabilities,
+                    transferSender = activeTransferSender,
+                    peerFingerprint = fingerprint,
+                    sessionId = sessionId,
+                    send = { type, capability, requiresAck, payload ->
+                        session.send(type, payload, requiresAck, capability)
+                    },
+                )
+            }
+        }
+
+    private fun activateProtocolOwner(session: ProtocolSession, generation: Long): Boolean {
+        val ownerSession = pairedProtocolOwnerSession(session, generation)
+            ?: protocolOwnerSessionSnapshot {
+                generation == peerLinkGeneration && activeSession === session
+            }
+            ?: return false
+        return runCatching {
+            protocolOwner.activate(ownerSession)
+            true
+        }.onFailure {
+            log("protocol owner activation failed")
+        }.getOrDefault(false)
+    }
+
     private fun handleReconnectSessionLost(generation: Long, ownerToken: Any) {
         val retired = synchronized(ownershipTransitionLock) {
             val accepted = synchronized(stateLock) {
@@ -928,12 +1186,7 @@ class ConnectionSupervisor internal constructor(
             }
             accepted
         }
-        recycleTransferSender(retired?.transferSender)
-    }
-
-    private fun dispatchEnvelope(envelope: Envelope) {
-        val state = activeState()
-        listeners.forEach { it.onEnvelope(envelope, state) }
+        retired?.let(::recycleRetiredState)
     }
 
     private fun bindNotificationOutbox(
@@ -952,27 +1205,121 @@ class ConnectionSupervisor internal constructor(
     }
 
     private fun retireActiveStateLocked(): RetiredActiveState {
-        val retired = RetiredActiveState(activeSession, activeTransferSender)
+        val retired = RetiredActiveState(
+            activeSession,
+            activeTransferSender,
+            activeProtocolEpoch ?: ProtocolSessionEpoch.of(protocolEpochCounter),
+            activePeerGeneration,
+            trustedPeerFingerprint?.copyOf(),
+        )
         activeSession = null
         activeSessionReconnectToken = null
         activeCapabilities = null
         activeTransferSender = null
+        activeProtocolEpoch = null
+        activePeerGeneration = null
         lastTransferProgress = null
         return retired
     }
 
-    private fun recycleTransferSender(sender: TransferSender?) {
-        sender ?: return
-        runCatching { sender.recycleSession() }
+    private fun recycleRetiredState(retired: RetiredActiveState) {
+        protocolOwner.retire(retired.epoch)
+        val retirements = runCatching { retired.transferSender?.recycleSession().orEmpty() }
             .onFailure { log("outbound transfer session cleanup failed") }
+            .getOrDefault(emptyList())
+        acceptOutboundRetirements(retirements, retired.peerGeneration, retired.peerFingerprint)
+    }
+
+    private fun acceptOutboundRetirements(
+        retirements: List<OutboundTransferRetirement>,
+        peerGeneration: Long?,
+        peerFingerprint: ByteArray?,
+    ) {
+        val retryRequired = retirements.filter(OutboundTransferRetirement::requiresSourceReselection)
+        if (retryRequired.isEmpty()) return
+        val accepted = synchronized(stateLock) {
+            val stillSamePeer = peerGeneration == peerLinkGeneration &&
+                peerFingerprint != null &&
+                trustedPeerFingerprint?.contentEquals(peerFingerprint) == true
+            if (!stillSamePeer) return@synchronized emptyList()
+            retryRequired.forEach { pendingOutboundReselect[it.fileId] = it }
+            retryRequired
+        }
+        if (accepted.isEmpty()) return
+        val now = System.currentTimeMillis()
+        accepted.forEach { item ->
+            emit(
+                ActivityEvent.TransferSourceReselectionRequired(
+                    item.fileId,
+                    item.filename,
+                    item.sizeBytes,
+                    now,
+                ),
+            )
+        }
+        onOutboundReselectStateChanged(true)
+        listeners.forEach { it.onOutboundReselectRequiredChanged(true) }
+        log("outbound transfer source must be reselected")
     }
 
     private fun log(line: String) {
         listeners.forEach { it.onLog(line) }
     }
 
+    private fun handleOutgoingTransferProgress(progress: TransferProgress, restored: Boolean) {
+        updateLastTransferProgress(progress)
+        val now = System.currentTimeMillis()
+        val event = if (restored) {
+            ActivityEvent.TransferResuming(
+                progress.fileId, progress.filename, dev.hyphen.android.ui.TransferDirection.OUTGOING,
+                progress.completedBytes, progress.totalBytes, progress.completedChunks,
+                progress.totalChunks, now,
+            )
+        } else {
+            ActivityEvent.TransferProgressed(
+                progress.fileId, progress.filename, dev.hyphen.android.ui.TransferDirection.OUTGOING,
+                progress.completedBytes, progress.totalBytes, progress.completedChunks,
+                progress.totalChunks, progress.isComplete, now,
+            )
+        }
+        recordTransferEvent(event)
+        if (restored) {
+            listeners.forEach { it.onTransferRestored(progress, outgoing = true) }
+        } else {
+            listeners.forEach { it.onTransferProgress(progress, outgoing = true) }
+        }
+    }
+
     private fun emit(event: ActivityEvent) {
+        recordTransferEvent(event)
         listeners.forEach { it.onActivityEvent(event) }
+    }
+
+    private fun recordTransferEvent(event: ActivityEvent) {
+        transferEventFileId(event)?.let { fileId ->
+            synchronized(stateLock) {
+                if (trustedPeerFingerprint == null) return@synchronized
+                if (recentTransferEventsGeneration != peerLinkGeneration) {
+                    recentTransferEvents.clear()
+                    recentTransferEventsGeneration = peerLinkGeneration
+                }
+                recentTransferEvents.remove(fileId)
+                recentTransferEvents[fileId] = event
+                while (recentTransferEvents.size > MAX_RECENT_TRANSFER_EVENTS) {
+                    recentTransferEvents.remove(recentTransferEvents.keys.first())
+                }
+            }
+        }
+    }
+
+    private fun transferEventFileId(event: ActivityEvent): String? = when (event) {
+        is ActivityEvent.TransferProgressed -> event.fileId
+        is ActivityEvent.TransferResuming -> event.fileId
+        is ActivityEvent.TransferCompleted -> event.fileId
+        is ActivityEvent.TransferCancelled -> event.fileId
+        is ActivityEvent.TransferDeliveryFailed -> event.fileId
+        is ActivityEvent.TransferSourceReselectionRequired -> event.fileId
+        else -> null
     }
 
     private fun recordPeerLinkFailure(code: String, operation: String) {
@@ -991,10 +1338,40 @@ class ConnectionSupervisor internal constructor(
 
         fun getInstance(context: Context): ConnectionSupervisor =
             instance ?: synchronized(this) {
-                instance ?: ConnectionSupervisor(
-                    diagnosticLogs = DiagnosticsRuntime.forSessionSupervisor(),
-                    peerLinkLifecycle = AndroidPeerLinkStores.openDefaultLifecycle(context.applicationContext),
-                ).also { instance = it }
+                instance ?: run {
+                    val app = context.applicationContext
+                    initializeNotificationPrivacyFloor(
+                        load = { NotificationPrivacyPreferences.localFloor(app) },
+                        apply = HyphenNotificationListenerRuntime::setNotificationPrivacyMode,
+                    )
+                    val checkpoints = TransferCheckpointStore(TransferCheckpointStore.defaultRoot(app))
+                    ConnectionSupervisor(
+                        diagnosticLogs = DiagnosticsRuntime.forSessionSupervisor(),
+                        peerLinkLifecycle = AndroidPeerLinkStores.openDefaultLifecycle(app),
+                        onOutboundReselectStateChanged = { required ->
+                            if (required) {
+                                CompanionConnectionServiceController.requireTransferSourceReselection(app)
+                            } else {
+                                CompanionConnectionPreferences.setTransferRetryRequired(app, false)
+                            }
+                        },
+                        protocolOwnerFactory = { events ->
+                            createAndroidProtocolEnvelopeOwner(app, checkpoints, events)
+                        },
+                    ).also {
+                        it.configureTransferCheckpoints(checkpoints)
+                        instance = it
+                    }
+                }
             }
+
+        private const val MAX_RECENT_TRANSFER_EVENTS = 200
     }
+}
+
+internal fun initializeNotificationPrivacyFloor(
+    load: () -> dev.hyphen.android.notifications.NotificationPrivacyMode,
+    apply: (dev.hyphen.android.notifications.NotificationPrivacyMode) -> Unit,
+) {
+    apply(load())
 }

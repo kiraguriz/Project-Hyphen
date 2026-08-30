@@ -75,17 +75,25 @@ enum MenuBarTimelineMapper {
         switch (t.direction, t.status) {
         case (.incoming, .active):
             return .fileReceived(name: t.filename, meta: activeMeta(t, verb: L("transfer.receiving")), time: time, progress: t.fraction)
+        case (.incoming, .resuming):
+            return .fileReceived(name: t.filename, meta: activeMeta(t, verb: L("transfer.resuming")), time: time, progress: t.fraction)
         case (.incoming, .completed):
             let meta = t.verified ? L("transfer.received.verified", total) : L("transfer.received", total)
             return .fileReceived(name: t.filename, meta: meta, time: time, progress: nil)
         case (.incoming, .cancelled):
             return .fileReceived(name: t.filename, meta: L("transfer.cancelled"), time: time, progress: nil)
+        case (.incoming, .retryRequired):
+            return .fileReceived(name: t.filename, meta: L("transfer.saveRetryRequired"), time: time, progress: nil)
         case (.outgoing, .active):
             return .fileSent(name: t.filename, meta: activeMeta(t, verb: L("transfer.sending")), time: time, progress: t.fraction)
+        case (.outgoing, .resuming):
+            return .fileSent(name: t.filename, meta: activeMeta(t, verb: L("transfer.resuming")), time: time, progress: t.fraction)
         case (.outgoing, .completed):
             return .fileSent(name: t.filename, meta: L("transfer.sent", total), time: time, progress: nil)
         case (.outgoing, .cancelled):
             return .fileSent(name: t.filename, meta: L("transfer.cancelled"), time: time, progress: nil)
+        case (.outgoing, .retryRequired):
+            return .fileSent(name: t.filename, meta: L("transfer.saveRetryRequired"), time: time, progress: nil)
         }
     }
 

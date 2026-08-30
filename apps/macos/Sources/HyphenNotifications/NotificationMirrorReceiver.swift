@@ -12,6 +12,7 @@ public enum NotificationMirrorProtocol {
     public static let typeReplyRequest = "notification.reply.request"
     public static let typeReplyResult = "notification.reply.result"
     public static let typePrivacyPolicy = "notification.privacy.policy"
+    public static let typePrivacyResult = "notification.privacy.result"
 }
 
 public enum NotificationMirrorError: Error, Equatable {
@@ -70,6 +71,19 @@ public struct NotificationPrivacyPolicy: Equatable {
 
     public static let allowAll = NotificationPrivacyPolicy()
 
+    public func isMoreRestrictive(than previous: NotificationPrivacyPolicy) -> Bool {
+        if previous.isMirroringEnabled && !isMirroringEnabled { return true }
+        if !previous.isMirroringEnabled { return false }
+        if !isMirroringEnabled { return false }
+        if defaultMode.restrictionRank > previous.defaultMode.restrictionRank { return true }
+        let packages = Set(perPackageModes.keys).union(previous.perPackageModes.keys)
+        return packages.contains { packageName in
+            let current = perPackageModes[packageName] ?? defaultMode
+            let old = previous.perPackageModes[packageName] ?? previous.defaultMode
+            return current.restrictionRank > old.restrictionRank
+        }
+    }
+
     public func presentationRequest(
         for request: NotificationPresentationRequest
     ) -> NotificationPresentationRequest? {
@@ -99,6 +113,16 @@ public struct NotificationPrivacyPolicy: Equatable {
                 category: nil,
                 replyActions: []
             )
+        }
+    }
+}
+
+private extension NotificationPrivacyMode {
+    var restrictionRank: Int {
+        switch self {
+        case .full: return 0
+        case .hideBody: return 1
+        case .existsOnly: return 2
         }
     }
 }
@@ -186,6 +210,7 @@ public enum NotificationReplyRouting {
 public protocol NotificationPresenter {
     func show(_ request: NotificationPresentationRequest)
     func remove(identifier: String)
+    func removeAllMirroredNotifications()
 }
 
 public protocol NotificationDismissOutbox {
@@ -282,13 +307,14 @@ public final class NotificationPrivacyPolicySender {
         self.outbox = outbox
     }
 
-    /// Wire shape: `{ "defaultMode": "<mode>", "perPackageModes": [ { "packageName": "..", "mode": "<mode>" } ] }`
+    /// Wire shape: `{ "mirroringEnabled": bool, "defaultMode": "<mode>", "perPackageModes": [ { "packageName": "..", "mode": "<mode>" } ] }`
     /// where `<mode>` is a `NotificationPrivacyMode` raw value (full/hideBody/existsOnly).
     public static func payload(for policy: NotificationPrivacyPolicy) -> [String: Any] {
         let perPackage = policy.perPackageModes
             .sorted { $0.key < $1.key }
             .map { ["packageName": $0.key, "mode": $0.value.rawValue] }
         return [
+            "mirroringEnabled": policy.isMirroringEnabled,
             "defaultMode": policy.defaultMode.rawValue,
             "perPackageModes": perPackage,
         ]
@@ -305,11 +331,158 @@ public final class NotificationPrivacyPolicySender {
     }
 }
 
+public enum NotificationPrivacyPolicySendResult: Equatable {
+    case idle
+    case queued
+    case sent(messageId: String)
+}
+
+/// Session-scoped, O(1) latest-wins queue for source-side privacy policy edits.
+/// A nil outbox result is treated as backpressure; session retirement is the
+/// separate signal that makes queued work no longer deliverable.
+public final class NotificationPrivacyPolicySendQueue {
+    private struct Pending {
+        let token: UInt64
+        let policy: NotificationPrivacyPolicy
+    }
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var nextToken: UInt64 = 0
+    private var outbox: NotificationDismissOutbox?
+    private var pending: Pending?
+    private var sendingToken: UInt64?
+
+    public init() {}
+
+    public func activate(outbox: NotificationDismissOutbox) {
+        lock.lock()
+        generation &+= 1
+        self.outbox = outbox
+        pending = nil
+        sendingToken = nil
+        lock.unlock()
+    }
+
+    public func retire() {
+        lock.lock()
+        generation &+= 1
+        outbox = nil
+        pending = nil
+        sendingToken = nil
+        lock.unlock()
+    }
+
+    @discardableResult
+    public func offer(_ policy: NotificationPrivacyPolicy) -> NotificationPrivacyPolicySendResult {
+        lock.lock()
+        guard outbox != nil else {
+            lock.unlock()
+            return .idle
+        }
+        nextToken &+= 1
+        pending = Pending(token: nextToken, policy: policy)
+        lock.unlock()
+        return pump()
+    }
+
+    @discardableResult
+    public func capacityAvailable() -> NotificationPrivacyPolicySendResult {
+        pump()
+    }
+
+    public var hasPendingPolicy: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending != nil
+    }
+
+    private func pump() -> NotificationPrivacyPolicySendResult {
+        lock.lock()
+        guard let outbox, let candidate = pending else {
+            lock.unlock()
+            return .idle
+        }
+        guard sendingToken == nil else {
+            lock.unlock()
+            return .queued
+        }
+        let capturedGeneration = generation
+        sendingToken = candidate.token
+        lock.unlock()
+
+        let messageId = NotificationPrivacyPolicySender(outbox: outbox).send(policy: candidate.policy)
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == capturedGeneration else { return .idle }
+        if sendingToken == candidate.token { sendingToken = nil }
+        guard let messageId else { return .queued }
+        // A newer edit can arrive while the outbox call is outside the lock.
+        // Leave it queued and do not correlate the superseded result.
+        guard pending?.token == candidate.token else { return .queued }
+        pending = nil
+        return .sent(messageId: messageId)
+    }
+}
+
+/// User-visible state of source-side privacy-policy synchronization. `applied`
+/// is reached only after Android names the exact current policy message in a
+/// content-free `notification.privacy.result` response.
+public enum NotificationPrivacySyncState: Equatable {
+    case offline
+    case unsupported
+    case queued
+    case pending
+    case applied(localFloor: NotificationPrivacyMode)
+}
+
+/// Small testable state machine that rejects stale policy results after a newer
+/// edit or session transition.
+public struct NotificationPrivacySyncTracker {
+    public private(set) var state: NotificationPrivacySyncState = .offline
+    public private(set) var pendingMessageId: String?
+
+    public init() {}
+
+    public mutating func markOffline() {
+        pendingMessageId = nil
+        state = .offline
+    }
+
+    public mutating func markUnsupported() {
+        pendingMessageId = nil
+        state = .unsupported
+    }
+
+    public mutating func markQueued() {
+        pendingMessageId = nil
+        state = .queued
+    }
+
+    public mutating func markPending(messageId: String) {
+        pendingMessageId = messageId
+        state = .pending
+    }
+
+    @discardableResult
+    public mutating func applyResult(
+        regarding: String,
+        localFloor: NotificationPrivacyMode
+    ) -> Bool {
+        guard regarding == pendingMessageId else { return false }
+        pendingMessageId = nil
+        state = .applied(localFloor: localFloor)
+        return true
+    }
+}
+
 public enum NotificationMirrorAction: Equatable {
     case shown(identifier: String, sbnKey: String)
     case removed(identifier: String, sbnKey: String)
     case dismissResult(sbnKey: String, success: Bool, errorCode: String?)
     case replyResult(sbnKey: String, success: Bool, errorCode: String?)
+    case privacyPolicyApplied(regarding: String, localFloor: NotificationPrivacyMode)
 }
 
 public struct AndroidNotificationPayload: Equatable {
@@ -354,7 +527,13 @@ public struct AndroidNotificationPayload: Equatable {
     }
 
     public static func identifier(for sbnKey: String) -> String {
-        "hyphen.notification.\(sbnKey)"
+        "\(identifierPrefix)\(sbnKey)"
+    }
+
+    public static let identifierPrefix = "hyphen.notification."
+
+    public static func isMirroredIdentifier(_ identifier: String) -> Bool {
+        identifier.hasPrefix(identifierPrefix)
     }
 
     private static func optionalString(_ value: Any?) -> String? {
@@ -385,15 +564,34 @@ public final class NotificationMirrorReceiver {
     private let presenter: NotificationPresenter
     private let replyActionsEnabled: () -> Bool
     private let privacyPolicy: () -> NotificationPrivacyPolicy
+    private let onPackageObserved: (String) -> Void
+    private let appliedPrivacyLock = NSLock()
+    private var lastAppliedPrivacyPolicy: NotificationPrivacyPolicy = .allowAll
 
     public init(
         presenter: NotificationPresenter,
         replyActionsEnabled: @escaping () -> Bool = { true },
-        privacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll }
+        privacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll },
+        onPackageObserved: @escaping (String) -> Void = { _ in }
     ) {
         self.presenter = presenter
         self.replyActionsEnabled = replyActionsEnabled
         self.privacyPolicy = privacyPolicy
+        self.onPackageObserved = onPackageObserved
+    }
+
+    /// Applies the local privacy consequence immediately. This is deliberately
+    /// independent of transport state and source-side policy acknowledgement:
+    /// any privacy tightening must remove stale, more-disclosive Mac rows even
+    /// while Android is offline. The receiver intentionally does not retain raw
+    /// notification content to re-render those rows under the stricter policy.
+    public func applyPrivacyPolicy(_ policy: NotificationPrivacyPolicy) {
+        appliedPrivacyLock.lock()
+        let previous = lastAppliedPrivacyPolicy
+        lastAppliedPrivacyPolicy = policy
+        appliedPrivacyLock.unlock()
+        guard policy.isMoreRestrictive(than: previous) else { return }
+        presenter.removeAllMirroredNotifications()
     }
 
     @discardableResult
@@ -402,6 +600,7 @@ public final class NotificationMirrorReceiver {
         case NotificationMirrorProtocol.typePosted, NotificationMirrorProtocol.typeUpdated:
             try requireNotificationsCapability(envelope)
             let payload = try AndroidNotificationPayload(payload: envelope.payload)
+            onPackageObserved(payload.packageName)
             let request = payload.presentationRequest(replyActionsEnabled: replyActionsEnabled())
             guard let request = privacyPolicy().presentationRequest(for: request) else {
                 return nil
@@ -446,6 +645,25 @@ public final class NotificationMirrorReceiver {
             let errorCode = envelope.payload["errorCode"] as? String
             return .replyResult(sbnKey: sbnKey, success: success, errorCode: errorCode)
 
+        case NotificationMirrorProtocol.typePrivacyResult:
+            try requireNotificationsCapability(envelope)
+            let allowedFields: Set<String> = ["regarding", "applied", "localFloor"]
+            guard Set(envelope.payload.keys) == allowedFields else {
+                throw NotificationMirrorError.invalidPayload("privacy result has unknown or missing fields")
+            }
+            guard let regarding = envelope.payload["regarding"] as? String,
+                  Ulid.isValid(regarding) else {
+                throw NotificationMirrorError.invalidPayload("regarding must be a canonical ULID")
+            }
+            guard envelope.payload["applied"] as? Bool == true else {
+                throw NotificationMirrorError.invalidPayload("applied must be true")
+            }
+            guard let rawFloor = envelope.payload["localFloor"] as? String,
+                  let localFloor = NotificationPrivacyMode(rawValue: rawFloor) else {
+                throw NotificationMirrorError.invalidPayload("localFloor must be a privacy mode")
+            }
+            return .privacyPolicyApplied(regarding: regarding, localFloor: localFloor)
+
         default:
             return nil
         }
@@ -464,6 +682,8 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
     private var onDismiss: ((String) -> Void)?
     private var onReply: ((String, Int, String?, String) -> Void)?
     private var notificationCategories: [String: UNNotificationCategory] = [:]
+    private let presentationLock = NSLock()
+    private var presentationGeneration: UInt64 = 0
 
     public init(
         center: UNUserNotificationCenter = .current(),
@@ -494,7 +714,9 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
     }
 
     public func show(_ request: NotificationPresentationRequest) {
-        ensureAuthorized { [center] in
+        let generation = currentPresentationGeneration()
+        ensureAuthorized { [weak self, center] in
+            guard let self, self.isCurrentPresentationGeneration(generation) else { return }
             let content = UNMutableNotificationContent()
             content.title = request.title
             content.body = request.body
@@ -534,6 +756,38 @@ public final class UserNotificationCenterPresenter: NSObject, NotificationPresen
     public func remove(identifier: String) {
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
+    }
+
+    public func removeAllMirroredNotifications() {
+        invalidateQueuedPresentations()
+        center.getPendingNotificationRequests { [center] requests in
+            let identifiers = requests.map(\.identifier).filter(AndroidNotificationPayload.isMirroredIdentifier)
+            guard !identifiers.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        }
+        center.getDeliveredNotifications { [center] notifications in
+            let identifiers = notifications.map(\.request.identifier).filter(AndroidNotificationPayload.isMirroredIdentifier)
+            guard !identifiers.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        }
+    }
+
+    private func currentPresentationGeneration() -> UInt64 {
+        presentationLock.lock()
+        defer { presentationLock.unlock() }
+        return presentationGeneration
+    }
+
+    private func isCurrentPresentationGeneration(_ generation: UInt64) -> Bool {
+        presentationLock.lock()
+        defer { presentationLock.unlock() }
+        return generation == presentationGeneration
+    }
+
+    private func invalidateQueuedPresentations() {
+        presentationLock.lock()
+        presentationGeneration &+= 1
+        presentationLock.unlock()
     }
 
     private func ensureAuthorized(_ action: @escaping () -> Void) {

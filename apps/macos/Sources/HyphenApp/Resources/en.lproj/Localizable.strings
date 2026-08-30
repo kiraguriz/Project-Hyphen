@@ -30,6 +30,16 @@
 "transfer.received" = "%@ · Received";
 "transfer.sent" = "%@ · Sent";
 "transfer.cancelled" = "Cancelled";
+"transfer.resuming" = "Resuming";
+"transfer.resuming.detail" = "Resumed · %@ / %@";
+"transfer.saveRetryRequired" = "Verified; save failed and can be retried safely";
+"transfer.verifiedStaged" = "Verified content retained locally";
+"transfer.direction.fromPhone" = "From phone";
+"transfer.direction.toPhone" = "Sending to phone";
+"transfer.action.cancel" = "Cancel";
+"transfer.action.retrySave" = "Retry save";
+"transfer.panel.title" = "Transfers";
+"transfer.panel.empty" = "No file transfers in this run yet.";
 
 /* Text / link rows */
 "text.linkSent" = "Link sent";
@@ -86,6 +96,12 @@
 "settings.notif.perApp" = "Per-app privacy";
 "settings.notif.otherApps" = "Other apps";
 "settings.notif.otherAppsDetail" = "Apps without a specific setting";
+"settings.notif.emptyApps" = "Apps appear after their first notification in this run; the observed app inventory is not saved.";
+"settings.notif.sync.offline" = "Phone policy: offline; Mac rules still apply locally";
+"settings.notif.sync.unsupported" = "Phone policy: unsupported; Mac rules still apply locally";
+"settings.notif.sync.queued" = "Phone policy: waiting for link capacity…";
+"settings.notif.sync.pending" = "Phone policy: awaiting confirmation…";
+"settings.notif.sync.applied" = "Phone policy: applied · phone privacy floor: %@";
 "settings.trust.status" = "Trusted · fingerprint pinned";
 "settings.trust.fingerprintLabel" = "Fingerprint pinned";
 "settings.trust.rename" = "Rename";

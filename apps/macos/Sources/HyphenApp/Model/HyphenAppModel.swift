@@ -69,8 +69,18 @@ final class HyphenAppModel: ObservableObject {
         case let .notificationRemoved(identifier, _):
             feed.removeNotification(identifier: identifier)
 
+        case .notificationsCleared:
+            feed.removeAllNotifications()
+
         case let .transferProgress(progress, direction, at):
             feed.upsert(transferItem(progress: progress, direction: direction, at: at))
+
+        case let .transferResuming(progress, direction, at):
+            var item = transferFeedItem(progress: progress, direction: direction)
+            item.status = .resuming
+            feed.upsert(
+                ActivityItem(timestamp: at, kind: .transfer(item), dedupeKey: Self.transferKey(progress.fileId))
+            )
 
         case let .transferCompleted(fileId, filename, sizeBytes, direction, verified, at):
             let item = TransferFeedItem(
@@ -99,6 +109,22 @@ final class HyphenAppModel: ObservableObject {
                 )
             }
 
+        case let .transferDeliveryFailed(fileId, filename, sizeBytes, at):
+            let item = TransferFeedItem(
+                fileId: fileId,
+                filename: filename,
+                direction: .incoming,
+                completedBytes: sizeBytes,
+                totalBytes: sizeBytes,
+                completedChunks: 0,
+                totalChunks: 0,
+                status: .retryRequired,
+                verified: true
+            )
+            feed.upsert(
+                ActivityItem(timestamp: at, kind: .transfer(item), dedupeKey: Self.transferKey(fileId))
+            )
+
         case let .text(kind, direction, value, at):
             feed.upsert(
                 ActivityItem(
@@ -119,7 +145,15 @@ final class HyphenAppModel: ObservableObject {
     static func transferKey(_ fileId: String) -> String { "transfer:\(fileId)" }
 
     private func transferItem(progress: TransferProgress, direction: TransferDirection, at: Date) -> ActivityItem {
-        let item = TransferFeedItem(
+        let item = transferFeedItem(progress: progress, direction: direction)
+        return ActivityItem(timestamp: at, kind: .transfer(item), dedupeKey: Self.transferKey(progress.fileId))
+    }
+
+    private func transferFeedItem(
+        progress: TransferProgress,
+        direction: TransferDirection
+    ) -> TransferFeedItem {
+        TransferFeedItem(
             fileId: progress.fileId,
             filename: progress.filename,
             direction: direction,
@@ -130,7 +164,6 @@ final class HyphenAppModel: ObservableObject {
             status: progress.isComplete ? .completed : .active,
             verified: false
         )
-        return ActivityItem(timestamp: at, kind: .transfer(item), dedupeKey: Self.transferKey(progress.fileId))
     }
 
     private func existingTransfer(fileId: String) -> TransferFeedItem? {

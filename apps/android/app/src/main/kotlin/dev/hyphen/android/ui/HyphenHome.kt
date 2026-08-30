@@ -76,7 +76,11 @@ fun HyphenHome(model: HyphenUiModel, actions: HyphenActions) {
         Spacer(Modifier.height(18.dp))
         ConnectionHeader(state.connection)
         Spacer(Modifier.height(12.dp))
-        TimelineCard(state = state, actions = actions)
+        TimelineCard(
+            state = state,
+            transferSourceRetryRequired = model.transferSourceRetryRequired,
+            actions = actions,
+        )
         Spacer(Modifier.height(12.dp))
         PermissionsCard(
             companionEnabled = model.companionConnectionEnabled,
@@ -187,7 +191,11 @@ private fun dayLabelText(label: DayLabel): String = when (label) {
 }
 
 @Composable
-private fun TimelineCard(state: HyphenUiState, actions: HyphenActions) {
+private fun TimelineCard(
+    state: HyphenUiState,
+    transferSourceRetryRequired: Boolean,
+    actions: HyphenActions,
+) {
     val p = HyphenTheme.palette
     // Re-evaluate "now" at each midnight so today/yesterday day headers don't go
     // stale while the screen stays composed across a date boundary. Grouping only
@@ -208,6 +216,10 @@ private fun TimelineCard(state: HyphenUiState, actions: HyphenActions) {
     val connected = state.connection.state == ConnectionState.CONNECTED
 
     HyphenCard(title = stringResource(R.string.timeline_title), subtitle = stringResource(R.string.timeline_subtitle)) {
+        if (transferSourceRetryRequired) {
+            TransferSourceRetryBanner(actions.onReselectTransferSource)
+            Spacer(Modifier.height(10.dp))
+        }
         if (days.isEmpty()) {
             EmptyTimeline(state.connection)
         } else {
@@ -217,7 +229,7 @@ private fun TimelineCard(state: HyphenUiState, actions: HyphenActions) {
                     modifier = Modifier.padding(top = if (index == 0) 0.dp else 8.dp, bottom = 4.dp),
                 )
                 day.items.forEach { item ->
-                    TimelineRow(item)
+                    TimelineRow(item, actions)
                     Spacer(Modifier.height(8.dp))
                 }
             }
@@ -236,8 +248,26 @@ private fun TimelineCard(state: HyphenUiState, actions: HyphenActions) {
             Spacer(Modifier.width(9.dp))
             HyphenButton(stringResource(R.string.btn_send_file), enabled = connected, modifier = Modifier.weight(1f), onClick = actions.onSendFile)
         }
-        Spacer(Modifier.height(10.dp))
-        HyphenButton(stringResource(R.string.btn_cancel_transfer), enabled = connected, modifier = Modifier.fillMaxWidth(), onClick = actions.onCancelTransfer)
+    }
+}
+
+@Composable
+private fun TransferSourceRetryBanner(onReselect: () -> Unit) {
+    val p = HyphenTheme.palette
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(p.surface2)
+            .border(1.dp, p.amber.copy(alpha = 0.55f), RoundedCornerShape(16.dp)).padding(12.dp),
+    ) {
+        Text(stringResource(R.string.transfer_retry_source_title), color = p.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(3.dp))
+        Text(stringResource(R.string.transfer_retry_source_detail), color = p.dim, fontSize = 11.sp)
+        Spacer(Modifier.height(9.dp))
+        HyphenButton(
+            stringResource(R.string.transfer_retry_source_action),
+            primary = true,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onReselect,
+        )
     }
 }
 
@@ -268,9 +298,9 @@ private fun emptyCopy(c: ConnectionSnapshot): Pair<Int, Int> {
 }
 
 @Composable
-private fun TimelineRow(item: ActivityItem) {
+private fun TimelineRow(item: ActivityItem, actions: HyphenActions) {
     when (val kind = item.kind) {
-        is ActivityKind.Transfer -> TransferRow(kind.item, item.timestampMillis)
+        is ActivityKind.Transfer -> TransferRow(kind.item, item.timestampMillis, actions)
         is ActivityKind.Text -> TextRow(kind.item, item.timestampMillis)
         is ActivityKind.NotificationAction -> NotificationActionRow(kind.item, item.timestampMillis)
         is ActivityKind.Pairing -> PairingRow(kind.item, item.timestampMillis)
@@ -296,32 +326,66 @@ private fun RowTile(glyph: String, fg: Color, content: @Composable RowScope.() -
 }
 
 @Composable
-private fun TransferRow(t: TransferFeedItem, at: Long) {
+private fun TransferRow(t: TransferFeedItem, at: Long, actions: HyphenActions) {
     val p = HyphenTheme.palette
     val incoming = t.direction == TransferDirection.INCOMING
     val meta = when (t.status) {
         TransferStatus.ACTIVE -> if (t.totalBytes > 0)
             "${HyphenFormat.bytes(t.completedBytes)} / ${HyphenFormat.bytes(t.totalBytes)}"
         else if (incoming) stringResource(R.string.transfer_receiving) else stringResource(R.string.transfer_sending)
+        TransferStatus.RESUMING -> stringResource(
+            R.string.transfer_resuming,
+            HyphenFormat.bytes(t.completedBytes),
+            HyphenFormat.bytes(t.totalBytes),
+        )
         TransferStatus.COMPLETED -> if (incoming) {
             if (t.verified) stringResource(R.string.transfer_received_verified, HyphenFormat.bytes(t.totalBytes))
             else stringResource(R.string.transfer_received, HyphenFormat.bytes(t.totalBytes))
         } else stringResource(R.string.transfer_sent, HyphenFormat.bytes(t.totalBytes))
         TransferStatus.CANCELLED -> stringResource(R.string.transfer_cancelled)
+        TransferStatus.RETRY_REQUIRED -> if (incoming) {
+            stringResource(R.string.transfer_save_retry_required)
+        } else {
+            stringResource(R.string.transfer_source_reselection_required)
+        }
     }
     RowTile(glyph = if (incoming) "↓" else "↑", fg = if (incoming) p.accent else p.dim) {
         Column(Modifier.weight(1f)) {
             Text(t.filename, color = p.text, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(meta, color = p.dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val fraction = t.fraction
-            if (t.status == TransferStatus.ACTIVE && fraction != null) {
+            if ((t.status == TransferStatus.ACTIVE || t.status == TransferStatus.RESUMING) && fraction != null) {
                 Spacer(Modifier.height(6.dp))
-                ProgressBar(fraction, p.accent)
+                ProgressBar(fraction, if (t.status == TransferStatus.RESUMING) p.amber else p.accent)
+            }
+            if (t.status == TransferStatus.ACTIVE || t.status == TransferStatus.RESUMING) {
+                Spacer(Modifier.height(8.dp))
+                HyphenButton(
+                    stringResource(R.string.transfer_cancel_item),
+                    enabled = true,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { actions.onCancelTransfer(t.fileId) }
+            } else if (t.status == TransferStatus.RETRY_REQUIRED) {
+                Spacer(Modifier.height(8.dp))
+                HyphenButton(
+                    stringResource(
+                        if (incoming) R.string.transfer_retry_save_action
+                        else R.string.transfer_retry_source_action,
+                    ),
+                    primary = true,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { actions.onRetryTransfer(t.fileId) }
             }
         }
         Spacer(Modifier.width(8.dp))
-        if (t.status == TransferStatus.ACTIVE && t.fraction != null) {
-            Text("${(t.fraction!! * 100).toInt()}%", color = p.accent, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        if ((t.status == TransferStatus.ACTIVE || t.status == TransferStatus.RESUMING) && t.fraction != null) {
+            Text(
+                "${(t.fraction!! * 100).toInt()}%",
+                color = if (t.status == TransferStatus.RESUMING) p.amber else p.accent,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
         } else {
             Text(HyphenFormat.time(at), color = p.faint, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         }
@@ -470,7 +534,7 @@ private fun NotificationCard(accessEnabled: Boolean, privacyLabel: String, actio
         Spacer(Modifier.height(10.dp))
         HyphenButton(stringResource(R.string.notif_btn_check), modifier = Modifier.fillMaxWidth(), onClick = actions.onCheckNotificationAccess)
         Spacer(Modifier.height(10.dp))
-        HyphenButton(stringResource(R.string.notif_btn_privacy, privacyLabel), modifier = Modifier.fillMaxWidth(), onClick = actions.onCycleNotificationPrivacy)
+        HyphenButton(stringResource(R.string.notif_btn_privacy, privacyLabel), modifier = Modifier.fillMaxWidth(), onClick = actions.onChooseNotificationPrivacy)
     }
 }
 

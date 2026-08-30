@@ -38,7 +38,7 @@ data class ConnectionSnapshot(
 
 enum class TransferDirection { INCOMING, OUTGOING }
 
-enum class TransferStatus { ACTIVE, COMPLETED, CANCELLED }
+enum class TransferStatus { ACTIVE, RESUMING, COMPLETED, CANCELLED, RETRY_REQUIRED }
 
 enum class TextKind { TEXT, URL }
 
@@ -178,6 +178,16 @@ sealed interface ActivityEvent {
         val complete: Boolean,
         val atMillis: Long,
     ) : ActivityEvent
+    data class TransferResuming(
+        val fileId: String,
+        val filename: String,
+        val direction: TransferDirection,
+        val completedBytes: Long,
+        val totalBytes: Long,
+        val completedChunks: Int,
+        val totalChunks: Int,
+        val atMillis: Long,
+    ) : ActivityEvent
     data class TransferCompleted(
         val fileId: String,
         val filename: String,
@@ -187,6 +197,18 @@ sealed interface ActivityEvent {
         val atMillis: Long,
     ) : ActivityEvent
     data class TransferCancelled(val fileId: String, val atMillis: Long) : ActivityEvent
+    data class TransferDeliveryFailed(
+        val fileId: String,
+        val filename: String,
+        val sizeBytes: Long,
+        val atMillis: Long,
+    ) : ActivityEvent
+    data class TransferSourceReselectionRequired(
+        val fileId: String,
+        val filename: String,
+        val sizeBytes: Long,
+        val atMillis: Long,
+    ) : ActivityEvent
     data class Text(
         val kind: TextKind,
         val direction: TextDirection,
@@ -260,6 +282,23 @@ object HyphenReducer {
                 ))
             }
 
+            is ActivityEvent.TransferResuming -> {
+                val item = TransferFeedItem(
+                    fileId = event.fileId,
+                    filename = event.filename,
+                    direction = event.direction,
+                    completedBytes = event.completedBytes,
+                    totalBytes = event.totalBytes,
+                    completedChunks = event.completedChunks,
+                    totalChunks = event.totalChunks,
+                    status = TransferStatus.RESUMING,
+                    verified = false,
+                )
+                state.copy(feed = state.feed.upsert(
+                    ActivityItem(nextId(), event.atMillis, ActivityKind.Transfer(item), transferKey(event.fileId)),
+                ))
+            }
+
             is ActivityEvent.TransferCancelled -> {
                 val key = transferKey(event.fileId)
                 val existing = state.feed.items.firstOrNull { it.dedupeKey == key }
@@ -267,6 +306,41 @@ object HyphenReducer {
                 val item = kind.item.copy(status = TransferStatus.CANCELLED)
                 state.copy(feed = state.feed.upsert(
                     ActivityItem(nextId(), event.atMillis, ActivityKind.Transfer(item), key),
+                ))
+            }
+
+
+            is ActivityEvent.TransferDeliveryFailed -> {
+                val item = TransferFeedItem(
+                    fileId = event.fileId,
+                    filename = event.filename,
+                    direction = TransferDirection.INCOMING,
+                    completedBytes = event.sizeBytes,
+                    totalBytes = event.sizeBytes,
+                    completedChunks = 0,
+                    totalChunks = 0,
+                    status = TransferStatus.RETRY_REQUIRED,
+                    verified = true,
+                )
+                state.copy(feed = state.feed.upsert(
+                    ActivityItem(nextId(), event.atMillis, ActivityKind.Transfer(item), transferKey(event.fileId)),
+                ))
+            }
+
+            is ActivityEvent.TransferSourceReselectionRequired -> {
+                val item = TransferFeedItem(
+                    fileId = event.fileId,
+                    filename = event.filename,
+                    direction = TransferDirection.OUTGOING,
+                    completedBytes = 0,
+                    totalBytes = event.sizeBytes,
+                    completedChunks = 0,
+                    totalChunks = 0,
+                    status = TransferStatus.RETRY_REQUIRED,
+                    verified = false,
+                )
+                state.copy(feed = state.feed.upsert(
+                    ActivityItem(nextId(), event.atMillis, ActivityKind.Transfer(item), transferKey(event.fileId)),
                 ))
             }
 

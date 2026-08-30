@@ -97,15 +97,64 @@ class TextLinkReceiverTest {
     @Test
     fun pendingConfirmationsAreBounded() {
         val receiver = TextLinkReceiver(maxPending = 2)
-        repeat(3) { index ->
+        repeat(2) { index ->
             receiver.handle(
                 envelope(
                     payload = Json.obj("kind" to Json.Str("text"), "value" to Json.Str("hello-$index")),
-                ),
+                ).copy(messageId = "01JZ000000000000000000000$index"),
             )
         }
 
+        val overflow = runCatching {
+            receiver.handle(
+                envelope(
+                    payload = Json.obj("kind" to Json.Str("text"), "value" to Json.Str("hello-2")),
+                ).copy(messageId = "01JZ0000000000000000000002"),
+            )
+        }.exceptionOrNull()
+
         assertEquals(2, receiver.pending.size)
-        assertEquals("hello-1", receiver.pending.first().message.value)
+        assertEquals("hello-0", receiver.pending.first().message.value)
+        assertTrue(overflow is TextConfirmationQueueFullException)
+    }
+
+    @Test
+    fun `presentation queue deduplicates replay and shows one at a time`() {
+        val receiver = TextLinkReceiver()
+        val first = receiver.handle(
+            envelope(payload = Json.obj("kind" to Json.Str("text"), "value" to Json.Str("first"))),
+        )!!
+        val second = first.copy(messageId = "01JZ0000000000000000000001", message = first.message.copy(value = "second"))
+        val queue = TextConfirmationQueue()
+        queue.enqueue(first)
+        queue.enqueue(first)
+        queue.enqueue(second)
+
+        assertEquals(first, queue.activateNext())
+        assertEquals(first, queue.activateNext())
+        queue.finishActive(first.messageId)
+        assertEquals(second, queue.activateNext())
+        assertEquals(1, queue.size())
+    }
+
+    @Test
+    fun `presentation queue is bounded and preserves the active confirmation`() {
+        val queue = TextConfirmationQueue(maxPending = 2)
+        val first = TextLinkConfirmationRequest(
+            "first",
+            TextLinkMessage(TextLinkKind.TEXT, "first body"),
+        )
+        val second = first.copy(messageId = "second", message = first.message.copy(value = "second body"))
+        val third = first.copy(messageId = "third", message = first.message.copy(value = "third body"))
+        queue.enqueue(first)
+        queue.enqueue(second)
+        assertEquals(first, queue.activateNext())
+
+        queue.enqueue(third)
+
+        assertEquals(2, queue.size())
+        assertEquals(first, queue.activateNext())
+        queue.finishActive(first.messageId)
+        assertEquals(second, queue.activateNext())
     }
 }

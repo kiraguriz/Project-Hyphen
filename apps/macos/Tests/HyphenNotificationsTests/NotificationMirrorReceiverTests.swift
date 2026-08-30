@@ -5,6 +5,16 @@ import XCTest
 private final class RecordingNotificationPresenter: NotificationPresenter {
     var shown: [NotificationPresentationRequest] = []
     var removed: [String] = []
+    var pendingIdentifiers: Set<String>
+    var deliveredIdentifiers: Set<String>
+
+    init(
+        pendingIdentifiers: Set<String> = [],
+        deliveredIdentifiers: Set<String> = []
+    ) {
+        self.pendingIdentifiers = pendingIdentifiers
+        self.deliveredIdentifiers = deliveredIdentifiers
+    }
 
     func show(_ request: NotificationPresentationRequest) {
         shown.append(request)
@@ -12,6 +22,15 @@ private final class RecordingNotificationPresenter: NotificationPresenter {
 
     func remove(identifier: String) {
         removed.append(identifier)
+    }
+
+    func removeAllMirroredNotifications() {
+        pendingIdentifiers = pendingIdentifiers.filter {
+            !AndroidNotificationPayload.isMirroredIdentifier($0)
+        }
+        deliveredIdentifiers = deliveredIdentifiers.filter {
+            !AndroidNotificationPayload.isMirroredIdentifier($0)
+        }
     }
 }
 
@@ -41,6 +60,12 @@ private final class CoalescingNotificationPresenter: NotificationPresenter {
         removeCount += 1
         deliveredByIdentifier.removeValue(forKey: identifier)
     }
+
+    func removeAllMirroredNotifications() {
+        deliveredByIdentifier = deliveredByIdentifier.filter {
+            !AndroidNotificationPayload.isMirroredIdentifier($0.key)
+        }
+    }
 }
 
 private final class RecordingDismissOutbox: NotificationDismissOutbox {
@@ -60,6 +85,22 @@ private final class RecordingDismissOutbox: NotificationDismissOutbox {
         self.requiresAck = requiresAck
         self.payload = payload
         return "01JZ0000000000000000000001"
+    }
+}
+
+private final class FlowControlledPrivacyOutbox: NotificationDismissOutbox {
+    var isFlowControlled = true
+    private(set) var payloads: [[String: Any]] = []
+
+    func send(
+        type: String,
+        capability: String,
+        requiresAck: Bool,
+        payload: [String: Any]
+    ) -> String? {
+        guard type == NotificationMirrorProtocol.typePrivacyPolicy else { return nil }
+        payloads.append(payload)
+        return isFlowControlled ? nil : "01JZ0000000000000000000099"
     }
 }
 
@@ -95,6 +136,162 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(updated, .shown(identifier: expectedIdentifier, sbnKey: "0|com.chat|7|thread-123|10101"))
         XCTAssertEqual(presenter.shown.map(\.identifier), [expectedIdentifier, expectedIdentifier])
         XCTAssertEqual(presenter.shown.last?.body, "hello again")
+    }
+
+    func testPostedNotificationReportsItsRealPackageBeforePresentationScrubbing() throws {
+        let presenter = RecordingNotificationPresenter()
+        var observed: [String] = []
+        let receiver = NotificationMirrorReceiver(
+            presenter: presenter,
+            privacyPolicy: { NotificationPrivacyPolicy(defaultMode: .existsOnly) },
+            onPackageObserved: { observed.append($0) }
+        )
+
+        _ = try receiver.handle(
+            envelope(payload: payload(
+                sbnKey: "0|com.example.secure|7|thread|10101",
+                packageName: "com.example.secure",
+                text: "secret"
+            ))
+        )
+
+        XCTAssertEqual(observed, ["com.example.secure"])
+        XCTAssertEqual(presenter.shown.single?.packageName, "Android")
+        XCTAssertFalse(presenter.shown.single?.body.contains("secret") == true)
+    }
+
+    func testPrivacyPolicyResultIsParsedWithoutPresentingANotification() throws {
+        let presenter = RecordingNotificationPresenter()
+        let receiver = NotificationMirrorReceiver(presenter: presenter)
+
+        let action = try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typePrivacyResult,
+                payload: [
+                    "regarding": "01JZ0000000000000000000009",
+                    "applied": true,
+                    "localFloor": "hideBody",
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            action,
+            .privacyPolicyApplied(
+                regarding: "01JZ0000000000000000000009",
+                localFloor: .hideBody
+            )
+        )
+        XCTAssertTrue(presenter.shown.isEmpty)
+    }
+
+    func testPrivacyPolicyResultRejectsUnknownFields() {
+        let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
+
+        XCTAssertThrowsError(try receiver.handle(
+            envelope(
+                type: NotificationMirrorProtocol.typePrivacyResult,
+                payload: [
+                    "regarding": "01JZ0000000000000000000009",
+                    "applied": true,
+                    "localFloor": "hideBody",
+                    "unexpected": "value",
+                ]
+            )
+        ))
+    }
+
+    func testPrivacyPolicyResultRequiresCanonicalULIDRegarding() {
+        let receiver = NotificationMirrorReceiver(presenter: RecordingNotificationPresenter())
+
+        for regarding: Any in [
+            "not-a-ulid",
+            "01jz0000000000000000000009",
+            "01JZ000000000000000000009",
+            NSNull(),
+        ] {
+            XCTAssertThrowsError(try receiver.handle(
+                envelope(
+                    type: NotificationMirrorProtocol.typePrivacyResult,
+                    payload: [
+                        "regarding": regarding,
+                        "applied": true,
+                        "localFloor": "hideBody",
+                    ]
+                )
+            ))
+        }
+    }
+
+    func testPrivacySyncTrackerAcceptsOnlyTheCurrentPolicyResult() {
+        var tracker = NotificationPrivacySyncTracker()
+
+        tracker.markPending(messageId: "policy-new")
+        XCTAssertEqual(tracker.state, .pending)
+        XCTAssertFalse(tracker.applyResult(regarding: "policy-old", localFloor: .full))
+        XCTAssertEqual(tracker.state, .pending)
+
+        XCTAssertTrue(tracker.applyResult(regarding: "policy-new", localFloor: .hideBody))
+        XCTAssertEqual(tracker.state, .applied(localFloor: .hideBody))
+        XCTAssertFalse(tracker.applyResult(regarding: "policy-new", localFloor: .existsOnly))
+    }
+
+    func testPrivacySyncTrackerDistinguishesOfflineAndUnsupported() {
+        var tracker = NotificationPrivacySyncTracker()
+
+        tracker.markQueued()
+        XCTAssertEqual(tracker.state, .queued)
+        XCTAssertNil(tracker.pendingMessageId)
+
+        tracker.markPending(messageId: "policy")
+        tracker.markOffline()
+        XCTAssertEqual(tracker.state, .offline)
+        XCTAssertNil(tracker.pendingMessageId)
+
+        tracker.markUnsupported()
+        XCTAssertEqual(tracker.state, .unsupported)
+        XCTAssertNil(tracker.pendingMessageId)
+    }
+
+    func testPrivacyPolicyQueueCoalescesLatestAndRetriesWhenCapacityReturns() {
+        let outbox = FlowControlledPrivacyOutbox()
+        let queue = NotificationPrivacyPolicySendQueue()
+        queue.activate(outbox: outbox)
+
+        XCTAssertEqual(
+            queue.offer(NotificationPrivacyPolicy(defaultMode: .full)),
+            .queued
+        )
+        XCTAssertEqual(
+            queue.offer(NotificationPrivacyPolicy(defaultMode: .hideBody)),
+            .queued
+        )
+        XCTAssertTrue(queue.hasPendingPolicy)
+
+        outbox.isFlowControlled = false
+        XCTAssertEqual(
+            queue.capacityAvailable(),
+            .sent(messageId: "01JZ0000000000000000000099")
+        )
+        XCTAssertFalse(queue.hasPendingPolicy)
+        XCTAssertEqual(outbox.payloads.last?["defaultMode"] as? String, "hideBody")
+    }
+
+    func testPrivacyPolicyQueueDropsUnsentWorkWhenSessionRetires() {
+        let outbox = FlowControlledPrivacyOutbox()
+        let queue = NotificationPrivacyPolicySendQueue()
+        queue.activate(outbox: outbox)
+        XCTAssertEqual(
+            queue.offer(NotificationPrivacyPolicy(defaultMode: .existsOnly)),
+            .queued
+        )
+
+        queue.retire()
+        outbox.isFlowControlled = false
+
+        XCTAssertEqual(queue.capacityAvailable(), .idle)
+        XCTAssertFalse(queue.hasPendingPolicy)
+        XCTAssertEqual(outbox.payloads.count, 1)
     }
 
     func testReplyActionsAreParsedIntoPresentationRequests() throws {
@@ -152,6 +349,43 @@ final class NotificationMirrorReceiverTests: XCTestCase {
 
         XCTAssertNil(action)
         XCTAssertTrue(presenter.shown.isEmpty)
+    }
+
+    func testDisablingMirroringPurgesOnlyHyphenOwnedPendingAndDeliveredNotifications() {
+        let presenter = RecordingNotificationPresenter(
+            pendingIdentifiers: [
+                "hyphen.notification.pending-one",
+                "com.other.pending",
+            ],
+            deliveredIdentifiers: [
+                "hyphen.notification.delivered-one",
+                "hyphen.notification.delivered-two",
+                "com.other.delivered",
+            ]
+        )
+        let receiver = NotificationMirrorReceiver(presenter: presenter)
+
+        receiver.applyPrivacyPolicy(
+            NotificationPrivacyPolicy(isMirroringEnabled: false)
+        )
+
+        XCTAssertEqual(presenter.pendingIdentifiers, ["com.other.pending"])
+        XCTAssertEqual(presenter.deliveredIdentifiers, ["com.other.delivered"])
+    }
+
+    func testPrivacyTighteningPurgesRowsThatCouldContainOlderFullContent() {
+        let presenter = RecordingNotificationPresenter(
+            deliveredIdentifiers: [
+                "hyphen.notification.disclosive-row",
+                "com.other.delivered",
+            ]
+        )
+        let receiver = NotificationMirrorReceiver(presenter: presenter)
+
+        receiver.applyPrivacyPolicy(NotificationPrivacyPolicy(defaultMode: .full))
+        receiver.applyPrivacyPolicy(NotificationPrivacyPolicy(defaultMode: .hideBody))
+
+        XCTAssertEqual(presenter.deliveredIdentifiers, ["com.other.delivered"])
     }
 
     func testHideBodyPrivacyPolicyRemovesBodyTextAndReplyActions() throws {
@@ -559,6 +793,7 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         XCTAssertEqual(outbox.type, NotificationMirrorProtocol.typePrivacyPolicy)
         XCTAssertEqual(outbox.capability, NotificationMirrorProtocol.capability)
         XCTAssertEqual(outbox.requiresAck, true)
+        XCTAssertEqual(outbox.payload?["mirroringEnabled"] as? Bool, true)
         XCTAssertEqual(outbox.payload?["defaultMode"] as? String, "existsOnly")
         // Per-package modes are an array of {packageName, mode}, sorted by package.
         let perPackage = outbox.payload?["perPackageModes"] as? [[String: String]]
@@ -589,4 +824,8 @@ final class NotificationMirrorReceiverTests: XCTestCase {
         }
         return payload
     }
+}
+
+private extension Array {
+    var single: Element? { count == 1 ? first : nil }
 }

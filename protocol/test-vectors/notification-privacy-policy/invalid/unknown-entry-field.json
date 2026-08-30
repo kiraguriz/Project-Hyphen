@@ -1,0 +1,6 @@
+{
+  "defaultMode": "existsOnly",
+  "perPackageModes": [
+    { "packageName": "com.example.chat", "mode": "full", "body": "smuggled" }
+  ]
+}

@@ -113,6 +113,76 @@ class HyphenReducerTest {
     }
 
     @Test
+    fun `restored transfer and retryable delivery failure update the same row`() {
+        var s = HyphenUiState()
+        s = apply(
+            s,
+            ActivityEvent.TransferResuming(
+                fileId = "f_resume",
+                filename = "archive.zip",
+                direction = TransferDirection.INCOMING,
+                completedBytes = 512,
+                totalBytes = 1024,
+                completedChunks = 1,
+                totalChunks = 2,
+                atMillis = 10,
+            ),
+        )
+        val restored = (s.feed.items.single().kind as ActivityKind.Transfer).item
+        assertEquals(TransferStatus.RESUMING, restored.status)
+
+        s = apply(
+            s,
+            ActivityEvent.TransferDeliveryFailed(
+                fileId = "f_resume",
+                filename = "archive.zip",
+                sizeBytes = 1024,
+                atMillis = 20,
+            ),
+        )
+        assertEquals(1, s.feed.items.size)
+        val failed = (s.feed.items.single().kind as ActivityKind.Transfer).item
+        assertEquals(TransferStatus.RETRY_REQUIRED, failed.status)
+        assertTrue(failed.verified)
+    }
+
+    @Test
+    fun `lost picker source becomes outgoing retry row and reselection resumes it`() {
+        var s = apply(
+            HyphenUiState(),
+            ActivityEvent.TransferSourceReselectionRequired(
+                fileId = "f_picker",
+                filename = "picked.bin",
+                sizeBytes = 2048,
+                atMillis = 10,
+            ),
+        )
+        val retry = (s.feed.items.single().kind as ActivityKind.Transfer).item
+        assertEquals(TransferDirection.OUTGOING, retry.direction)
+        assertEquals(TransferStatus.RETRY_REQUIRED, retry.status)
+        assertFalse(retry.verified)
+
+        s = apply(
+            s,
+            ActivityEvent.TransferProgressed(
+                fileId = "f_picker",
+                filename = "replacement.bin",
+                direction = TransferDirection.OUTGOING,
+                completedBytes = 1024,
+                totalBytes = 2048,
+                completedChunks = 1,
+                totalChunks = 2,
+                complete = false,
+                atMillis = 20,
+            ),
+        )
+        assertEquals(1, s.feed.items.size)
+        val resumed = (s.feed.items.single().kind as ActivityKind.Transfer).item
+        assertEquals(TransferStatus.ACTIVE, resumed.status)
+        assertEquals(1024, resumed.completedBytes)
+    }
+
+    @Test
     fun transferCancelledForUnknownFileIsIgnored() {
         val s = apply(HyphenUiState(), ActivityEvent.TransferCancelled("f_missing", 10))
         assertTrue(s.feed.items.isEmpty())

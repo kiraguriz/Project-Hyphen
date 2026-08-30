@@ -48,6 +48,14 @@
     <string name="transfer_received">%1$s · Received</string>
     <string name="transfer_sent">%1$s · Sent</string>
     <string name="transfer_cancelled">Cancelled</string>
+    <string name="transfer_resuming">Resuming · %1$s / %2$s</string>
+    <string name="transfer_save_retry_required">Verified; saving failed and can be retried safely</string>
+    <string name="transfer_source_reselection_required">Source access ended; reselect the same file</string>
+    <string name="transfer_cancel_item">Cancel this file</string>
+    <string name="transfer_retry_save_action">Retry saving</string>
+    <string name="transfer_retry_source_title">The previous send was stopped by the system</string>
+    <string name="transfer_retry_source_detail">Hyphen does not retain background access to your selected file. Reselect it to retry.</string>
+    <string name="transfer_retry_source_action">Reselect file</string>
 
     <!-- Text / link rows -->
     <string name="text_link_sent">Link sent to the Mac</string>
@@ -98,6 +106,10 @@
     <string name="notif_btn_off">Enable notification mirror</string>
     <string name="notif_btn_check">Check notification access</string>
     <string name="notif_btn_privacy">Notification privacy: %1$s</string>
+    <string name="privacy_status_format">%1$s · %2$s</string>
+    <string name="privacy_sync_pending">Waiting for Mac policy</string>
+    <string name="privacy_sync_applied">Mac policy applied</string>
+    <string name="privacy_sync_local_floor">Phone privacy floor</string>
     <string name="privacy_full">Full</string>
     <string name="privacy_hide_body">Hide content</string>
     <string name="privacy_exists_only">Existence only</string>
@@ -214,4 +226,7 @@
     <string name="dlg_transfer_notification_title">Show transfer status?</string>
     <string name="dlg_transfer_notification_msg">Choosing a file temporarily leaves Hyphen. To avoid a hidden background link, Hyphen first enables the visible companion-link notification and shows a dataSync notification while sending. The companion link stays on until you disconnect from the notification or this screen.</string>
     <string name="dlg_transfer_notification_continue">Allow and choose file</string>
+    <string name="dlg_privacy_floor_title">Phone privacy floor</string>
+    <string name="dlg_privacy_floor_msg">The Mac may choose a stricter mode for an app, but it cannot loosen this setting. Notification history is not stored.</string>
+    <string name="dlg_privacy_apply">Apply</string>
 </resources>

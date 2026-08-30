@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyphen.dev/protocol/v0/notification-privacy-policy.schema.json",
+  "title": "Hyphen protocol v0 notification.privacy.policy payload",
+  "description": "Validates the Mac-to-Android source-side notification privacy policy (protocol section 7.1.1).",
+  "type": "object",
+  "required": ["defaultMode"],
+  "additionalProperties": false,
+  "properties": {
+    "mirroringEnabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "When false Android removes previously mirrored rows and suppresses new posted, updated, and snapshot payloads. Omission is true for older senders."
+    },
+    "defaultMode": {
+      "enum": ["full", "hideBody", "existsOnly"]
+    },
+    "perPackageModes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["packageName", "mode"],
+        "additionalProperties": false,
+        "properties": {
+          "packageName": {
+            "type": "string",
+            "pattern": "^(?=.*[^\\s]).+$"
+          },
+          "mode": {
+            "enum": ["full", "hideBody", "existsOnly"]
+          }
+        }
+      }
+    }
+  }
+}

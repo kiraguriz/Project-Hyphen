@@ -91,6 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // instead of recomputing from UserDefaults per mirrored notification.
     private let privacyPolicyLock = NSLock()
     private var cachedNotificationPrivacyPolicy = NotificationPrivacyPolicy.allowAll
+    // Process-only inventory: package names appear after a real notification is
+    // observed. Only explicit privacy choices are persisted in UserDefaults.
+    private var observedNotificationPackages: Set<String> = []
+    private var notificationPrivacySyncState: NotificationPrivacySyncState = .offline
     // Outside-click dismissal for the popover. A global monitor only sees events
     // routed to *other* apps, so a click on the status button never reaches it —
     // which is exactly why this avoids the `.transient` race where the button
@@ -199,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sleepWakeObserver = observer
 
         let controller = ensurePairingController()
+        controller.applyLocalNotificationPrivacyPolicy()
         if controller.restorePersistedLink() {
             lnpGate.run(action: {
                 controller.requestReconnect()
@@ -304,6 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func settingsView(onClose: @escaping () -> Void) -> SettingsWindowView {
         let peer = currentTrustedPeer()
         return SettingsWindowView(
+            activityModel: appModel,
             selection: settingsSelection,
             mirroringEnabled: notificationMirroringEnabled(),
             rows: notificationPrivacyRows(),
@@ -314,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fallback: L("settings.diag.previewUnavailable"),
                 generate: { try diagnosticsExporter().previewJSON() }
             ),
+            privacySyncState: notificationPrivacySyncState,
             includeTraceIds: betaDiagnosticsEnabled(),
             onClose: onClose,
             onRevokeTrust: { [weak self] in
@@ -332,6 +339,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onRequestTraceIds: { [weak self] desired in self?.setBetaDiagnosticsWithConsent(desired) ?? false },
             onNotificationPrivacyChange: { [weak self] enabled, defaultMode, rows in
                 self?.setNotificationPrivacy(mirroringEnabled: enabled, defaultMode: defaultMode, rows: rows)
+            },
+            onCancelTransfer: { [weak self] fileId in
+                self?.pairingController?.cancelTransfer(fileId: fileId)
+            },
+            onRetryTransferSave: { [weak self] fileId in
+                self?.pairingController?.retryIncomingTransferDelivery(fileId: fileId)
             },
             onSelectionChange: { [weak self] section in self?.settingsSelection = section }
         )
@@ -392,14 +405,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func notificationPrivacyRows() -> [SettingsAppPrivacyRow] {
-        let storedModes = storedPerPackageModes()
-        return SettingsAppPrivacyRow.defaults.map { row in
-            var row = row
-            if let mode = storedModes[row.packageName] {
-                row.mode = mode
-            }
-            return row
-        }
+        NotificationPrivacyCatalog.rows(
+            observedPackages: observedNotificationPackages,
+            storedModes: storedPerPackageModes(),
+            defaultMode: notificationDefaultMode()
+        )
     }
 
     private func setNotificationPrivacy(
@@ -409,9 +419,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         UserDefaults.standard.set(mirroringEnabled, forKey: Self.notificationMirroringEnabledKey)
         UserDefaults.standard.set(defaultMode.rawValue, forKey: Self.notificationDefaultModeKey)
-        let modes = Dictionary(uniqueKeysWithValues: rows.map { ($0.packageName, $0.mode.rawValue) })
+        let modes = Dictionary(
+            uniqueKeysWithValues: rows
+                .filter(\.isExplicit)
+                .map { ($0.packageName, $0.mode.rawValue) }
+        )
         UserDefaults.standard.set(modes, forKey: Self.notificationPerPackageModesKey)
         rebuildNotificationPrivacyCache()
+        pairingController?.applyLocalNotificationPrivacyPolicy()
         // Push the edited policy to a paired Android peer for source-side
         // filtering (no-op unless a session is active and privacyPolicy was
         // negotiated). The macOS receiver scrubber already uses the new cache.
@@ -548,6 +563,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             diagnosticLogs: diagnosticLogs,
             notificationPrivacyPolicy: { [weak self] in
                 self?.notificationPrivacyPolicy() ?? .allowAll
+            },
+            onNotificationPackageObserved: { [weak self] packageName in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.observedNotificationPackages.insert(packageName).inserted else { return }
+                    self.refreshSettingsWindow()
+                }
+            },
+            onNotificationPrivacySync: { [weak self] state in
+                DispatchQueue.main.async {
+                    guard let self, self.notificationPrivacySyncState != state else { return }
+                    self.notificationPrivacySyncState = state
+                    self.refreshSettingsWindow()
+                }
             },
             onActivity: { [weak self] event in
                 // A confirmed pairing writes a new trusted peer just before the

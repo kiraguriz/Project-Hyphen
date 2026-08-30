@@ -111,6 +111,34 @@ final class SessionCallbackOwnershipGate {
     }
 }
 
+/// Multi-transfer replacement for the former single "last progress" slot.
+/// Recency is retained only among transfers that are still incomplete.
+struct ActiveTransferIndex {
+    private var progressByFileId: [String: TransferProgress] = [:]
+    private var recency: [String] = []
+
+    mutating func record(_ progress: TransferProgress) {
+        remove(fileId: progress.fileId)
+        guard !progress.isComplete else { return }
+        progressByFileId[progress.fileId] = progress
+        recency.append(progress.fileId)
+    }
+
+    mutating func remove(fileId: String) {
+        progressByFileId.removeValue(forKey: fileId)
+        recency.removeAll { $0 == fileId }
+    }
+
+    mutating func removeAll() {
+        progressByFileId.removeAll()
+        recency.removeAll()
+    }
+
+    var preferredFileId: String? {
+        recency.reversed().first { progressByFileId[$0] != nil }
+    }
+}
+
 /// Mac side of the SAS pairing flow (HYP-M2-011, protocol v0 §5):
 /// shows the QR (HYP-M2-009), accepts ONE provisional TLS connection —
 /// any client certificate is admitted but its SPKI fingerprint is
@@ -159,7 +187,9 @@ final class PairingController: NSObject {
     private var peerLinkGeneration: UInt64 = 0
     private var pendingSteadyConnections: [ObjectIdentifier: PendingSteadyConnection] = [:]
     private let textReceiver = TextLinkReceiver()
-    private var lastTransferProgress: TransferProgress?
+    private var activeTransfers = ActiveTransferIndex()
+    private var notificationPrivacySyncTracker = NotificationPrivacySyncTracker()
+    private let notificationPrivacyPolicySendQueue = NotificationPrivacyPolicySendQueue()
     private lazy var transferReceiver = TransferReceiver(
         storage: FileTransferStorage(
             root: FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -171,6 +201,9 @@ final class PairingController: NSObject {
             }
         ),
         checkpointStore: transferCheckpointStore,
+        onRestored: { [weak self] progress in
+            self?.recordIncomingTransferRestored(progress)
+        },
         onProgress: { [weak self] progress in
             self?.recordIncomingTransferProgress(progress)
         }
@@ -186,6 +219,9 @@ final class PairingController: NSObject {
         },
         onRemove: { [weak self] identifier in
             self?.emitActivity(.notificationRemoved(identifier: identifier, at: Date()))
+        },
+        onRemoveAll: { [weak self] in
+            self?.emitActivity(.notificationsCleared(at: Date()))
         }
     )
     private lazy var notificationReceiver = NotificationMirrorReceiver(
@@ -195,6 +231,9 @@ final class PairingController: NSObject {
         },
         privacyPolicy: { [weak self] in
             self?.notificationPrivacyPolicy() ?? .allowAll
+        },
+        onPackageObserved: { [weak self] packageName in
+            self?.onNotificationPackageObserved(packageName)
         }
     )
     private let diagnosticLogs: LocalStructuredLogStore
@@ -204,6 +243,8 @@ final class PairingController: NSObject {
     private let onStatus: (String) -> Void
     private let onActivity: (ActivityEvent) -> Void
     private let notificationPrivacyPolicy: () -> NotificationPrivacyPolicy
+    private let onNotificationPackageObserved: (String) -> Void
+    private let onNotificationPrivacySync: (NotificationPrivacySyncState) -> Void
 
     init(
         diagnosticLogs: LocalStructuredLogStore = LocalStructuredLogStore(),
@@ -237,6 +278,8 @@ final class PairingController: NSObject {
             )
         },
         notificationPrivacyPolicy: @escaping () -> NotificationPrivacyPolicy = { .allowAll },
+        onNotificationPackageObserved: @escaping (String) -> Void = { _ in },
+        onNotificationPrivacySync: @escaping (NotificationPrivacySyncState) -> Void = { _ in },
         onActivity: @escaping (ActivityEvent) -> Void = { _ in },
         onStatus: @escaping (String) -> Void
     ) {
@@ -246,6 +289,8 @@ final class PairingController: NSObject {
         self.reconnectListenerFactory = reconnectListenerFactory
         self.steadyHandshakeResponder = steadyHandshakeResponder
         self.notificationPrivacyPolicy = notificationPrivacyPolicy
+        self.onNotificationPackageObserved = onNotificationPackageObserved
+        self.onNotificationPrivacySync = onNotificationPrivacySync
         self.onActivity = onActivity
         self.onStatus = onStatus
     }
@@ -379,7 +424,12 @@ final class PairingController: NSObject {
         activeSession = nil
         activeSessionToken = nil
         activeSessionOwnership = nil
-        lastTransferProgress = nil
+        activeCapabilities = nil
+        activeTransferSender?.recycleSession()
+        activeTransferSender = nil
+        transferReceiver.recycleSession()
+        activeTransfers.removeAll()
+        markNotificationPrivacyOffline()
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
         pairingAttemptID = nil
@@ -545,8 +595,9 @@ final class PairingController: NSObject {
         activeCapabilities = nil
         activeTransferSender?.recycleSession()
         activeTransferSender = nil
-        lastTransferProgress = nil
+        activeTransfers.removeAll()
         transferReceiver.recycleSession()
+        markNotificationPrivacyOffline()
         notificationPresenter.setDismissHandler(nil)
         notificationPresenter.setReplyHandler(nil)
         onStatus("Session stopped after trust change")
@@ -904,6 +955,9 @@ final class PairingController: NSObject {
                         _ = self.withCurrentSession(sessionOwnership) {
                             // Advances the outbound transfer window (chunk acks).
                             try? self.activeTransferSender?.handleAck(messageId)
+                            self.handleNotificationPrivacySendResult(
+                                self.notificationPrivacyPolicySendQueue.capacityAvailable()
+                            )
                         }
                     }
                 }
@@ -912,6 +966,9 @@ final class PairingController: NSObject {
                         guard let self else { return }
                         _ = self.withCurrentSession(sessionOwnership) {
                             self.activeTransferSender?.handleAckTimeout(messageId)
+                            self.handleNotificationPrivacySendResult(
+                                self.notificationPrivacyPolicySendQueue.capacityAvailable()
+                            )
                         }
                     }
                 }
@@ -925,11 +982,12 @@ final class PairingController: NSObject {
                             self.activeSessionOwnership = nil
                             self.activeCapabilities = nil
                             self.activeTransferSender = nil
-                            self.lastTransferProgress = nil
+                            self.activeTransfers.removeAll()
                             self.transferReceiver.recycleSession()
                             self.notificationPresenter.setDismissHandler(nil)
                             self.notificationPresenter.setReplyHandler(nil)
                             self.reconnectSessionActive = false
+                            self.markNotificationPrivacyOffline()
                         }
                         guard accepted else { return }
                         self.onStatus("Phone session closed")
@@ -969,6 +1027,9 @@ final class PairingController: NSObject {
                             self.activeTransferSender?.recycleSession()
                             self.activeSession?.stop()
                             self.activeSession = session
+                            self.notificationPrivacyPolicySendQueue.activate(
+                                outbox: ProtocolSessionNotificationDismissOutbox(session: session)
+                            )
                             self.activeSessionToken = sessionOwnership.token
                             self.activeSessionOwnership = sessionOwnership
                             self.activeCapabilities = handshake.negotiatedCapabilities
@@ -976,11 +1037,25 @@ final class PairingController: NSObject {
                                 outbox: ProtocolSessionTransferOutbox(session: session),
                                 negotiatedCapabilities: handshake.negotiatedCapabilities,
                                 checkpointStore: self.transferCheckpointStore,
+                                onRestored: { [weak self] progress in
+                                    DispatchQueue.main.async {
+                                        guard let self else { return }
+                                        _ = self.withCurrentSession(sessionOwnership) {
+                                            self.activeTransfers.record(progress)
+                                            self.onStatus("transfer resume restored: \(progress.fileId)")
+                                            self.onActivity(.transferResuming(
+                                                progress,
+                                                direction: .outgoing,
+                                                at: Date()
+                                            ))
+                                        }
+                                    }
+                                },
                                 onProgress: { [weak self] progress in
                                     DispatchQueue.main.async {
                                         guard let self else { return }
                                         _ = self.withCurrentSession(sessionOwnership) {
-                                            self.lastTransferProgress = progress
+                                            self.activeTransfers.record(progress)
                                             self.onStatus(Self.transferProgressLine(progress))
                                             self.onActivity(.transferProgress(
                                                 progress,
@@ -1028,15 +1103,17 @@ final class PairingController: NSObject {
                         // Push the current per-app privacy policy so Android filters
                         // content source-side from the start of the session.
                         self.syncNotificationPrivacyPolicy()
+                        self.activeTransferSender?.bindSession(
+                            peerFingerprint: peerFingerprint,
+                            sessionId: handshake.sessionId
+                        )
+                        // Receiver restoration emits resume requests immediately;
+                        // bind the sender to this session before those callbacks.
                         let pendingDeliveries = self.transferReceiver.bindSession(
                             peerFingerprint: peerFingerprint,
                             sessionId: handshake.sessionId
                         )
                         pendingDeliveries.forEach { self.handleCompletedIncomingTransfer($0) }
-                        self.activeTransferSender?.bindSession(
-                            peerFingerprint: peerFingerprint,
-                            sessionId: handshake.sessionId
-                        )
                         self.onStatus("Connected to \(name)")
                         self.onActivity(.peerChanged(isPaired: true, peerName: name))
                         self.onActivity(.connectionStateChanged(.connected, latencyMs: nil))
@@ -1083,7 +1160,8 @@ final class PairingController: NSObject {
         activeCapabilities = nil
         let previousTransferSender = activeTransferSender
         activeTransferSender = nil
-        lastTransferProgress = nil
+        activeTransfers.removeAll()
+        markNotificationPrivacyOffline()
         peerLinkGeneration &+= 1
         // Enter a generation-owned transition before replacing the durable
         // route. Old callbacks are already invalidated, while the new peer is
@@ -1168,6 +1246,14 @@ final class PairingController: NSObject {
     }
 
     private func recordIncomingTransferProgress(_ progress: TransferProgress) {
+        recordIncomingTransfer(progress, restored: false)
+    }
+
+    private func recordIncomingTransferRestored(_ progress: TransferProgress) {
+        recordIncomingTransfer(progress, restored: true)
+    }
+
+    private func recordIncomingTransfer(_ progress: TransferProgress, restored: Bool) {
         reconnectLock.lock()
         let ownership = activeSessionOwnership
         reconnectLock.unlock()
@@ -1175,9 +1261,14 @@ final class PairingController: NSObject {
         let apply = { [weak self] in
             guard let self else { return }
             _ = self.withCurrentSession(ownership) {
-                self.lastTransferProgress = progress
-                self.onStatus(Self.transferProgressLine(progress))
-                self.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
+                self.activeTransfers.record(progress)
+                if restored {
+                    self.onStatus("inbound transfer checkpoint restored: \(progress.fileId)")
+                    self.onActivity(.transferResuming(progress, direction: .incoming, at: Date()))
+                } else {
+                    self.onStatus(Self.transferProgressLine(progress))
+                    self.onActivity(.transferProgress(progress, direction: .incoming, at: Date()))
+                }
             }
         }
         if Thread.isMainThread {
@@ -1247,14 +1338,24 @@ final class PairingController: NSObject {
     /// Push the current per-app notification privacy policy to the paired
     /// Android peer so it can filter content source-side. No-op unless a session
     /// is active and both peers negotiated `notifications.v1.privacyPolicy`.
+    func applyLocalNotificationPrivacyPolicy() {
+        notificationReceiver.applyPrivacyPolicy(notificationPrivacyPolicy())
+    }
+
     func syncNotificationPrivacyPolicy() {
-        guard let session = activeSession,
-              activeCapabilities?.notificationPrivacyPolicyEnabled == true else {
+        guard activeSession != nil else {
+            markNotificationPrivacyOffline()
             return
         }
-        _ = NotificationPrivacyPolicySender(
-            outbox: ProtocolSessionNotificationDismissOutbox(session: session)
-        ).send(policy: notificationPrivacyPolicy())
+        guard activeCapabilities?.notificationPrivacyPolicyEnabled == true else {
+            notificationPrivacyPolicySendQueue.retire()
+            notificationPrivacySyncTracker.markUnsupported()
+            onNotificationPrivacySync(notificationPrivacySyncTracker.state)
+            return
+        }
+        handleNotificationPrivacySendResult(
+            notificationPrivacyPolicySendQueue.offer(notificationPrivacyPolicy())
+        )
     }
 
     func sendTextLink(raw: String) {
@@ -1398,6 +1499,10 @@ final class PairingController: NSObject {
                     }
                     return
                 }
+                if envelope.type == TransferProtocol.typeCancel {
+                    let cancel = try TransferCancel(payload: envelope.payload)
+                    _ = activeTransferSender?.handleRemoteCancel(cancel)
+                }
                 switch try transferReceiver.handle(envelope) {
                 case .completed(let completed):
                     handleCompletedIncomingTransfer(completed)
@@ -1412,7 +1517,7 @@ final class PairingController: NSObject {
                             ?? "transfer resume info queued: \(info.fileId)"
                     )
                 case .cancelled(let cancel):
-                    lastTransferProgress = nil
+                    activeTransfers.remove(fileId: cancel.fileId)
                     onStatus("transfer cancelled: \(cancel.fileId)")
                     onActivity(.transferCancelled(fileId: cancel.fileId, at: Date()))
                 case .ignored:
@@ -1465,7 +1570,8 @@ final class PairingController: NSObject {
              NotificationMirrorProtocol.typeUpdated,
              NotificationMirrorProtocol.typeRemoved,
              NotificationMirrorProtocol.typeDismissResult,
-             NotificationMirrorProtocol.typeReplyResult:
+             NotificationMirrorProtocol.typeReplyResult,
+             NotificationMirrorProtocol.typePrivacyResult:
             return NotificationMirrorProtocol.capability
         case TransferProtocol.typeManifest,
              TransferProtocol.typeChunk,
@@ -1524,26 +1630,78 @@ final class PairingController: NSObject {
             } else {
                 onStatus("Android notification reply failed: \(errorCode ?? "unknown")")
             }
+        case .privacyPolicyApplied(let regarding, let localFloor):
+            guard notificationPrivacySyncTracker.applyResult(
+                regarding: regarding,
+                localFloor: localFloor
+            ) else {
+                onStatus("stale notification privacy result ignored")
+                return
+            }
+            onNotificationPrivacySync(notificationPrivacySyncTracker.state)
+            onStatus("Android notification privacy policy applied; local floor: \(localFloor.rawValue)")
         }
     }
 
+    private func markNotificationPrivacyOffline() {
+        notificationPrivacyPolicySendQueue.retire()
+        notificationPrivacySyncTracker.markOffline()
+        onNotificationPrivacySync(notificationPrivacySyncTracker.state)
+    }
+
+    private func handleNotificationPrivacySendResult(_ result: NotificationPrivacyPolicySendResult) {
+        switch result {
+        case .idle:
+            return
+        case .queued:
+            notificationPrivacySyncTracker.markQueued()
+        case .sent(let messageId):
+            notificationPrivacySyncTracker.markPending(messageId: messageId)
+        }
+        onNotificationPrivacySync(notificationPrivacySyncTracker.state)
+    }
+
     func cancelActiveTransfer() {
-        guard let progress = lastTransferProgress, !progress.isComplete else {
+        guard let fileId = activeTransfers.preferredFileId else {
             onStatus("transfer cancel: no active transfer")
             return
         }
-        guard let sender = activeTransferSender else {
-            onStatus("transfer cancel: no active Android session")
-            return
-        }
+        cancelTransfer(fileId: fileId)
+    }
+
+    func cancelTransfer(fileId: String) {
+        let checkpoint = transferCheckpointStore.load(fileId: fileId)
+        let senderOwnsTransfer = activeTransferSender?.containsTransfer(fileId: fileId) == true
+        let inbound = checkpoint?.direction == .inbound || transferReceiver.pendingDelivery(fileId: fileId) != nil
         do {
-            let id = try sender.cancel(fileId: progress.fileId, discard: true)
-            lastTransferProgress = nil
-            onStatus("transfer cancel sent: \(id ?? "session closed")")
-            onActivity(.transferCancelled(fileId: progress.fileId, at: Date()))
+            let id: String?
+            if senderOwnsTransfer, let sender = activeTransferSender {
+                id = try sender.cancel(fileId: fileId, discard: true)
+            } else if inbound || checkpoint == nil {
+                let cancelled = transferReceiver.cancelLocal(fileId: fileId, discard: true)
+                guard cancelled || checkpoint != nil else {
+                    onStatus("transfer cancel: unknown file \(fileId)")
+                    return
+                }
+                id = try activeTransferSender?.sendCancel(TransferCancel(fileId: fileId, discard: true))
+            } else {
+                transferCheckpointStore.delete(fileId: fileId)
+                id = try activeTransferSender?.sendCancel(TransferCancel(fileId: fileId, discard: true))
+            }
+            activeTransfers.remove(fileId: fileId)
+            onStatus("transfer cancel \(id.map { "sent: \($0)" } ?? "recorded locally")")
+            onActivity(.transferCancelled(fileId: fileId, at: Date()))
         } catch {
             onStatus("transfer cancel failed: \(error)")
         }
+    }
+
+    func retryIncomingTransferDelivery(fileId: String) {
+        guard let completed = transferReceiver.pendingDelivery(fileId: fileId) else {
+            onStatus("transfer save retry unavailable: \(fileId)")
+            return
+        }
+        handleCompletedIncomingTransfer(completed)
     }
 
     private func deliverIncomingFile(_ completed: TransferCompleted) throws -> URL {
@@ -1564,7 +1722,7 @@ final class PairingController: NSObject {
         do {
             let delivered = try deliverIncomingFile(completed)
             transferReceiver.markDeliverySucceeded(fileId: completed.manifest.fileId)
-            lastTransferProgress = nil
+            activeTransfers.remove(fileId: completed.manifest.fileId)
             onStatus(
                 "transfer received: \(completed.manifest.filename) " +
                     "(\(completed.manifest.sizeBytes) bytes) -> \(delivered.lastPathComponent)"
@@ -1579,8 +1737,14 @@ final class PairingController: NSObject {
             ))
         } catch {
             transferReceiver.markDeliveryFailed(fileId: completed.manifest.fileId)
-            lastTransferProgress = nil
+            activeTransfers.remove(fileId: completed.manifest.fileId)
             onStatus("transfer received but save failed; verified source queued for retry: \(error)")
+            onActivity(.transferDeliveryFailed(
+                fileId: completed.manifest.fileId,
+                filename: completed.manifest.filename,
+                sizeBytes: completed.manifest.sizeBytes,
+                at: Date()
+            ))
         }
     }
 

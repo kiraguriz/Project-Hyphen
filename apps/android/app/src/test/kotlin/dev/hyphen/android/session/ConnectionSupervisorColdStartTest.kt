@@ -8,7 +8,13 @@ import dev.hyphen.android.transport.SessionHandshake
 import dev.hyphen.android.transport.SessionReconnector
 import dev.hyphen.android.transfer.StreamTransferByteSource
 import dev.hyphen.android.transfer.TransferOutbox
+import dev.hyphen.android.transfer.TransferManifest
+import dev.hyphen.android.transfer.TransferReceiver
+import dev.hyphen.android.transfer.FileTransferStorage
+import dev.hyphen.android.notifications.NotificationPrivacyMode
+import dev.hyphen.android.transport.Envelope
 import dev.hyphen.android.transfer.TransferSender
+import dev.hyphen.android.transfer.OutboundTransferRetirement
 import dev.hyphen.android.trust.TrustedPeer
 import dev.hyphen.android.ui.ActivityEvent
 import dev.hyphen.android.ui.ConnectionState
@@ -24,6 +30,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 
 private class FakePeerLinkLifecycle(
     var restored: RestoredPeerLink? = null,
@@ -91,11 +99,324 @@ private class BlockingRememberPeerLinkLifecycle : PeerLinkLifecycle {
 }
 
 class ConnectionSupervisorColdStartTest {
+    @get:Rule
+    val temp = TemporaryFolder()
     private val fingerprint = ByteArray(32) { 0x31 }
     private val restored = RestoredPeerLink(
         endpoint = ParsedEndpoint.Manual("192.168.1.31", 43123),
         peer = TrustedPeer(fingerprint, "Studio Mac", 123L),
     )
+
+    @Test
+    fun `raw envelope has one process owner and ordinary observers receive no raw callback`() {
+        val handled = AtomicInteger()
+        val epoch = ProtocolSessionEpoch.of(1)
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            protocolOwnerFactory = {
+                object : ProtocolEnvelopeOwner {
+                    override fun handleEnvelope(epoch: ProtocolSessionEpoch, envelope: Envelope) {
+                        handled.incrementAndGet()
+                    }
+                }
+            },
+        )
+        repeat(2) { supervisor.addListener(object : ConnectionSupervisor.Listener {}) }
+
+        supervisor.dispatchProtocolEnvelopeForTest(
+            epoch,
+            Envelope(
+                messageId = "m_one", sessionId = "s_one", type = "plugin.test",
+                capability = "text.v1", seq = 2, sentAtUnixMs = 1,
+                requiresAck = true, payload = Json.Obj.EMPTY,
+            ),
+        )
+
+        assertEquals(1, handled.get())
+    }
+
+    @Test
+    fun `transfer completed without Activity replays when observer attaches`() {
+        lateinit var owner: DefaultProtocolEnvelopeOwner
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            protocolOwnerFactory = { events ->
+                owner = DefaultProtocolEnvelopeOwner(
+                    TransferReceiver(FileTransferStorage(temp.newFolder("owner-replay"))),
+                    deliverIncoming = { it.file },
+                    notificationRuntime = object : NotificationRuntimeFacade {
+                        override fun setPrivacyPolicy(policy: dev.hyphen.android.notifications.NotificationPrivacyPolicy) = Unit
+                        override fun localPrivacyFloor() = NotificationPrivacyMode.SHOW_FULL
+                        override fun canceller() = dev.hyphen.android.notifications.NotificationCanceller { false }
+                        override fun isActive(sbnKey: String) = false
+                        override fun replier() = dev.hyphen.android.notifications.NotificationReplier { _, _, _, _ ->
+                            dev.hyphen.android.notifications.NotificationReplyAttempt.Failed("unavailable")
+                        }
+                    },
+                    events = events,
+                )
+                owner
+            },
+        )
+        val epoch = ProtocolSessionEpoch.of(22)
+        assertTrue(supervisor.rememberEndpoint(restored.endpoint, fingerprint))
+        owner.activate(
+            ProtocolOwnerSession(
+                epoch,
+                SessionHandshake.NegotiatedCapabilities.advertised(),
+                null,
+                ByteArray(32) { 2 },
+                "s_replay",
+            ) { _, _, _, _ -> "sent" },
+        )
+        val emptySha = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(ByteArray(0)).joinToString("") { "%02x".format(it) }
+        val manifest = TransferManifest(
+            "f_replay_done",
+            "done.bin",
+            0,
+            "application/octet-stream",
+            emptySha,
+            1024,
+            0,
+        )
+        owner.handleEnvelope(
+            epoch,
+            Envelope(
+                messageId = "manifest-replay",
+                sessionId = "s_replay",
+                type = dev.hyphen.android.transfer.TransferProtocol.TYPE_MANIFEST,
+                capability = dev.hyphen.android.transfer.TransferProtocol.CAPABILITY,
+                seq = 2,
+                sentAtUnixMs = 1,
+                requiresAck = true,
+                payload = manifest.toJson(),
+            ),
+        )
+        val replayed = mutableListOf<ActivityEvent>()
+
+        supervisor.replayStateTo(object : ConnectionSupervisor.Listener {
+            override fun onActivityEvent(event: ActivityEvent) { replayed += event }
+        })
+
+        assertTrue(replayed.any { it is ActivityEvent.TransferCompleted && it.fileId == manifest.fileId })
+
+        supervisor.stopAfterTrustChange()
+        assertTrue(supervisor.rememberEndpoint(ParsedEndpoint.Manual("192.168.1.99", 49999), ByteArray(32) { 9 }))
+        val afterPeerChange = mutableListOf<ActivityEvent>()
+        supervisor.replayStateTo(object : ConnectionSupervisor.Listener {
+            override fun onActivityEvent(event: ActivityEvent) { afterPeerChange += event }
+        })
+        assertFalse(afterPeerChange.any { it is ActivityEvent.TransferCompleted })
+    }
+
+    @Test
+    fun `cold start applies persisted notification floor before any Activity`() {
+        var applied = NotificationPrivacyMode.SHOW_FULL
+
+        initializeNotificationPrivacyFloor(
+            load = { NotificationPrivacyMode.EXISTS_ONLY },
+            apply = { applied = it },
+        )
+
+        assertEquals(NotificationPrivacyMode.EXISTS_ONLY, applied)
+    }
+
+    @Test
+    fun `non durable retirement replays retry and successful reselection clears foreground marker`() {
+        val states = mutableListOf<Boolean>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            onOutboundReselectStateChanged = states::add,
+        )
+        assertTrue(supervisor.rememberEndpoint(restored.endpoint, fingerprint))
+        val generation = supervisor.currentPeerGenerationForTest()
+        val interruptedBytes = ByteArray(2048) { (it % 251).toByte() }
+        val interrupted = OutboundTransferRetirement(
+            fileId = "f_picker_retry",
+            filename = "picker.bin",
+            sizeBytes = interruptedBytes.size.toLong(),
+            mimeType = "application/octet-stream",
+            sha256 = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(interruptedBytes).joinToString("") { "%02x".format(it) },
+            chunkSizeBytes = 1024,
+            requiresSourceReselection = true,
+        )
+        supervisor.acceptOutboundRetirementsForTest(
+            listOf(interrupted),
+            generation,
+            fingerprint,
+        )
+        val replayed = mutableListOf<ActivityEvent>()
+        var retryRequired = false
+        supervisor.replayStateTo(object : ConnectionSupervisor.Listener {
+            override fun onActivityEvent(event: ActivityEvent) { replayed += event }
+            override fun onOutboundReselectRequiredChanged(required: Boolean) { retryRequired = required }
+        })
+
+        assertTrue(retryRequired)
+        assertTrue(replayed.any {
+            it is ActivityEvent.TransferSourceReselectionRequired && it.fileId == "f_picker_retry"
+        })
+        assertTrue(supervisor.selectOutboundSourceReselection("f_picker_retry"))
+        val sender = TransferSender(
+            outbox = object : TransferOutbox {
+                override fun send(type: String, capability: String, requiresAck: Boolean, payload: Json.Obj) = "sent"
+            },
+        )
+        sender.sendReselectedSource(
+            retirement = interrupted,
+            source = StreamTransferByteSource(interruptedBytes.size.toLong()) {
+                java.io.ByteArrayInputStream(interruptedBytes)
+            },
+        )
+        ConnectionSupervisor::class.java.getDeclaredField("activeTransferSender").apply {
+            isAccessible = true
+            set(supervisor, sender)
+        }
+
+        assertTrue(supervisor.completeOutboundSourceReselection("f_picker_retry", sender))
+        assertEquals(listOf(true, false), states)
+        assertFalse(supervisor.isOutboundSourceReselectionRequired("f_picker_retry"))
+    }
+
+    @Test
+    fun `stale peer generation cannot publish source reselection into replacement trust`() {
+        val states = mutableListOf<Boolean>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            onOutboundReselectStateChanged = states::add,
+        )
+        assertTrue(supervisor.rememberEndpoint(restored.endpoint, fingerprint))
+        val staleGeneration = supervisor.currentPeerGenerationForTest()
+        val replacement = ByteArray(32) { 0x44 }
+        assertTrue(supervisor.rememberEndpoint(ParsedEndpoint.Manual("192.168.1.44", 44444), replacement))
+
+        supervisor.acceptOutboundRetirementsForTest(
+            listOf(
+                OutboundTransferRetirement(
+                    "f_stale_picker",
+                    "stale.bin",
+                    10,
+                    "application/octet-stream",
+                    "0".repeat(64),
+                    1024,
+                    true,
+                ),
+            ),
+            staleGeneration,
+            fingerprint,
+        )
+
+        assertFalse(supervisor.isOutboundSourceReselectionRequired("f_stale_picker"))
+        assertTrue(states.isEmpty())
+    }
+
+    @Test
+    fun `foreground registration loss preserves remote partial without wire cancel`() {
+        val states = mutableListOf<Boolean>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            onOutboundReselectStateChanged = states::add,
+        )
+        assertTrue(supervisor.rememberEndpoint(restored.endpoint, fingerprint))
+        val generation = supervisor.currentPeerGenerationForTest()
+        val sentTypes = mutableListOf<String>()
+        val sender = TransferSender(
+            outbox = object : TransferOutbox {
+                override fun send(type: String, capability: String, requiresAck: Boolean, payload: Json.Obj): String {
+                    sentTypes += type
+                    return "sent-${sentTypes.size}"
+                }
+            },
+        )
+        sender.sendSource(
+            filename = "picker.bin",
+            mimeType = "application/octet-stream",
+            source = StreamTransferByteSource(2048) {
+                java.io.ByteArrayInputStream(ByteArray(2048) { (it % 251).toByte() })
+            },
+            chunkSizeBytes = 1024,
+            fileId = "f_fgs_registration_loss",
+        )
+        ConnectionSupervisor::class.java.getDeclaredField("activeTransferSender").apply {
+            isAccessible = true
+            set(supervisor, sender)
+        }
+        ConnectionSupervisor::class.java.getDeclaredField("activePeerGeneration").apply {
+            isAccessible = true
+            set(supervisor, generation)
+        }
+
+        supervisor.handleForegroundRegistrationLoss("f_fgs_registration_loss", sender)
+
+        assertEquals(listOf(dev.hyphen.android.transfer.TransferProtocol.TYPE_MANIFEST), sentTypes)
+        assertTrue(supervisor.isOutboundSourceReselectionRequired("f_fgs_registration_loss"))
+        assertEquals(listOf(true), states)
+    }
+
+    @Test
+    fun `foreground cancel winning race clears per-file resume but keeps fresh selection actionable`() {
+        val states = mutableListOf<Boolean>()
+        val supervisor = ConnectionSupervisor(
+            diagnosticLogs = LocalStructuredLogStore(),
+            peerLinkLifecycle = FakePeerLinkLifecycle(),
+            onOutboundReselectStateChanged = states::add,
+        )
+        assertTrue(supervisor.rememberEndpoint(restored.endpoint, fingerprint))
+        val generation = supervisor.currentPeerGenerationForTest()
+        val bytes = ByteArray(2048) { (it % 251).toByte() }
+        val retirement = OutboundTransferRetirement(
+            "f_fgs_cancel_wins",
+            "picker.bin",
+            bytes.size.toLong(),
+            "application/octet-stream",
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) },
+            1024,
+            true,
+        )
+        supervisor.acceptOutboundRetirementsForTest(listOf(retirement), generation, fingerprint)
+        val sentTypes = mutableListOf<String>()
+        val sender = TransferSender(
+            outbox = object : TransferOutbox {
+                override fun send(type: String, capability: String, requiresAck: Boolean, payload: Json.Obj): String {
+                    sentTypes += type
+                    return "sent-${sentTypes.size}"
+                }
+            },
+        )
+        sender.sendReselectedSource(
+            retirement,
+            StreamTransferByteSource(bytes.size.toLong()) { java.io.ByteArrayInputStream(bytes) },
+        )
+        ConnectionSupervisor::class.java.getDeclaredField("activeTransferSender").apply {
+            isAccessible = true
+            set(supervisor, sender)
+        }
+        ConnectionSupervisor::class.java.getDeclaredField("activePeerGeneration").apply {
+            isAccessible = true
+            set(supervisor, generation)
+        }
+
+        assertEquals(listOf("f_fgs_cancel_wins"), supervisor.cancelOutboundTransfersForForegroundStop())
+        supervisor.handleForegroundRegistrationLoss("f_fgs_cancel_wins", sender)
+
+        assertEquals(
+            listOf(
+                dev.hyphen.android.transfer.TransferProtocol.TYPE_MANIFEST,
+                dev.hyphen.android.transfer.TransferProtocol.TYPE_CANCEL,
+            ),
+            sentTypes,
+        )
+        assertFalse(supervisor.isOutboundSourceReselectionRequired("f_fgs_cancel_wins"))
+        assertEquals(listOf(true, false, true), states)
+    }
 
     @Test
     fun `cold restore publishes paired reconnecting state and starts exactly once`() {

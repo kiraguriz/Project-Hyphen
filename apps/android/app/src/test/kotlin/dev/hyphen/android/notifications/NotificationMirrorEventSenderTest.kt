@@ -6,16 +6,21 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 data class SentNotificationEnvelope(
     val type: String,
     val capability: String,
     val requiresAck: Boolean,
     val payload: Json.Obj,
+    val messageId: String = "test-message",
 )
 
-class RecordingNotificationOutbox : NotificationOutbox {
+class RecordingNotificationOutbox(
+    private val uniqueMessageIds: Boolean = false,
+) : NotificationOutbox {
     val envelopes: MutableList<SentNotificationEnvelope> = Collections.synchronizedList(mutableListOf())
+    private val nextMessageId = AtomicInteger(0)
 
     override fun send(
         type: String,
@@ -23,8 +28,13 @@ class RecordingNotificationOutbox : NotificationOutbox {
         requiresAck: Boolean,
         payload: Json.Obj,
     ): String {
-        envelopes += SentNotificationEnvelope(type, capability, requiresAck, payload)
-        return "01JZ0000000000000000000000"
+        val messageId = if (uniqueMessageIds) {
+            "test-message-${nextMessageId.incrementAndGet()}"
+        } else {
+            "01JZ0000000000000000000000"
+        }
+        envelopes += SentNotificationEnvelope(type, capability, requiresAck, payload, messageId)
+        return messageId
     }
 }
 
@@ -168,6 +178,25 @@ class NotificationMirrorEventSenderTest {
         val sent = outbox.envelopes.single()
         assertEquals(Json.Str("Example"), sent.payload["title"])
         assertEquals(Json.Str("full content"), sent.payload["text"])
+    }
+
+    @Test
+    fun `disabling mirroring removes active rows and suppresses notification content`() {
+        val outbox = RecordingNotificationOutbox()
+        val sender = NotificationMirrorEventSender(outbox)
+        val active = payload("0|com.example|7|thread-123|10101", "secret content")
+        sender.sendPostedOrUpdated(active)
+
+        val removals = sender.setPrivacyPolicy(NotificationPrivacyPolicy(isMirroringEnabled = false))
+        removals.forEach(sender::sendRemoved)
+        sender.sendPostedOrUpdated(active.copy(text = "new secret content"))
+
+        assertEquals(
+            listOf(NotificationProtocol.TYPE_POSTED, NotificationProtocol.TYPE_REMOVED),
+            outbox.envelopes.map { it.type },
+        )
+        assertEquals(emptySet<String>(), sender.activeKeys())
+        assertFalse(outbox.envelopes.last().payload.encode().contains("secret"))
     }
 
     @Test

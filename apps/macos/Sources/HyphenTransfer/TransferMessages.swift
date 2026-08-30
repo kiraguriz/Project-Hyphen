@@ -495,12 +495,20 @@ public final class TransferSender {
         let payload: [String: Any]
         let key: String
         let sendAttempts: Int
+        let generation: UInt64
 
-        init(type: String, payload: [String: Any], key: String, sendAttempts: Int = 0) {
+        init(
+            type: String,
+            payload: [String: Any],
+            key: String,
+            sendAttempts: Int = 0,
+            generation: UInt64
+        ) {
             self.type = type
             self.payload = payload
             self.key = key
             self.sendAttempts = sendAttempts
+            self.generation = generation
         }
     }
 
@@ -508,6 +516,7 @@ public final class TransferSender {
     private let outbox: TransferOutbox
     private let negotiatedCapabilities: SessionHandshake.NegotiatedCapabilities?
     private let onProgress: (TransferProgress) -> Void
+    private let onRestored: (TransferProgress) -> Void
     private let outstandingWindow: Int
     private let limits: TransferResourceLimits
     private struct RegisteredTransfer {
@@ -569,7 +578,8 @@ public final class TransferSender {
     private var earlyTimeoutMessageIds: Set<String> = []
     private var pendingControls: [ControlMessage] = []
     private var outstandingControls: [String: ControlMessage] = [:]
-    private var controlSendInFlight = false
+    private var controlSendInFlightGeneration: UInt64?
+    private var nextControlGeneration: UInt64 = 0
     private var frozen = false
     private var sessionBinding: TransferSessionBinding?
     private let checkpointStore: TransferCheckpointStore?
@@ -580,6 +590,7 @@ public final class TransferSender {
         outstandingWindow: Int = 8,
         limits: TransferResourceLimits = TransferResourceLimits(),
         checkpointStore: TransferCheckpointStore? = nil,
+        onRestored: ((TransferProgress) -> Void)? = nil,
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) {
         precondition(outstandingWindow > 0, "outstandingWindow must be positive")
@@ -589,14 +600,21 @@ public final class TransferSender {
         self.limits = limits
         self.checkpointStore = checkpointStore
         self.onProgress = onProgress
+        self.onRestored = onRestored ?? onProgress
     }
 
     public func bindSession(peerFingerprint: Data, sessionId: String) {
         stateLock.lock()
-        defer { stateLock.unlock() }
         sessionBinding = TransferSessionBinding(peerFingerprint: peerFingerprint, sessionId: sessionId)
         checkpointStore?.purgeExpired()
-        restoreOutboundCheckpoints(peerFingerprint: peerFingerprint)
+        let restored = restoreOutboundCheckpoints(peerFingerprint: peerFingerprint)
+        stateLock.unlock()
+        restored.forEach { progress in
+            onRestored(progress)
+            // The sender initiates resume by asking the receiver for its
+            // durable checkpoint, including when no manifest reached it.
+            _ = try? requestResume(fileId: progress.fileId)
+        }
     }
 
     public func invalidatePeerCheckpoints(_ peerFingerprint: Data) {
@@ -758,7 +776,7 @@ public final class TransferSender {
                     sentChunks: active.nextIndex
                 )
             }
-        } else if controlSendInFlight || activeSends.values.contains(where: { $0.sendInFlight }) {
+        } else if controlSendInFlightGeneration != nil || activeSends.values.contains(where: { $0.sendInFlight }) {
             earlyTimeoutMessageIds.remove(messageId)
             if earlyAckMessageIds.count >= 128, let oldest = earlyAckMessageIds.first {
                 earlyAckMessageIds.remove(oldest)
@@ -782,7 +800,7 @@ public final class TransferSender {
             $0.value.manifestMessageId == messageId || $0.value.outstanding[messageId] != nil
         })?.key {
             abortActiveSendLocked(fileId: fileId)
-        } else if controlSendInFlight || activeSends.values.contains(where: { $0.sendInFlight }) {
+        } else if controlSendInFlightGeneration != nil || activeSends.values.contains(where: { $0.sendInFlight }) {
             earlyAckMessageIds.remove(messageId)
             if earlyTimeoutMessageIds.count >= 128, let oldest = earlyTimeoutMessageIds.first {
                 earlyTimeoutMessageIds.remove(oldest)
@@ -797,6 +815,7 @@ public final class TransferSender {
     public func cancel(fileId: String, discard: Bool = false) throws -> String? {
         stateLock.lock()
         defer { stateLock.unlock() }
+        discardControlsLocked(fileId: fileId)
         activeSends.removeValue(forKey: fileId)?.closeStream()
         registered.removeValue(forKey: fileId)
         checkpointStore?.delete(fileId: fileId)
@@ -805,6 +824,45 @@ public final class TransferSender {
             type: TransferProtocol.typeCancel,
             payload: try TransferCancel(fileId: fileId, discard: discard).payload
         )
+    }
+
+    /// Apply a peer-originated cancel locally without echoing another control.
+    @discardableResult
+    public func handleRemoteCancel(_ cancel: TransferCancel) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard registered[cancel.fileId] != nil || activeSends[cancel.fileId] != nil else {
+            return false
+        }
+        discardControlsLocked(fileId: cancel.fileId)
+        activeSends.removeValue(forKey: cancel.fileId)?.closeStream()
+        registered.removeValue(forKey: cancel.fileId)
+        checkpointStore?.delete(fileId: cancel.fileId)
+        recordTombstone(fileId: cancel.fileId, outcome: .cancelled)
+        return true
+    }
+
+    private func discardControlsLocked(fileId: String) {
+        let suffix = ":\(fileId)"
+        pendingControls.removeAll { $0.key.hasSuffix(suffix) }
+        outstandingControls = outstandingControls.filter { !$0.value.key.hasSuffix(suffix) }
+    }
+
+    public func containsTransfer(fileId: String) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return registered[fileId] != nil || activeSends[fileId] != nil
+    }
+
+    public func hasInFlightOutboundTransfers() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return activeSends.values.contains { active in
+            active.manifestPending ||
+                active.manifestMessageId != nil ||
+                active.nextIndex < active.manifest.chunkCount ||
+                !active.outstanding.isEmpty
+        }
     }
 
     /// Clears in-flight outbound state when the transport session ends.
@@ -851,7 +909,13 @@ public final class TransferSender {
 
     private func enqueueControlLocked(type: String, payload: [String: Any]) -> String? {
         let fileId = payload["fileId"] as? String ?? "unknown"
-        let message = ControlMessage(type: type, payload: payload, key: "\(type):\(fileId)")
+        nextControlGeneration += 1
+        let message = ControlMessage(
+            type: type,
+            payload: payload,
+            key: "\(type):\(fileId)",
+            generation: nextControlGeneration
+        )
         if let existing = pendingControls.firstIndex(where: { $0.key == message.key }) {
             pendingControls[existing] = message
             return pumpControlLocked(targetKey: message.key)
@@ -864,17 +928,29 @@ public final class TransferSender {
     }
 
     private func pumpControlLocked(targetKey: String? = nil) -> String? {
-        guard !frozen, !controlSendInFlight, let next = pendingControls.first else { return nil }
-        controlSendInFlight = true
+        guard !frozen, controlSendInFlightGeneration == nil, let next = pendingControls.first else {
+            return nil
+        }
+        controlSendInFlightGeneration = next.generation
         let messageId = sendOutsideLock(type: next.type, payload: next.payload)
-        controlSendInFlight = false
+        controlSendInFlightGeneration = nil
+
+        guard pendingControls.first?.generation == next.generation else {
+            if let messageId {
+                earlyAckMessageIds.remove(messageId)
+                earlyTimeoutMessageIds.remove(messageId)
+            }
+            _ = pumpControlLocked()
+            return nil
+        }
         guard let messageId else { return nil }
         pendingControls.removeFirst()
         let sent = ControlMessage(
             type: next.type,
             payload: next.payload,
             key: next.key,
-            sendAttempts: next.sendAttempts + 1
+            sendAttempts: next.sendAttempts + 1,
+            generation: next.generation
         )
         if earlyTimeoutMessageIds.remove(messageId) != nil {
             if sent.sendAttempts < Self.maxControlSendAttempts {
@@ -1001,6 +1077,7 @@ public final class TransferSender {
     }
 
     private func abortActiveSendLocked(fileId: String) {
+        discardControlsLocked(fileId: fileId)
         let active = activeSends.removeValue(forKey: fileId)
         active?.closeStream()
         registered.removeValue(forKey: fileId)
@@ -1036,10 +1113,10 @@ public final class TransferSender {
         )
     }
 
-    private func restoreOutboundCheckpoints(peerFingerprint: Data) {
-        guard let checkpointStore, let sessionBinding else { return }
+    private func restoreOutboundCheckpoints(peerFingerprint: Data) -> [TransferProgress] {
+        guard let checkpointStore, sessionBinding != nil else { return [] }
+        var restored: [TransferProgress] = []
         for record in checkpointStore.loadActive(for: peerFingerprint, direction: .outbound) {
-            guard record.sessionId == sessionBinding.sessionId else { continue }
             guard let path = record.outboundSourcePath,
                   FileManager.default.fileExists(atPath: path) else {
                 checkpointStore.delete(fileId: record.fileId)
@@ -1051,7 +1128,15 @@ public final class TransferSender {
                 continue
             }
             registered[record.fileId] = RegisteredTransfer(manifest: record.manifest, source: source)
+            if let progress = try? TransferProgress(
+                manifest: record.manifest,
+                completedChunks: record.nextChunkIndex,
+                sentChunks: record.nextChunkIndex
+            ) {
+                restored.append(progress)
+            }
         }
+        return restored
     }
 
     private func outboundRanges(fromChunkIndex: Int, chunkCount: Int) -> [Range<Int>] {
@@ -1125,6 +1210,7 @@ public final class TransferReceiver {
     private let limits: TransferResourceLimits
     private let checkpointStore: TransferCheckpointStore?
     private let onProgress: (TransferProgress) -> Void
+    private let onRestored: (TransferProgress) -> Void
     private let onInboundPayloadSynced: (String) -> Void
     private var frozen = false
     private var sessionBinding: TransferSessionBinding?
@@ -1134,12 +1220,14 @@ public final class TransferReceiver {
         limits: TransferResourceLimits = TransferResourceLimits(),
         checkpointStore: TransferCheckpointStore? = nil,
         onInboundPayloadSynced: @escaping (String) -> Void = { _ in },
+        onRestored: ((TransferProgress) -> Void)? = nil,
         onProgress: @escaping (TransferProgress) -> Void = { _ in }
     ) {
         self.storage = storage
         self.limits = limits
         self.checkpointStore = checkpointStore
         self.onProgress = onProgress
+        self.onRestored = onRestored ?? onProgress
         self.onInboundPayloadSynced = onInboundPayloadSynced
     }
 
@@ -1235,6 +1323,19 @@ public final class TransferReceiver {
         }
     }
 
+    public func pendingDelivery(fileId: String) -> TransferCompleted? {
+        pendingDeliveries[fileId]?.completed
+    }
+
+    /// Cancel one inbound item locally; the controller separately writes the wire control.
+    @discardableResult
+    public func cancelLocal(fileId: String, discard: Bool = true) -> Bool {
+        guard let cancel = try? TransferCancel(fileId: fileId, discard: discard) else {
+            return false
+        }
+        return cancelReceive(cancel)
+    }
+
     /// Drops active partial receives when the transport session ends.
     public func recycleSession() {
         frozen = true
@@ -1302,19 +1403,7 @@ public final class TransferReceiver {
             )
         case TransferProtocol.typeCancel:
             let cancel = try TransferCancel(payload: envelope.payload)
-            let state = states.removeValue(forKey: cancel.fileId)
-            let pending = cancel.discard ? pendingDeliveries.removeValue(forKey: cancel.fileId) : nil
-            state?.close()
-            if cancel.discard {
-                storage.discard(fileId: cancel.fileId)
-                checkpointStore?.delete(fileId: cancel.fileId)
-            }
-            if let manifest = state?.manifest ?? pending?.completed.manifest {
-                recordTombstone(
-                    fileId: cancel.fileId,
-                    tombstone: ReceiverTombstone(manifest: manifest, outcome: .cancelled)
-                )
-            }
+            _ = cancelReceive(cancel)
             return .cancelled(cancel)
         default:
             return .ignored
@@ -1355,6 +1444,25 @@ public final class TransferReceiver {
     @discardableResult
     public func markDeliveryFailed(fileId: String) -> Bool {
         pendingDeliveries[fileId] != nil
+    }
+
+    private func cancelReceive(_ cancel: TransferCancel) -> Bool {
+        let checkpointManifest = checkpointStore?.load(fileId: cancel.fileId)?.manifest
+        let state = states.removeValue(forKey: cancel.fileId)
+        let pending = cancel.discard ? pendingDeliveries.removeValue(forKey: cancel.fileId) : nil
+        state?.close()
+        if cancel.discard {
+            storage.discard(fileId: cancel.fileId)
+            checkpointStore?.delete(fileId: cancel.fileId)
+        }
+        guard let manifest = state?.manifest ?? pending?.completed.manifest ?? checkpointManifest else {
+            return false
+        }
+        recordTombstone(
+            fileId: cancel.fileId,
+            tombstone: ReceiverTombstone(manifest: manifest, outcome: .cancelled)
+        )
+        return true
     }
 
     private func reconcilePendingDeliveriesWithCheckpoints() {
@@ -1425,7 +1533,7 @@ public final class TransferReceiver {
                     ranges: record.receivedRanges
                 )
                 states[record.fileId] = state
-                onProgress(try state.progress())
+                onRestored(try state.progress())
             } catch {
                 checkpointStore.delete(fileId: record.fileId)
                 storage.discard(fileId: record.fileId)

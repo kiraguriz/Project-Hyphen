@@ -141,6 +141,28 @@ final class HyphenAppModelReducerTests: XCTestCase {
         XCTAssertTrue(model.feed.items.isEmpty)
     }
 
+    func testGlobalNotificationClearPreservesNonNotificationActivity() {
+        let model = HyphenAppModel()
+        let request = NotificationPresentationRequest(
+            identifier: AndroidNotificationPayload.identifier(for: "key-private"),
+            sbnKey: "key-private",
+            packageName: "com.example.private",
+            title: "Private",
+            body: "Sensitive",
+            category: nil
+        )
+        model.apply(.notificationPosted(request, at: Date(timeIntervalSince1970: 10)))
+        model.apply(.text(kind: .text, direction: .sent, value: "keep", at: Date(timeIntervalSince1970: 11)))
+
+        model.apply(.notificationsCleared(at: Date(timeIntervalSince1970: 12)))
+
+        XCTAssertEqual(model.feed.items.count, 1)
+        guard case .text(let remaining) = model.feed.items[0].kind else {
+            return XCTFail("expected non-notification activity to remain")
+        }
+        XCTAssertEqual(remaining.value, "keep")
+    }
+
     func testTransferProgressThenCompletedThenCancelled() throws {
         let model = HyphenAppModel()
         let manifest = try TransferManifest(
@@ -183,6 +205,39 @@ final class HyphenAppModelReducerTests: XCTestCase {
         XCTAssertTrue(model.feed.items.isEmpty, "no fabricated row for an unknown transfer")
     }
 
+    func testRestoredTransferAndRetryableDeliveryFailureUpdateTheSameRow() throws {
+        let model = HyphenAppModel()
+        let manifest = try TransferManifest(
+            fileId: "f_resume01",
+            filename: "archive.zip",
+            sizeBytes: 2048,
+            mimeType: "application/zip",
+            sha256: String(repeating: "a", count: 64),
+            chunkSizeBytes: 1024,
+            chunkCount: 2
+        )
+        let progress = try TransferProgress(manifest: manifest, completedChunks: 1)
+
+        model.apply(.transferResuming(progress, direction: .incoming, at: Date(timeIntervalSince1970: 10)))
+        guard case .transfer(let restored) = model.feed.items.single?.kind else {
+            return XCTFail("expected restored transfer")
+        }
+        XCTAssertEqual(restored.status, .resuming)
+
+        model.apply(.transferDeliveryFailed(
+            fileId: manifest.fileId,
+            filename: manifest.filename,
+            sizeBytes: manifest.sizeBytes,
+            at: Date(timeIntervalSince1970: 20)
+        ))
+        XCTAssertEqual(model.feed.items.count, 1)
+        guard case .transfer(let failed) = model.feed.items[0].kind else {
+            return XCTFail("expected failed transfer")
+        }
+        XCTAssertEqual(failed.status, .retryRequired)
+        XCTAssertTrue(failed.verified)
+    }
+
     func testTextEventsAppend() {
         let model = HyphenAppModel()
         model.apply(.text(kind: .url, direction: .sent, value: "https://example.com", at: Date(timeIntervalSince1970: 10)))
@@ -192,4 +247,8 @@ final class HyphenAppModelReducerTests: XCTestCase {
         XCTAssertEqual(newest.value, "hi")
         XCTAssertEqual(newest.direction, .received)
     }
+}
+
+private extension Array {
+    var single: Element? { count == 1 ? first : nil }
 }

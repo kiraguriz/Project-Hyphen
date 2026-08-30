@@ -32,6 +32,16 @@
 "transfer.received" = "%@ · 已接收";
 "transfer.sent" = "%@ · 已发送";
 "transfer.cancelled" = "已取消";
+"transfer.resuming" = "正在恢复";
+"transfer.resuming.detail" = "已恢复 · %@ / %@";
+"transfer.saveRetryRequired" = "已校验，保存失败，可安全重试";
+"transfer.verifiedStaged" = "已校验内容保留在本机";
+"transfer.direction.fromPhone" = "来自手机";
+"transfer.direction.toPhone" = "发送到手机";
+"transfer.action.cancel" = "取消";
+"transfer.action.retrySave" = "重试保存";
+"transfer.panel.title" = "传输";
+"transfer.panel.empty" = "本次运行尚无文件传输。";
 
 /* Text / link rows */
 "text.linkSent" = "链接已发送";
@@ -88,6 +98,12 @@
 "settings.notif.perApp" = "逐应用隐私";
 "settings.notif.otherApps" = "其他应用";
 "settings.notif.otherAppsDetail" = "未单独设置的应用";
+"settings.notif.emptyApps" = "应用会在本次运行首次收到通知后出现；观察到的应用清单不会保存。";
+"settings.notif.sync.offline" = "手机端策略：离线，Mac 本地规则仍生效";
+"settings.notif.sync.unsupported" = "手机端策略：对端不支持，Mac 本地规则仍生效";
+"settings.notif.sync.queued" = "手机端策略：等待连接发送空间…";
+"settings.notif.sync.pending" = "手机端策略：等待确认…";
+"settings.notif.sync.applied" = "手机端策略：已应用 · 手机隐私下限：%@";
 "settings.trust.status" = "已信任 · 指纹已固定";
 "settings.trust.fingerprintLabel" = "指纹 已固定";
 "settings.trust.rename" = "重命名";

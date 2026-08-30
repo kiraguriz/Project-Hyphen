@@ -11,6 +11,13 @@ enum class NotificationPrivacyMode(val wire: String) {
     companion object {
         fun fromWire(value: String): NotificationPrivacyMode? =
             entries.firstOrNull { it.wire == value }
+
+        /** Return the more restrictive of two source-side disclosure modes. */
+        fun mostRestrictive(
+            first: NotificationPrivacyMode,
+            second: NotificationPrivacyMode,
+        ): NotificationPrivacyMode =
+            if (first.ordinal >= second.ordinal) first else second
     }
 }
 
@@ -26,11 +33,14 @@ enum class NotificationPrivacyMode(val wire: String) {
  * - SHOW_FULL: unchanged.
  * - HIDE_BODY: keep package + title for routing/recognition; drop body and reply
  *   actions (a reply action label can itself leak content).
+ * - disabled mirroring: suppress posted/updated/snapshot payloads; the sender
+ *   first removes keys it had already mirrored.
  * - EXISTS_ONLY: keep only routing/identity fields (sbnKey, packageName,
  *   clearable, ongoing) needed for update/remove; drop title, body, category, and
  *   reply actions.
  */
 data class NotificationPrivacyPolicy(
+    val isMirroringEnabled: Boolean = true,
     val defaultMode: NotificationPrivacyMode = NotificationPrivacyMode.SHOW_FULL,
     val perPackageModes: Map<String, NotificationPrivacyMode> = emptyMap(),
 ) {
@@ -48,6 +58,32 @@ data class NotificationPrivacyPolicy(
                 replyActions = emptyList(),
             )
         }
+
+    /**
+     * Compose the Mac-selected policy with the phone owner's global privacy
+     * floor. A remote peer may make a package more private, but can never make
+     * it less private than the mode selected on this Android device.
+     */
+    fun restrictedBy(localFloor: NotificationPrivacyMode): NotificationPrivacyPolicy =
+        NotificationPrivacyPolicy(
+            isMirroringEnabled = isMirroringEnabled,
+            defaultMode = NotificationPrivacyMode.mostRestrictive(defaultMode, localFloor),
+            perPackageModes = perPackageModes.mapValues { (_, mode) ->
+                NotificationPrivacyMode.mostRestrictive(mode, localFloor)
+            },
+        )
+}
+
+/** Minimal content-free acknowledgement for a successfully applied policy. */
+object NotificationPrivacyPolicyResult {
+    fun payload(regarding: String, localFloor: NotificationPrivacyMode): Json.Obj {
+        require(regarding.isNotBlank()) { "regarding must not be blank" }
+        return Json.obj(
+            "regarding" to Json.Str(regarding),
+            "applied" to Json.Bool(true),
+            "localFloor" to Json.Str(localFloor.wire),
+        )
+    }
 }
 
 /**
@@ -56,17 +92,31 @@ data class NotificationPrivacyPolicy(
  * per-package entry throws [IllegalArgumentException], which the session turns
  * into a `protocol/invalid-envelope` error rather than silently mis-filtering.
  *
- * Wire shape: `{ "defaultMode": "<mode>", "perPackageModes": [ { "packageName": "..", "mode": "<mode>" } ] }`.
+ * Wire shape: `{ "mirroringEnabled": bool, "defaultMode": "<mode>", "perPackageModes": [ { "packageName": "..", "mode": "<mode>" } ] }`.
+ * `mirroringEnabled` is optional and defaults true for earlier senders.
  */
 object NotificationPrivacyPolicyHandler {
     fun parse(payload: Json.Obj): NotificationPrivacyPolicy {
+        val allowedFields = setOf("mirroringEnabled", "defaultMode", "perPackageModes")
+        val unknownFields = payload.entries.keys - allowedFields
+        require(unknownFields.isEmpty()) { "unknown policy fields: ${unknownFields.sorted()}" }
+        val isMirroringEnabled = if (!payload.entries.containsKey("mirroringEnabled")) {
+            true
+        } else {
+            (payload["mirroringEnabled"] as? Json.Bool)?.value
+                ?: throw IllegalArgumentException("mirroringEnabled must be a boolean")
+        }
         val defaultMode = mode(payload["defaultMode"], "defaultMode")
         val perPackage = linkedMapOf<String, NotificationPrivacyMode>()
         when (val raw = payload["perPackageModes"]) {
-            null, is Json.Null -> Unit
+            null -> Unit
             is Json.Arr -> for (item in raw.items) {
                 val obj = item as? Json.Obj
                     ?: throw IllegalArgumentException("perPackageModes entry must be an object")
+                val unknownEntryFields = obj.entries.keys - setOf("packageName", "mode")
+                require(unknownEntryFields.isEmpty()) {
+                    "unknown perPackageModes fields: ${unknownEntryFields.sorted()}"
+                }
                 val pkg = (obj["packageName"] as? Json.Str)?.value
                     ?: throw IllegalArgumentException("perPackageModes.packageName must be a string")
                 require(pkg.isNotBlank()) { "perPackageModes.packageName must not be blank" }
@@ -74,7 +124,7 @@ object NotificationPrivacyPolicyHandler {
             }
             else -> throw IllegalArgumentException("perPackageModes must be an array")
         }
-        return NotificationPrivacyPolicy(defaultMode, perPackage)
+        return NotificationPrivacyPolicy(isMirroringEnabled, defaultMode, perPackage)
     }
 
     private fun mode(value: Json?, field: String): NotificationPrivacyMode {
