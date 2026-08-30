@@ -156,6 +156,9 @@ struct SettingsDiagnosticsCard: View {
                         let applied = onRequestTraceIds(includeTraceIds)
                         if applied != includeTraceIds { includeTraceIds = applied }
                     }
+                    .accessibilityLabel(L("settings.diag.traceTitle"))
+                    .accessibilityHint(L("settings.diag.traceDetail"))
+                    .accessibilityIdentifier(HyphenAccessibilityID.diagnosticsTraceIDs)
             }
             .padding(.vertical, 11)
             .padding(.horizontal, 13)
@@ -181,13 +184,18 @@ struct SettingsDiagnosticsCard: View {
             .background(p.surface2)
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(p.hair, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 9))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(L("settings.diag.previewLabel"))
+            .accessibilityIdentifier(HyphenAccessibilityID.diagnosticsPreview)
 
             // Actions: export (accent) + delete (hairline).
             HStack(spacing: 9) {
                 Button(L("settings.diag.export"), action: onExport)
                     .buttonStyle(SettingsCompactAccentButtonStyle())
+                    .accessibilityIdentifier(HyphenAccessibilityID.diagnosticsExport)
                 Button(L("settings.diag.delete"), action: onDelete)
                     .buttonStyle(SettingsHairlineButtonStyle())
+                    .accessibilityIdentifier(HyphenAccessibilityID.diagnosticsDelete)
             }
         }
         .padding(18)

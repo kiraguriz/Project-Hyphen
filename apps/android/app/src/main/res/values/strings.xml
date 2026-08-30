@@ -5,6 +5,7 @@
      sizes, timestamps) is not localized; only user-facing chrome is. -->
 <resources>
     <string name="app_name">Hyphen</string>
+    <string name="notification_listener_service_label">Hyphen 通知镜像</string>
     <string name="brand_tagline">本地优先 · 可审计 · Mac × Android 持续连接层</string>
 
     <!-- 首次使用与连接恢复 -->
@@ -17,6 +18,7 @@
     <string name="first_use_camera_detail">在 Mac 上显示配对二维码。如果本机相机支持自定义链接识别，请点按 hyphen://pair 结果返回这里。不同设备的相机支持可能不同。</string>
     <string name="first_use_paste_step">2 · 或粘贴配对载荷</string>
     <string name="first_use_paste_detail">粘贴完整配对链接，或 Mac 显示的地址与 nonce。两条路径使用同一套严格解析器。</string>
+    <string name="first_use_pairing_payload_label">配对链接或地址</string>
     <string name="first_use_paste_action">校验并配对</string>
     <string name="first_use_sas_step">3 · 对比两端配对码</string>
     <string name="first_use_sas_detail">只有手机和 Mac 的六位数字完全一致时才信任。两端都确认后才会保存信任。</string>
@@ -56,6 +58,7 @@
     <string name="feed_yesterday">昨天</string>
     <string name="feed_date_month_day">%1$d月%2$d日</string>
     <string name="field_send_hint">发送文本或链接到 Mac…</string>
+    <string name="field_send_label">发送到 Mac 的文本或链接</string>
     <string name="btn_send_text">发送文本 / 链接</string>
     <string name="btn_send_file">发送文件</string>
     <string name="btn_cancel_transfer">取消当前传输</string>
@@ -120,6 +123,7 @@
     <string name="perm_manual_title">手动配对</string>
     <string name="perm_manual_detail">粘贴 host:port 或 hyphen://pair 载荷，走同一条校验链路。</string>
     <string name="perm_manual_hint">host:port 或 hyphen://pair</string>
+    <string name="perm_manual_label">配对链接或手动地址</string>
     <string name="perm_btn_manual_connect">手动连接 / 解析二维码</string>
     <string name="perm_cdm_title">系统关联</string>
     <string name="perm_cdm_detail">系统伴侣设备管理器自管理关联。</string>

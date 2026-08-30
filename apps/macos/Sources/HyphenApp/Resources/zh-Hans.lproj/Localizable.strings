@@ -114,6 +114,7 @@
 "settings.diag.export" = "导出诊断包";
 "settings.diag.delete" = "删除日志";
 "settings.diag.previewUnavailable" = "诊断预览暂不可用。";
+"settings.diag.previewLabel" = "已脱敏的诊断预览";
 
 /* Notification privacy modes */
 "privacy.full" = "完整";

@@ -2,6 +2,8 @@
 <!-- English overlay (frontend UX plan B4). Mirrors every user-facing key in the
      default zh resources; keep both files in sync when copy changes. -->
 <resources>
+    <string name="app_name">Hyphen</string>
+    <string name="notification_listener_service_label">Hyphen notification mirror</string>
     <string name="brand_tagline">Local-first · Auditable · Continuous Mac × Android link</string>
 
     <!-- First use and connection recovery -->
@@ -14,6 +16,7 @@
     <string name="first_use_camera_detail">Show the pairing QR on the Mac. If your camera recognizes custom links, tap the hyphen://pair result to return here. Camera support varies by device.</string>
     <string name="first_use_paste_step">2 · Or paste the pairing payload</string>
     <string name="first_use_paste_detail">Paste the complete pairing link, or the address and nonce shown by the Mac. Both paths use the same strict parser.</string>
+    <string name="first_use_pairing_payload_label">Pairing link or address</string>
     <string name="first_use_paste_action">Validate and pair</string>
     <string name="first_use_sas_step">3 · Compare both pairing codes</string>
     <string name="first_use_sas_detail">Trust only if the six-digit code is identical on the phone and Mac. Both devices must confirm before trust is saved.</string>
@@ -53,6 +56,7 @@
     <string name="feed_yesterday">Yesterday</string>
     <string name="feed_date_month_day">%1$d/%2$d</string>
     <string name="field_send_hint">Send text or a link to the Mac…</string>
+    <string name="field_send_label">Text or link to send to the Mac</string>
     <string name="btn_send_text">Send text / link</string>
     <string name="btn_send_file">Send file</string>
     <string name="btn_cancel_transfer">Cancel current transfer</string>
@@ -117,6 +121,7 @@
     <string name="perm_manual_title">Manual pairing</string>
     <string name="perm_manual_detail">Paste a host:port or hyphen://pair payload through the same verification path.</string>
     <string name="perm_manual_hint">host:port or hyphen://pair</string>
+    <string name="perm_manual_label">Pairing link or manual address</string>
     <string name="perm_btn_manual_connect">Connect / parse QR</string>
     <string name="perm_cdm_title">System association</string>
     <string name="perm_cdm_detail">Self-managed Companion Device Manager association.</string>

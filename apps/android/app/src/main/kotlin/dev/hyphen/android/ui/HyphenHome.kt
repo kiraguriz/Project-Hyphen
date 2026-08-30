@@ -22,8 +22,9 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -35,7 +36,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -150,6 +150,7 @@ private fun FirstUseOnboardingCard(actions: HyphenActions) {
         HyphenTextField(
             value = payload,
             onValueChange = { payload = it },
+            label = stringResource(R.string.first_use_pairing_payload_label),
             hint = stringResource(R.string.perm_manual_hint),
             enabled = true,
             onSend = { if (payload.isNotBlank()) actions.onManualConnect(payload) },
@@ -345,6 +346,7 @@ private fun TimelineCard(
         Spacer(Modifier.height(10.dp))
         HyphenTextField(
             value = draft, onValueChange = { draft = it },
+            label = stringResource(R.string.field_send_label),
             hint = stringResource(R.string.field_send_hint), enabled = connected,
             onSend = { if (draft.isNotBlank()) { actions.onSendText(draft); draft = "" } },
         )
@@ -589,7 +591,13 @@ private fun PermissionsCard(companionEnabled: Boolean, actions: HyphenActions) {
             control = null,
         )
         Spacer(Modifier.height(10.dp))
-        HyphenTextField(value = endpoint, onValueChange = { endpoint = it }, hint = stringResource(R.string.perm_manual_hint), enabled = true)
+        HyphenTextField(
+            value = endpoint,
+            onValueChange = { endpoint = it },
+            label = stringResource(R.string.perm_manual_label),
+            hint = stringResource(R.string.perm_manual_hint),
+            enabled = true,
+        )
         Spacer(Modifier.height(10.dp))
         HyphenButton(stringResource(R.string.perm_btn_manual_connect), modifier = Modifier.fillMaxWidth()) { actions.onManualConnect(endpoint) }
         Spacer(Modifier.height(10.dp))
@@ -793,30 +801,45 @@ private fun HyphenButton(
 private fun HyphenTextField(
     value: String,
     onValueChange: (String) -> Unit,
+    label: String,
     hint: String,
     enabled: Boolean = true,
     onSend: (() -> Unit)? = null,
 ) {
     val p = HyphenTheme.palette
-    Box(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(14.dp))
-            .background(p.surface2).border(1.dp, p.hair, RoundedCornerShape(14.dp))
-            .padding(horizontal = 13.dp, vertical = 13.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        if (value.isEmpty()) Text(hint, color = p.dim, fontSize = 14.sp)
-        BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
-            enabled = enabled,
-            singleLine = true,
-            textStyle = androidx.compose.ui.text.TextStyle(color = p.text, fontSize = 14.sp),
-            cursorBrush = SolidColor(p.accent),
-            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { onSend?.invoke() }),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = if (onSend != null) ImeAction.Send else ImeAction.Done),
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        singleLine = true,
+        label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+        placeholder = { Text(hint, fontSize = 14.sp) },
+        textStyle = androidx.compose.ui.text.TextStyle(color = p.text, fontSize = 14.sp),
+        shape = RoundedCornerShape(14.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = p.text,
+            unfocusedTextColor = p.text,
+            disabledTextColor = p.dim,
+            cursorColor = p.accent,
+            focusedContainerColor = p.surface2,
+            unfocusedContainerColor = p.surface2,
+            disabledContainerColor = p.surface2,
+            focusedBorderColor = p.hair,
+            unfocusedBorderColor = p.hair,
+            disabledBorderColor = p.hair.copy(alpha = 0.55f),
+            focusedLabelColor = p.faint,
+            unfocusedLabelColor = p.faint,
+            disabledLabelColor = p.faint.copy(alpha = 0.55f),
+            focusedPlaceholderColor = p.dim,
+            unfocusedPlaceholderColor = p.dim,
+            disabledPlaceholderColor = p.dim.copy(alpha = 0.55f),
+        ),
+        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { onSend?.invoke() }),
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+            imeAction = if (onSend != null) ImeAction.Send else ImeAction.Done,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 // MARK: - Previews

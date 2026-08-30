@@ -112,6 +112,7 @@
 "settings.diag.export" = "Export bundle";
 "settings.diag.delete" = "Delete logs";
 "settings.diag.previewUnavailable" = "Diagnostics preview unavailable.";
+"settings.diag.previewLabel" = "Redacted diagnostics preview";
 
 /* Notification privacy modes */
 "privacy.full" = "Full";

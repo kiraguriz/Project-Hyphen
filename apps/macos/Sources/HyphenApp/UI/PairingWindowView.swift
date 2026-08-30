@@ -122,6 +122,9 @@ struct PairingWindowView: View {
     private var leftColumn: some View {
         VStack(spacing: 14) {
             PairingQRCodeView(payload: qrPayload, size: 132)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(L("pairing.scanOnPhone"))
+                .accessibilityIdentifier(HyphenAccessibilityID.pairingQRCode)
             VStack(spacing: 3) {
                 Text(L("pairing.scanOnPhone"))
                     .font(.hyphenBody(11))
@@ -135,12 +138,16 @@ struct PairingWindowView: View {
                     Text(L("pairing.manualEntry"))
                         .font(.hyphenBody(11))
                         .foregroundColor(p.faint)
+                        .accessibilityHidden(true)
                     Text(manualPairingPayload)
                         .font(.hyphenMono(10))
                         .foregroundColor(p.dim)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(L("pairing.manualEntry"))
+                        .accessibilityValue(manualPairingPayload)
+                        .accessibilityIdentifier(HyphenAccessibilityID.pairingManualPayload)
                 }
             }
         }
@@ -177,10 +184,12 @@ struct PairingWindowView: View {
                 Button(L("pairing.match"), action: onConfirm)
                     .buttonStyle(AccentButtonStyle())
                     .disabled(!awaitingConfirmation)
+                    .accessibilityIdentifier(HyphenAccessibilityID.pairingConfirm)
                 Button(L("pairing.mismatch"), action: onReject)
                     .buttonStyle(DangerTextButtonStyle())
                     .fixedSize()
                     .disabled(!awaitingConfirmation)
+                    .accessibilityIdentifier(HyphenAccessibilityID.pairingReject)
             }
         }
         .padding(22)
@@ -211,6 +220,10 @@ struct PairingWindowView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 11))
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L("pairing.confirmTitle"))
+        .accessibilityValue(sasCodes.joined(separator: " "))
+        .accessibilityIdentifier(HyphenAccessibilityID.pairingSAS)
     }
 
     private var peerRow: some View {
