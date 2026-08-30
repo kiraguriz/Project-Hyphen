@@ -88,6 +88,7 @@ struct SettingsWindowView: View {
     // paired — the 设备 pane then shows a placeholder instead of a fake device.
     private let deviceName: String?
     private let fingerprint: String?
+    private let diagnosticsPreview: String
     private let onClose: () -> Void
     private let onRevokeTrust: () -> Void
     private let onRenameDevice: () -> Void
@@ -106,6 +107,7 @@ struct SettingsWindowView: View {
         defaultMode: NotificationPrivacyMode = SettingsAppPrivacyRow.defaultModeForOtherApps,
         deviceName: String? = "Pixel 8 Pro",
         fingerprint: String? = "3A:9F:C2:7E:5D:…:A1:E2",
+        diagnosticsPreview: String = L("settings.diag.previewUnavailable"),
         includeTraceIds: Bool = false,
         onClose: @escaping () -> Void = {},
         onRevokeTrust: @escaping () -> Void = {},
@@ -123,6 +125,7 @@ struct SettingsWindowView: View {
         self._includeTraceIds = State(initialValue: includeTraceIds)
         self.deviceName = deviceName
         self.fingerprint = fingerprint
+        self.diagnosticsPreview = diagnosticsPreview
         self.onClose = onClose
         self.onRevokeTrust = onRevokeTrust
         self.onRenameDevice = onRenameDevice
@@ -180,6 +183,7 @@ struct SettingsWindowView: View {
         case .diagnostics:
             cardPane {
                 SettingsDiagnosticsCard(
+                    previewText: diagnosticsPreview,
                     includeTraceIds: $includeTraceIds,
                     onExport: onExportDiagnostics,
                     onDelete: onDeleteDiagnostics,

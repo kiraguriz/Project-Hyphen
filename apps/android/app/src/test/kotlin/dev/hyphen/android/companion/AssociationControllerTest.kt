@@ -83,9 +83,16 @@ class AssociationControllerTest {
     }
 
     @Test
-    fun `disassociate forwards and reports removal on api 33`() {
+    fun `prepared disassociation does nothing until explicit confirmation`() {
         val backend = FakeCdmBackend(sdk = 33)
-        controller(backend).disassociate(7)
+        backend.ids = listOf(7)
+
+        val request = controller(backend).prepareDisassociation(7)!!
+
+        assertTrue(backend.disassociated.isEmpty())
+        assertTrue(events.filterIsInstance<AssociationEvent.Removed>().isEmpty())
+
+        assertTrue(request.confirm())
         assertEquals(listOf(7), backend.disassociated)
         assertEquals(
             AssociationEvent.Removed(7),
@@ -94,9 +101,64 @@ class AssociationControllerTest {
     }
 
     @Test
-    fun `disassociate below api 33 is unsupported`() {
+    fun `prepared disassociation is one shot`() {
+        val backend = FakeCdmBackend(sdk = 33).apply { ids = listOf(7) }
+        val request = controller(backend).prepareDisassociation(7)!!
+
+        assertTrue(request.confirm())
+        assertTrue(!request.confirm())
+        assertTrue(!request.cancel())
+        assertEquals(listOf(7), backend.disassociated)
+        assertEquals(1, events.filterIsInstance<AssociationEvent.Removed>().size)
+    }
+
+    @Test
+    fun `cancelled disassociation cannot later be confirmed`() {
+        val backend = FakeCdmBackend(sdk = 33).apply { ids = listOf(7) }
+        val request = controller(backend).prepareDisassociation(7)!!
+
+        assertTrue(request.cancel())
+        assertTrue(!request.confirm())
+        assertTrue(backend.disassociated.isEmpty())
+        assertTrue(events.filterIsInstance<AssociationEvent.Removed>().isEmpty())
+    }
+
+    @Test
+    fun `association disappearing after confirmation prompt is not reported removed`() {
+        val backend = FakeCdmBackend(sdk = 33).apply { ids = listOf(7) }
+        val request = controller(backend).prepareDisassociation(7)!!
+        backend.ids = emptyList()
+
+        assertTrue(request.confirm())
+
+        assertTrue(backend.disassociated.isEmpty())
+        assertTrue(events.filterIsInstance<AssociationEvent.Removed>().isEmpty())
+        assertEquals(
+            AssociationEvent.Failed("association 7 is no longer present"),
+            events.filterIsInstance<AssociationEvent.Failed>().single(),
+        )
+    }
+
+    @Test
+    fun `cannot prepare removal for an association that is no longer present`() {
+        val backend = FakeCdmBackend(sdk = 33).apply { ids = listOf(8) }
+
+        val request = controller(backend).prepareDisassociation(7)
+
+        assertEquals(null, request)
+        assertTrue(backend.disassociated.isEmpty())
+        assertEquals(
+            AssociationEvent.Failed("association 7 is no longer present"),
+            events.filterIsInstance<AssociationEvent.Failed>().single(),
+        )
+    }
+
+    @Test
+    fun `prepare disassociation below api 33 is unsupported`() {
         val backend = FakeCdmBackend(sdk = 30)
-        controller(backend).disassociate(7)
+        val request = controller(backend).prepareDisassociation(7)
+
+        assertEquals(null, request)
         assertTrue(backend.disassociated.isEmpty())
         assertEquals(listOf<AssociationEvent>(AssociationEvent.UnsupportedOnThisSdk), events)
     }

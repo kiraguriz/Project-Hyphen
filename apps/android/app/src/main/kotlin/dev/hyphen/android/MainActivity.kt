@@ -15,9 +15,9 @@ import androidx.activity.compose.setContent
 import android.app.AlertDialog
 import dev.hyphen.android.companion.AssociationController
 import dev.hyphen.android.companion.AssociationEvent
+import dev.hyphen.android.companion.AssociationRemovalRequest
 import dev.hyphen.android.companion.CdmAssociationBackend
-import dev.hyphen.android.diagnostics.DiagnosticProtocolSessionListener
-import dev.hyphen.android.diagnostics.LocalStructuredLogStore
+import dev.hyphen.android.diagnostics.DiagnosticsRuntime
 import dev.hyphen.android.diagnostics.RedactedDiagnosticsExporter
 import dev.hyphen.android.discovery.AndroidMulticastLockHandle
 import dev.hyphen.android.discovery.AndroidNsdBackend
@@ -96,7 +96,10 @@ class MainActivity : ComponentActivity() {
     private var discoveryActive = false
     private val supervisor by lazy { ConnectionSupervisor.getInstance(this) }
     private val textReceiver = TextLinkReceiver()
-    private val diagnosticLogs = LocalStructuredLogStore()
+    private val diagnosticLogs = DiagnosticsRuntime.forActivityActions()
+    private val associationController by lazy {
+        AssociationController(CdmAssociationBackend(this), ::renderCdm)
+    }
     private var lastTransferProgress: TransferProgress? = null
     // Empty until events arrive; the empty log card renders the localized
     // R.string.log_empty placeholder instead of a hardcoded seed line.
@@ -145,13 +148,8 @@ class MainActivity : ComponentActivity() {
         HyphenActions(
             onFindMac = { startWindow() },
             onManualConnect = { probeManualEndpoint(it) },
-            onCreateAssociation = { cdmController().associate("Hyphen Mac") },
-            onListAssociations = {
-                val controller = cdmController()
-                val ids = controller.associations()
-                append("associations: $ids")
-                ids.forEach(controller::disassociate)
-            },
+            onCreateAssociation = { associationController.associate("Hyphen Mac") },
+            onListAssociations = { showAssociations() },
             onManagePeers = { showPeerManagement() },
             onCheckNotificationAccess = {
                 append(notificationAccessLine())
@@ -167,9 +165,6 @@ class MainActivity : ComponentActivity() {
             onExportDiagnostics = { exportDiagnostics() },
             onDeleteDiagnostics = { deleteDiagnostics() },
         )
-
-    private fun cdmController(): AssociationController =
-        AssociationController(CdmAssociationBackend(this), ::renderCdm)
 
     /** Push the current pairing identity into the model (launch / forget / reset). */
     private fun refreshPairingState() {
@@ -296,6 +291,47 @@ class MainActivity : ComponentActivity() {
             AssociationEvent.UnsupportedOnThisSdk ->
                 append("cdm: self-managed association needs API 33+ (QR-only on this device)")
         }
+    }
+
+    private fun showAssociations() {
+        val ids = associationController.associations()
+        append("associations: $ids")
+        if (ids.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.dlg_assoc_title)
+                .setMessage(R.string.dlg_assoc_empty_msg)
+                .setPositiveButton(R.string.dlg_ok, null)
+                .show()
+            return
+        }
+
+        val labels = ids.map { getString(R.string.dlg_assoc_item, it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dlg_assoc_title)
+            .setItems(labels) { _, which -> confirmRemoveAssociation(ids[which]) }
+            .setNegativeButton(R.string.dlg_close, null)
+            .show()
+    }
+
+    private fun confirmRemoveAssociation(associationId: Int) {
+        val request = associationController.prepareDisassociation(associationId) ?: return
+        showAssociationRemovalConfirmation(request)
+    }
+
+    private fun showAssociationRemovalConfirmation(request: AssociationRemovalRequest) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.dlg_assoc_remove_title, request.associationId))
+            .setMessage(R.string.dlg_assoc_remove_msg)
+            .setPositiveButton(R.string.dlg_assoc_remove_confirm) { _, _ -> request.confirm() }
+            .setNegativeButton(R.string.dlg_cancel) { _, _ ->
+                request.cancel()
+                append("cdm removal cancelled: id=${request.associationId}")
+            }
+            .setOnCancelListener {
+                request.cancel()
+                append("cdm removal cancelled: id=${request.associationId}")
+            }
+            .show()
     }
 
     private fun showPeerManagement() {

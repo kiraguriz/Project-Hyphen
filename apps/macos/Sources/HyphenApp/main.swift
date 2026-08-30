@@ -301,6 +301,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defaultMode: notificationDefaultMode(),
             deviceName: peer.map { $0.displayName.isEmpty ? L("conn.pairedFallback") : $0.displayName },
             fingerprint: peer.map { HyphenFingerprintDisplay.string(for: $0.spkiFingerprint, style: .shortPrefix) },
+            diagnosticsPreview: SettingsDiagnosticsPreview.load(
+                fallback: L("settings.diag.previewUnavailable"),
+                generate: { try diagnosticsExporter().previewJSON() }
+            ),
             includeTraceIds: betaDiagnosticsEnabled(),
             onClose: onClose,
             onRevokeTrust: { [weak self] in
@@ -737,6 +741,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let count = diagnosticLogs.snapshot().count
         diagnosticsExporter().deleteLocalDiagnostics()
         stateItem.title = "Diagnostics deleted (\(count) event(s))"
+        refreshSettingsWindow()
     }
 
     @objc private func toggleBetaDiagnostics(_ sender: NSMenuItem) {

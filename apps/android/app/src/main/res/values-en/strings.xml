@@ -106,7 +106,7 @@
     <string name="diag_title">Local redacted diagnostics</string>
     <string name="diag_subtitle">Stored locally and redacted by default. No telemetry, no auto-upload.</string>
     <string name="diag_trace_title">Trace IDs</string>
-    <string name="diag_trace_detail">Opt-in; written only to diagnostics you export yourself.</string>
+    <string name="diag_trace_detail">Opt-in; shown in local previews and diagnostics you export yourself.</string>
     <string name="diag_trace_badge">Auditable</string>
     <string name="diag_btn_beta">Beta diagnostics: %1$s</string>
     <string name="diag_beta_on">On</string>
@@ -135,6 +135,14 @@
     <string name="dlg_reset_title">Reset paired devices?</string>
     <string name="dlg_reset_msg">This removes %1$d trusted peer(s). Pair again before any device can reconnect.</string>
     <string name="dlg_reset_confirm">Reset</string>
+
+    <!-- Dialogs: system companion associations -->
+    <string name="dlg_assoc_title">System associations</string>
+    <string name="dlg_assoc_empty_msg">This device has no Hyphen system companion associations.</string>
+    <string name="dlg_assoc_item">Association #%1$d</string>
+    <string name="dlg_assoc_remove_title">Remove association #%1$d?</string>
+    <string name="dlg_assoc_remove_msg">This only removes Android\'s system companion association. Manage Hyphen\'s pinned peer trust separately under Paired devices.</string>
+    <string name="dlg_assoc_remove_confirm">Remove association</string>
 
     <!-- Dialogs: SAS pairing -->
     <string name="dlg_sas_title">Confirm pairing code</string>

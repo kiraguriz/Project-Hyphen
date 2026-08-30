@@ -90,9 +90,16 @@ struct SettingsDeviceTrustCard: View {
 
 // MARK: - Diagnostics card
 
+enum SettingsDiagnosticsPreview {
+    static func load(fallback: String, generate: () throws -> String) -> String {
+        (try? generate()) ?? fallback
+    }
+}
+
 /// Diagnostics card: local-and-redacted-by-default subtitle, a trace-ID opt-in
 /// toggle row (off by default), a redacted mono log preview, and export/delete.
 struct SettingsDiagnosticsCard: View {
+    var previewText: String
     var onExport: () -> Void
     var onDelete: () -> Void
     /// Applies the requested trace-ID opt-in behind the host's consent gate and
@@ -104,11 +111,13 @@ struct SettingsDiagnosticsCard: View {
     @Environment(\.hyphenPalette) private var p
 
     init(
+        previewText: String = L("settings.diag.previewUnavailable"),
         includeTraceIds: Binding<Bool> = .constant(false),
         onExport: @escaping () -> Void = {},
         onDelete: @escaping () -> Void = {},
         onRequestTraceIds: @escaping (Bool) -> Bool = { $0 }
     ) {
+        self.previewText = previewText
         self._includeTraceIds = includeTraceIds
         self.onExport = onExport
         self.onDelete = onDelete
@@ -154,24 +163,19 @@ struct SettingsDiagnosticsCard: View {
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(p.hair, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            // Redacted log preview (verbatim, with [已脱敏]/xxx in accent).
-            VStack(alignment: .leading, spacing: 0) {
-                Text("pair.fail · code=TLS_PIN_MISMATCH")
+            // Live output from the same redacted exporter used by the menu-bar
+            // preview and export actions. The scroll view preserves the full
+            // auditable JSON instead of substituting design-fixture log lines.
+            ScrollView([.horizontal, .vertical]) {
+                Text(previewText)
                     .foregroundColor(p.dim)
-                (
-                    Text("peer=").foregroundColor(p.dim)
-                    + Text(L("diag.redacted")).foregroundColor(p.accent)
-                    + Text(" ip=192.168.1.").foregroundColor(p.dim)
-                    + Text("xxx").foregroundColor(p.accent)
-                )
-                (
-                    Text("notif.body=").foregroundColor(p.dim)
-                    + Text(L("diag.redacted")).foregroundColor(p.accent)
-                )
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: true)
             }
             .font(.hyphenMono(10.5))
             .lineSpacing(10.5 * 0.65)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 72)
             .padding(.vertical, 10)
             .padding(.horizontal, 11)
             .background(p.surface2)

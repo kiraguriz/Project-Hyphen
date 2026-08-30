@@ -92,9 +92,10 @@
 "settings.trust.revoke" = "Revoke trust";
 "settings.diag.subtitle" = "Stored locally and redacted by default. No telemetry, no upload.";
 "settings.diag.traceTitle" = "Include trace IDs";
-"settings.diag.traceDetail" = "Opt-in · for exports only";
+"settings.diag.traceDetail" = "Opt-in · shown in local previews and user-triggered exports";
 "settings.diag.export" = "Export bundle";
 "settings.diag.delete" = "Delete logs";
+"settings.diag.previewUnavailable" = "Diagnostics preview unavailable.";
 
 /* Notification privacy modes */
 "privacy.full" = "Full";

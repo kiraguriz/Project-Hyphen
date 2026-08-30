@@ -34,6 +34,35 @@ interface CdmCallbacks {
     fun onFailure(message: String)
 }
 
+/**
+ * One-shot user decision for a destructive CDM operation.
+ *
+ * Merely listing or selecting an association never removes it. The Activity
+ * must present its own confirmation UI and then call exactly one of [confirm]
+ * or [cancel]. Repeated/stale callbacks are harmless.
+ */
+class AssociationRemovalRequest internal constructor(
+    val associationId: Int,
+    private val onConfirm: (Int) -> Unit,
+) {
+    private var consumed = false
+
+    @Synchronized
+    fun confirm(): Boolean {
+        if (consumed) return false
+        consumed = true
+        onConfirm(associationId)
+        return true
+    }
+
+    @Synchronized
+    fun cancel(): Boolean {
+        if (consumed) return false
+        consumed = true
+        return true
+    }
+}
+
 class AssociationController(
     private val backend: CdmBackend,
     private val onEvent: (AssociationEvent) -> Unit,
@@ -63,16 +92,36 @@ class AssociationController(
         backend.requestSelfManagedAssociation(displayName, callbacks)
     }
 
-    fun disassociate(associationId: Int) {
+    fun prepareDisassociation(associationId: Int): AssociationRemovalRequest? {
         if (!supported()) {
             onEvent(AssociationEvent.UnsupportedOnThisSdk)
-            return
+            return null
         }
-        backend.disassociate(associationId)
-        onEvent(AssociationEvent.Removed(associationId))
+        if (associationId !in backend.listAssociationIds()) {
+            onEvent(AssociationEvent.Failed("association $associationId is no longer present"))
+            return null
+        }
+        return AssociationRemovalRequest(associationId, ::removeAssociation)
     }
 
     fun associations(): List<Int> = if (supported()) backend.listAssociationIds() else emptyList()
+
+    private fun removeAssociation(associationId: Int) {
+        try {
+            if (associationId !in backend.listAssociationIds()) {
+                onEvent(AssociationEvent.Failed("association $associationId is no longer present"))
+                return
+            }
+            backend.disassociate(associationId)
+            onEvent(AssociationEvent.Removed(associationId))
+        } catch (error: RuntimeException) {
+            onEvent(
+                AssociationEvent.Failed(
+                    "association $associationId removal failed: ${error.message ?: "unknown error"}",
+                ),
+            )
+        }
+    }
 
     companion object {
         /** setSelfManaged(true) exists from API 33. */

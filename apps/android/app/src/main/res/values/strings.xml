@@ -109,7 +109,7 @@
     <string name="diag_title">本地脱敏诊断</string>
     <string name="diag_subtitle">默认本地保存并脱敏。无遥测、不自动上传。</string>
     <string name="diag_trace_title">跟踪 ID</string>
-    <string name="diag_trace_detail">选择加入；仅写入用户主动导出的诊断包。</string>
+    <string name="diag_trace_detail">选择加入；显示于本地预览和用户主动导出的诊断包。</string>
     <string name="diag_trace_badge">可审计</string>
     <string name="diag_btn_beta">Beta 诊断：%1$s</string>
     <string name="diag_beta_on">开启</string>
@@ -138,6 +138,14 @@
     <string name="dlg_reset_title">重置已配对设备？</string>
     <string name="dlg_reset_msg">这将移除 %1$d 个受信任的设备。需重新配对后任意设备才能再次连接。</string>
     <string name="dlg_reset_confirm">重置</string>
+
+    <!-- Dialogs: system companion associations -->
+    <string name="dlg_assoc_title">系统关联</string>
+    <string name="dlg_assoc_empty_msg">本机没有 Hyphen 的系统伴侣关联。</string>
+    <string name="dlg_assoc_item">关联 #%1$d</string>
+    <string name="dlg_assoc_remove_title">移除关联 #%1$d？</string>
+    <string name="dlg_assoc_remove_msg">这只会移除 Android 的系统伴侣关联。Hyphen 固定的设备信任需在“已配对设备”中单独管理。</string>
+    <string name="dlg_assoc_remove_confirm">移除关联</string>
 
     <!-- Dialogs: SAS pairing -->
     <string name="dlg_sas_title">确认配对码</string>

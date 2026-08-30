@@ -94,9 +94,10 @@
 "settings.trust.revoke" = "撤销信任";
 "settings.diag.subtitle" = "默认本地保存并脱敏。无遥测、不上传。";
 "settings.diag.traceTitle" = "包含跟踪 ID";
-"settings.diag.traceDetail" = "选择加入 · 仅用于导出";
+"settings.diag.traceDetail" = "选择加入 · 显示于本地预览和用户主动导出";
 "settings.diag.export" = "导出诊断包";
 "settings.diag.delete" = "删除日志";
+"settings.diag.previewUnavailable" = "诊断预览暂不可用。";
 
 /* Notification privacy modes */
 "privacy.full" = "完整";

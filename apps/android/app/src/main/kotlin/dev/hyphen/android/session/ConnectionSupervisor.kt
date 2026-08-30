@@ -3,6 +3,7 @@ package dev.hyphen.android.session
 import android.content.Context
 import android.os.Build
 import dev.hyphen.android.diagnostics.DiagnosticProtocolSessionListener
+import dev.hyphen.android.diagnostics.DiagnosticsRuntime
 import dev.hyphen.android.diagnostics.LocalStructuredLogStore
 import dev.hyphen.android.notifications.HyphenNotificationListenerRuntime
 import dev.hyphen.android.notifications.NotificationCapabilityGate
@@ -435,7 +436,7 @@ class ConnectionSupervisor private constructor(
             instance ?: synchronized(this) {
                 instance ?: ConnectionSupervisor(
                     appContext = context.applicationContext,
-                    diagnosticLogs = LocalStructuredLogStore(),
+                    diagnosticLogs = DiagnosticsRuntime.forSessionSupervisor(),
                 ).also { instance = it }
             }
     }
