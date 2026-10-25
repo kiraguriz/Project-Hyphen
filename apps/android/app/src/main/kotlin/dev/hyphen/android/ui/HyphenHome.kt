@@ -747,7 +747,16 @@ private fun StatusRow(title: String, detail: String, badge: String?, control: (@
     ) {
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = p.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                // The badge keeps its intrinsic width; a long title wraps instead.
+                // Otherwise a wide control squeezes the badge until it breaks
+                // one letter per line (observed on the Android 17 emulator).
+                Text(
+                    title,
+                    color = p.text,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
                 if (badge != null) {
                     Spacer(Modifier.width(8.dp))
                     Pill(badge)
@@ -768,7 +777,7 @@ private fun Pill(text: String) {
     val p = HyphenTheme.palette
     Box(
         Modifier.clip(RoundedCornerShape(6.dp)).background(p.accent).padding(horizontal = 7.dp, vertical = 2.dp),
-    ) { Text(text, color = p.accentInk, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+    ) { Text(text, color = p.accentInk, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) }
 }
 
 @Composable

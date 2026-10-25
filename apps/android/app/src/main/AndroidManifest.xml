@@ -18,6 +18,17 @@
 
     <!-- Self-managed CDM association, API 33+ (ADR-0003 §6, HYP-M1-007). -->
     <uses-permission android:name="android.permission.REQUEST_COMPANION_SELF_MANAGED" />
+
+    <!-- Package visibility (Android 11+): without this declaration
+         resolveActivity() returns null for the system camera even when one is
+         installed, so the dependency-free QR handoff would always fall back to
+         paste. No camera permission is requested; this only lets the app see
+         which app handles the still-image camera action. -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.STILL_IMAGE_CAMERA" />
+        </intent>
+    </queries>
     <uses-feature
         android:name="android.software.companion_device_setup"
         android:required="false" />
